@@ -1245,24 +1245,7 @@ body {
     </div>
   </div>
 
-  <!-- Section 4: Schema -->
-  <div class="section-card" id="schemaSection">
-    <button class="collapsible-toggle" id="schemaToggle">
-      <span class="toggle-arrow">&#9654;</span>
-      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      目标表结构
-      <span class="section-count" id="schemaCount"></span>
-    </button>
-    <div class="collapsible-body" id="schemaBody">
-      <div class="section-body" style="padding:0;">
-        <div style="overflow-x:auto;">
-          <table class="schema-table" id="schemaTable"></table>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Section 5: Steps -->
+  <!-- Section 4: Steps -->
   <div class="section-card">
     <div class="section-header">
       <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
@@ -1706,72 +1689,8 @@ function renderLineage() {
 // ================================================================
 // Section 4: Render Schema Table
 // ================================================================
-var schemaSortCol = null;
-var schemaSortAsc = true;
-var schemaFieldsData = [];
-
-function renderSchema() {
-  schemaFieldsData = (REPORT_DATA.schema_fields || []).slice();
-  document.getElementById('schemaCount').textContent = '(' + schemaFieldsData.length + ' 字段)';
-  renderSchemaTable();
-}
-
-function renderSchemaTable() {
-  var data = schemaFieldsData.slice();
-
-  // Sort
-  if (schemaSortCol) {
-    data.sort(function(a, b) {
-      var va = (a[schemaSortCol] || '').toString().toLowerCase();
-      var vb = (b[schemaSortCol] || '').toString().toLowerCase();
-      if (va < vb) return schemaSortAsc ? -1 : 1;
-      if (va > vb) return schemaSortAsc ? 1 : -1;
-      return 0;
-    });
-  }
-
-  var html = '';
-  html += '<thead><tr>';
-  var cols = [
-    { key: 'name', label: '字段名', width: '25%' },
-    { key: 'type', label: '类型', width: '18%' },
-    { key: 'meaning', label: '业务含义', width: '37%' },
-    { key: 'transform_type', label: '加工类型', width: '20%' }
-  ];
-  cols.forEach(function(c) {
-    var sorted = schemaSortCol === c.key ? 'sorted' : '';
-    var indicator = schemaSortCol === c.key ? (schemaSortAsc ? ' &#9650;' : ' &#9660;') : ' &#9650;';
-    html += '<th class="' + sorted + '" style="width:' + c.width + '" onclick="sortSchema(\'' + c.key + '\')">';
-    html += c.label + '<span class="sort-indicator">' + indicator + '</span>';
-    html += '</th>';
-  });
-  html += '</tr></thead><tbody>';
-
-  data.forEach(function(f) {
-    html += '<tr onclick="openDetail(\'' + escapeHtml(f.name) + '\')">';
-    html += '<td><span class="field-name">' + escapeHtml(f.name) + '</span></td>';
-    html += '<td><span class="field-type">' + escapeHtml(f.type || '-') + '</span></td>';
-    html += '<td><span class="field-meaning">' + escapeHtml(f.meaning || '-') + '</span></td>';
-    html += '<td>' + tagHtml(f.transform_type) + '</td>';
-    html += '</tr>';
-  });
-
-  html += '</tbody>';
-  document.getElementById('schemaTable').innerHTML = html;
-}
-
-function sortSchema(col) {
-  if (schemaSortCol === col) {
-    schemaSortAsc = !schemaSortAsc;
-  } else {
-    schemaSortCol = col;
-    schemaSortAsc = true;
-  }
-  renderSchemaTable();
-}
-
 // ================================================================
-// Section 5: Render Steps
+// Section: Render Steps
 // ================================================================
 function renderSteps() {
   var steps = REPORT_DATA.steps || [];
@@ -1853,14 +1772,25 @@ function renderFieldMapping() {
 
   var html = '';
   html += '<thead><tr>';
-  html += '<th style="width:25%">目标字段</th>';
-  html += '<th style="width:35%">来源</th>';
-  html += '<th style="width:12%">加工类型</th>';
-  html += '<th style="width:12%">匹配</th>';
-  html += '<th style="width:16%">步骤</th>';
+  html += '<th style="width:20%">目标字段</th>';
+  html += '<th style="width:12%">类型</th>';
+  html += '<th style="width:25%">业务含义</th>';
+  html += '<th style="width:20%">来源</th>';
+  html += '<th style="width:10%">加工类型</th>';
+  html += '<th style="width:13%">场景/步骤</th>';
   html += '</tr></thead><tbody>';
 
+  // 构建 schema_fields 查找表（字段类型+含义）
+  var schemaMap = {};
+  (REPORT_DATA.schema_fields || []).forEach(function(sf) {
+    schemaMap[sf.name] = sf;
+  });
+
   fields.forEach(function(f) {
+    var sf = schemaMap[f.target_field] || {};
+    var fieldType = sf.type || '';
+    var fieldMeaning = sf.meaning || '';
+
     var srcText = '-';
     if (f.sources && f.sources.length > 0) {
       srcText = f.sources.map(function(s) {
@@ -1872,19 +1802,20 @@ function renderFieldMapping() {
       }).join(', ');
     }
 
-    var matchLabel = '';
-    if (f.in_target_fields === false) {
-      matchLabel = '<span class="tag" style="background:#fef9c3;color:#854d0e;">仅SQL</span>';
-    } else {
-      matchLabel = '<span class="tag" style="background:#dcfce7;color:#166534;">已匹配</span>';
+    // 找步骤的规则中文名
+    var stepInfo = '-';
+    var st = (REPORT_DATA.steps || []).find(function(s) { return s.step_id === f.producing_step; });
+    if (st) {
+      stepInfo = st.rule_name || st.step_id || '-';
     }
 
-    html += '<tr data-field="' + escapeHtml(f.target_field) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\')">';
+    html += '<tr data-field="' + escapeHtml(f.target_field) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\')" style="cursor:pointer;">';
     html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span></td>';
+    html += '<td><span class="field-type">' + escapeHtml(fieldType || '-') + '</span></td>';
+    html += '<td><span style="font-size:12px;color:var(--text-secondary);">' + escapeHtml(fieldMeaning || '-') + '</span></td>';
     html += '<td><span class="source-info">' + escapeHtml(srcText) + '</span></td>';
     html += '<td>' + tagHtml(f.transform_type) + '</td>';
-    html += '<td>' + matchLabel + '</td>';
-    html += '<td style="color:var(--text-muted);font-size:12px;">' + escapeHtml(f.producing_step || '-') + '</td>';
+    html += '<td style="color:var(--text-muted);font-size:12px;">' + escapeHtml(stepInfo) + '</td>';
     html += '</tr>';
   });
 
@@ -2221,16 +2152,10 @@ document.getElementById('detailClose').addEventListener('click', closeDetail);
 document.getElementById('detailOverlay').addEventListener('click', closeDetail);
 document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeDetail(); });
 
-// Quality collapsible — default collapsed
+// Quality collapsible
 document.getElementById('qualityToggle').addEventListener('click', function() {
   this.classList.toggle('open');
   document.getElementById('qualityBody').classList.toggle('open');
-});
-
-// Schema collapsible — default collapsed
-document.getElementById('schemaToggle').addEventListener('click', function() {
-  this.classList.toggle('open');
-  document.getElementById('schemaBody').classList.toggle('open');
 });
 
 // Field Mapping collapsible — default collapsed
@@ -2261,7 +2186,6 @@ window.toggleIssueGroup = toggleIssueGroup;
 renderHeader();
 renderOverview();
 renderLineage();
-renderSchema();
 renderSteps();
 renderFieldMapping();
 renderQuality();
