@@ -69,6 +69,7 @@ RULE_COLUMNS_MAP = {
     "target_schema": "目标Schema",
     "target_table": "目标表",
     "delete_mode": "删除模式",
+    "delete_condition": "删除条件",
     "query_sql": "(生成的）查询语句1",
     "project_code": "项目编码",
     "data_source": "数据源",
@@ -76,6 +77,20 @@ RULE_COLUMNS_MAP = {
     "rule_group_code": "规则组编码",
     "rule_type": "规则类型",
 }
+
+# 删除模式语义映射
+DELETE_MODE_MAP = {
+    "1": "TRUNCATE TABLE",
+    "2": "NO DELETE (追加)",
+    "3": "TRUNCATE SUBPARTITION",
+    "4": "DELETE",
+    "5": "TRUNCATE PARTITION",
+    "6": "MERGE INTO",
+    "7": "RPT_ITEM",
+}
+
+# 分区级删除模式（有分区场景标识）
+PARTITION_DELETE_MODES = {"3", "5"}
 
 # TargetFields sheet 列名
 TF_COLUMNS_MAP = {
@@ -125,6 +140,7 @@ class RawRule:
     target_schema: str = ""
     target_table: str = ""
     delete_mode: str = ""
+    delete_condition: str = ""
     query_sql: str = ""
     project_code: str = ""
     data_source: str = ""
@@ -325,6 +341,7 @@ def read_excel(excel_path: str) -> dict:
             target_schema=_get_val(row, ci.get("target_schema")),
             target_table=_get_val(row, ci.get("target_table")),
             delete_mode=_get_val(row, ci.get("delete_mode")),
+            delete_condition=_get_val(row, ci.get("delete_condition")),
             query_sql=query.strip(),
             project_code=_get_val(row, ci.get("project_code")),
             data_source=_get_val(row, ci.get("data_source")),
@@ -1197,8 +1214,144 @@ def _has_fallback(node) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Step 4: build_topology() — 双图
+# Step 4: build_topology() — 双图 + 场景分组
 # ═══════════════════════════════════════════════════════════════
+
+def build_scenarios(rules: list[RawRule], parsed_map: dict) -> list[dict]:
+    """场景分组：按分区名（删除条件）分组为场景。
+
+    场景判定逻辑:
+    1. 删除模式为分区级(3/5)且有删除条件 → 按删除条件(分区名)分组
+    2. 同一个分区名的所有规则属于同一场景
+    3. 删除模式=1(TRUNCATE TABLE) → 公共步骤，不属于任何场景
+    4. 单场景（所有规则只有一个分区或无分区）→ 不分场景
+
+    返回: [{id, name, partition, rule_codes, rule_count, is_common}, ...]
+    """
+    # 收集所有分区场景
+    partition_groups: dict[str, list[str]] = {}  # {partition: [rule_codes]}
+    common_rules: list[str] = []
+
+    for rule in rules:
+        rc = rule.rule_code
+        dm = (rule.delete_mode or "").strip()
+        dc = (rule.delete_condition or "").strip()
+
+        if dm in PARTITION_DELETE_MODES and dc:
+            # 分区级写入
+            partition_groups.setdefault(dc, []).append(rc)
+        else:
+            # 非分区（TRUNCATE TABLE / NO DELETE 等）→ 公共步骤
+            common_rules.append(rc)
+
+    # 构建场景列表
+    scenarios = []
+
+    if len(partition_groups) <= 1:
+        # 只有0或1个分区场景 → 不分场景
+        all_rule_codes = []
+        for partition, rcs in partition_groups.items():
+            all_rule_codes.extend(rcs)
+        all_rule_codes.extend(common_rules)
+
+        scenarios.append({
+            "id": "scenario_1",
+            "name": "默认场景",
+            "partition": "",
+            "rule_codes": all_rule_codes,
+            "rule_count": len(all_rule_codes),
+            "is_common": False,
+            "is_multi_scenario": False,
+        })
+        return scenarios
+
+    # 多场景
+    for i, (partition, rcs) in enumerate(sorted(partition_groups.items()), start=1):
+        scenarios.append({
+            "id": f"scenario_{i}",
+            "name": f"场景{i} (分区: {partition})",
+            "partition": partition,
+            "rule_codes": rcs,
+            "rule_count": len(rcs),
+            "is_common": False,
+            "is_multi_scenario": True,
+        })
+
+    # 公共步骤
+    if common_rules:
+        scenarios.append({
+            "id": "scenario_common",
+            "name": "公共步骤",
+            "partition": "",
+            "rule_codes": common_rules,
+            "rule_count": len(common_rules),
+            "is_common": True,
+            "is_multi_scenario": True,
+        })
+
+    return scenarios
+
+
+def generate_step_description(rule: RawRule, parsed, scenarios: list[dict], all_rules: list[RawRule]) -> dict:
+    """脚本自动生成 purpose + logic 兜底描述（不依赖 AI）。
+
+    Returns: {"purpose": str, "logic": str}
+    """
+    # 找到当前规则属于哪个场景
+    scenario = None
+    for s in scenarios:
+        if rule.rule_code in s.get("rule_codes", []):
+            scenario = s
+            break
+
+    # 写入模式
+    dm = (rule.delete_mode or "").strip()
+    write_mode = DELETE_MODE_MAP.get(dm, f"delete_mode={dm}")
+    dc = (rule.delete_condition or "").strip()
+
+    # 目标表
+    target = rule.target_table or ""
+
+    # 来源表
+    source_tables = [j.source_table for j in parsed.source_tables] if parsed else []
+
+    # purpose
+    partition_desc = f" → 分区[{dc}]" if dc else ""
+    scenario_desc = ""
+    if scenario and scenario.get("is_multi_scenario") and not scenario.get("is_common"):
+        scenario_desc = f"[{scenario['name']}] "
+
+    purpose = f"{scenario_desc}{write_mode}{partition_desc} 写入 {target}"
+
+    # logic — 基于加工模式生成
+    parts = []
+    if source_tables:
+        if len(source_tables) == 1:
+            parts.append(f"从 {source_tables[0]} 加载")
+        else:
+            parts.append(f"从 {len(source_tables)} 张表关联加载: {', '.join(source_tables[:3])}")
+
+    # CTE
+    cte_count = len(parsed.ctes) if parsed else 0
+    if cte_count:
+        cte_names = [c.name for c in parsed.ctes]
+        parts.append(f"使用 {cte_count} 个 CTE ({', '.join(cte_names)})")
+
+    # 加工类型
+    if parsed:
+        transform_types = set()
+        for col in parsed.select_columns:
+            transform_types.add(col.transform_type)
+        interesting = transform_types - {"direct", "value", "unknown"}
+        if interesting:
+            type_map = {"pivot": "行转列", "aggregate": "聚合", "window": "窗口函数",
+                       "case_when": "条件加工", "fallback": "NULL兜底"}
+            desc_parts = [type_map.get(t, t) for t in interesting]
+            parts.append("加工: " + ", ".join(desc_parts))
+
+    logic = "，".join(parts) if parts else "直接加载"
+
+    return {"purpose": purpose, "logic": logic}
 
 def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> dict:
     """构建调度图 + 数据依赖图。
@@ -1433,6 +1586,30 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
                 "over_constrained_on": over,
             })
 
+    # ── 场景分组 ──
+    scenarios = build_scenarios(rules, parsed_map)
+
+    # 给每个 step 关联场景 ID 和删除条件
+    for s in steps:
+        rc = s["rule_code"]
+        # 找原始 rule 的 delete_condition
+        orig_rule = next((r for r in rules if r.rule_code == rc), None)
+        s["delete_condition"] = orig_rule.delete_condition if orig_rule else ""
+        s["delete_mode_label"] = DELETE_MODE_MAP.get(
+            (orig_rule.delete_mode or "").strip() if orig_rule else "", ""
+        )
+        # 关联场景
+        for sc in scenarios:
+            if rc in sc.get("rule_codes", []):
+                s["scenario_id"] = sc["id"]
+                s["scenario_name"] = sc["name"]
+                s["is_common_step"] = sc.get("is_common", False)
+                break
+        else:
+            s["scenario_id"] = ""
+            s["scenario_name"] = ""
+            s["is_common_step"] = False
+
     return {
         "steps": steps,
         "schedule_plan": schedule_plan,
@@ -1441,6 +1618,7 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
         "implicit_dependencies": implicit_dependencies,
         "target_write_groups": target_write_groups,
         "over_constraints": over_constraints,
+        "scenarios": scenarios,
     }
 
 
@@ -2306,9 +2484,9 @@ def main():
     print(f"  调度层级: {len(topology['schedule_plan'])}")
     print(f"  数据依赖: {len(topology['data_dependencies'])}")
     print(f"  自引用: {len(topology['self_references'])}")
-    print(f"  隐式依赖: {len(topology['implicit_dependencies'])}")
-    print(f"  同目标表写入组: {len(topology['target_write_groups'])}")
-    print(f"  过度约束: {len(topology['over_constraints'])}")
+    print(f"  场景数: {len(topology.get('scenarios', []))}")
+    for sc in topology.get("scenarios", []):
+        print(f"    {sc['name']}: {sc['rule_count']} 个规则")
     print()
 
     # ── Step 5: 数据流 ──
@@ -2354,6 +2532,23 @@ def main():
         target_metadata = parse_ddl_for_metadata(args.ddl_dir, target_name)
         print(f"  DDL 字段元数据: {len(target_metadata)} 个字段")
 
+    # ── 生成兜底 step_descriptions（脚本自动，不依赖 AI）──
+    scenarios = topology.get("scenarios", [])
+    auto_step_desc = []
+    for rule in rules:
+        parsed = parsed_map.get(rule.rule_code, ParsedSQL())
+        desc = generate_step_description(rule, parsed, scenarios, rules)
+        # 找 step_id
+        step = next((s for s in topology["steps"] if s["rule_code"] == rule.rule_code), None)
+        step_id = step["step_id"] if step else ""
+        auto_step_desc.append({
+            "step_id": step_id,
+            "rule_code": rule.rule_code,
+            "purpose": desc["purpose"],
+            "logic": desc["logic"],
+            "is_auto_generated": True,  # 标记为自动生成，AI 可以覆盖
+        })
+
     knowledge = {
         "meta": {
             "source_type": "execution_tasks.xlsx",
@@ -2377,6 +2572,11 @@ def main():
         "data_flow": data_flow,
         "field_mappings": field_mappings,
         "quality": quality,
+        "business_logic": {
+            "summary": "",
+            "step_descriptions": auto_step_desc,
+            "key_transforms": [],
+        },
         "source": build_source(rules, raw["target_fields"], raw["group_variables"], parsed_map),
     }
 
