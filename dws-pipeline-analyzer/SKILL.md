@@ -33,9 +33,11 @@ pip install openpyxl sqlglot
 
 AI 执行脚本前，先检测依赖是否可用：
 ```bash
-python3 -c "import openpyxl, sqlglot; print('OK')"
+python -c "import openpyxl, sqlglot; print('OK')"
 ```
 如果报 ImportError，运行 `pip install openpyxl sqlglot` 后重试。
+
+> **注意**：本文档统一用 `python`。Windows 直接用 `python`；macOS/Linux 如果只有 `python3`，请用 `python3` 替代。
 
 ---
 
@@ -53,7 +55,7 @@ dws-run analyzer analyze \
     [--ddl-dir {ddl_dir}]
 
 # 或直接调用（独立环境）
-python3 {skill_dir}/run.py analyze \
+python {skill_dir}/run.py analyze \
     --input {input_xlsx} \
     --output {output_dir} \
     [--ddl-dir {ddl_dir}]

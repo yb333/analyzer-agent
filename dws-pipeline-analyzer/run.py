@@ -2,11 +2,11 @@
 """Skill script dispatcher.
 
 Usage:
-    python3 run.py <script_name> [script_args...]
+    python run.py <script_name> [script_args...]
 
 Examples:
-    python3 run.py analyze --input execution_tasks.xlsx --output output/
-    python3 run.py view_generator --input knowledge_final.json --output output/
+    python run.py analyze --input execution_tasks.xlsx --output output/
+    python run.py view_generator --input knowledge_final.json --output output/
 """
 
 import sys
@@ -17,7 +17,7 @@ from pathlib import Path
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         references_dir = Path(__file__).resolve().parent / "references"
-        print("Usage: python3 run.py <script_name> [script_args...]")
+        print("Usage: python run.py <script_name> [script_args...]")
         print(f"\nAvailable scripts in references/:")
         for f in sorted(references_dir.glob("*.py")):
             print(f"  - {f.stem}")

@@ -10,8 +10,8 @@
 # macOS / Linux
 bash install.sh
 
-# Windows (PowerShell)
-powershell -ExecutionPolicy Bypass -File install.ps1
+# Windows（双击 install.bat 或命令行执行）
+install.bat
 ```
 
 或手工安装：
