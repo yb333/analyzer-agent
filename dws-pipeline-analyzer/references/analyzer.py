@@ -299,12 +299,14 @@ def read_excel(excel_path: str) -> dict:
 
         rule_type_str = _get_val(row, col_rule_type)
         try:
-            rt = int(rule_type_str) if rule_type_str else 0
+            # 兼容文本存储的数字（'1', '1.0', 1, 1.0）
+            rt = int(float(rule_type_str)) if rule_type_str else 0
         except (ValueError, TypeError):
             rt = 0
 
-        # 只处理取数类规则（1=标签, 2=报表项, 3=宽表），跳过其他（如12=参数变量）
-        if rt not in (1, 2, 3):
+        # 只处理取数类规则（1=取数, 2=删数, 3=备份, 4=查询, 5=逻辑视图, 6=物理视图,
+        # 7=度量, 8=物理表, 14=Spark数据处理），跳过参数变量/SP/API/维护等
+        if rt not in (1, 2, 3, 4, 5, 6, 7, 8, 14):
             continue
 
         query = _get_val(row, ci.get("query_sql"))
