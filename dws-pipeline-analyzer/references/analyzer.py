@@ -76,6 +76,7 @@ RULE_COLUMNS_MAP = {
     "business_owner": "业务责任人",
     "rule_group_code": "规则组编码",
     "rule_type": "规则类型",
+    "rule_name": "规则中文名称",
 }
 
 # 删除模式语义映射
@@ -138,6 +139,7 @@ _INLINE_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 class RawRule:
     """RULE sheet 单行数据"""
     rule_code: str = ""
+    rule_name: str = ""
     exec_sequence: int = 0
     target_schema: str = ""
     target_table: str = ""
@@ -340,6 +342,7 @@ def read_excel(excel_path: str) -> dict:
 
         rule = RawRule(
             rule_code=_get_val(row, ci.get("rule_code")),
+            rule_name=_get_val(row, ci.get("rule_name")),
             exec_sequence=exec_seq,
             target_schema=_get_val(row, ci.get("target_schema")),
             target_table=_get_val(row, ci.get("target_table")),
@@ -1592,15 +1595,16 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
     # ── 场景分组 ──
     scenarios = build_scenarios(rules, parsed_map)
 
-    # 给每个 step 关联场景 ID 和删除条件
+    # 给每个 step 关联场景 ID、删除条件、规则中文名
     for s in steps:
         rc = s["rule_code"]
-        # 找原始 rule 的 delete_condition
+        # 找原始 rule
         orig_rule = next((r for r in rules if r.rule_code == rc), None)
         s["delete_condition"] = orig_rule.delete_condition if orig_rule else ""
         s["delete_mode_label"] = DELETE_MODE_MAP.get(
             (orig_rule.delete_mode or "").strip() if orig_rule else "", ""
         )
+        s["rule_name"] = orig_rule.rule_name if orig_rule else ""
         # 关联场景
         for sc in scenarios:
             if rc in sc.get("rule_codes", []):

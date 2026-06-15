@@ -1795,7 +1795,7 @@ function renderSteps() {
     if (scenarioLabel) {
       html += '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:white;background:' + scenarioColor + ';margin-right:8px;vertical-align:middle;">' + escapeHtml(scenarioLabel) + '</span>';
     }
-    html += '<span class="step-title">' + escapeHtml(step.step_id || '?');
+    html += '<span class="step-title">' + escapeHtml(step.rule_name || step.step_id || '?');
     if (step.rule_code) html += ' <span style="color:var(--text-muted);font-weight:400;font-size:12px;">(' + escapeHtml(step.rule_code) + ')</span>';
     html += '</span>';
     html += '</div>';
@@ -2093,6 +2093,77 @@ function openDetail(fieldName) {
   if (detail.meaning) {
     html += '<div class="detail-section"><h4>业务含义</h4>';
     html += '<p style="font-size:14px;line-height:1.7;">' + escapeHtml(detail.meaning) + '</p>';
+    html += '</div>';
+  }
+
+  // 各场景各步骤的来源（含来源表+加工表达式）
+  var allSteps = REPORT_DATA.steps || [];
+  var fieldSteps = allSteps.filter(function(st) {
+    // 找哪些步骤产出了这个字段
+    return REPORT_DATA.fields.some(function(f) {
+      return f.target_field === fieldName && f.producing_step === st.step_id;
+    });
+  });
+
+  if (fieldSteps.length > 0) {
+    html += '<div class="detail-section"><h4>各步骤来源详情</h4>';
+
+    // 按场景分组
+    var scenarioGroups = {};
+    fieldSteps.forEach(function(st) {
+      var sc = st.scenario_name || '默认';
+      if (!scenarioGroups[sc]) scenarioGroups[sc] = [];
+      scenarioGroups[sc].push(st);
+    });
+
+    Object.keys(scenarioGroups).forEach(function(sc) {
+      html += '<div style="margin-bottom:16px;">';
+      html += '<div style="font-weight:600;font-size:13px;color:var(--accent);margin-bottom:6px;padding:2px 8px;background:var(--bg-secondary);border-radius:6px;display:inline-block;">' + escapeHtml(sc) + '</div>';
+
+      scenarioGroups[sc].forEach(function(st) {
+        // 找这个步骤里这个字段的来源
+        var f = REPORT_DATA.fields.find(function(f) {
+          return f.target_field === fieldName && f.producing_step === st.step_id;
+        });
+
+        html += '<div style="margin-left:16px;margin-bottom:8px;padding:8px;border-left:3px solid var(--border);">';
+        html += '<div style="font-weight:600;font-size:13px;">' + escapeHtml(st.rule_name || st.step_id) + ' <span style="color:var(--text-muted);font-weight:400;">(' + escapeHtml(st.rule_code || '') + ')</span></div>';
+        if (st.purpose) html += '<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">' + escapeHtml(st.purpose) + '</div>';
+        if (st.delete_mode_label) html += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">写入: ' + escapeHtml(st.delete_mode_label) + (st.delete_condition ? ' → ' + escapeHtml(st.delete_condition) : '') + '</div>';
+
+        // 来源表
+        var srcTables = st.source_tables || [];
+        if (srcTables.length > 0) {
+          html += '<div style="font-size:12px;margin-top:4px;">来源表: ' + srcTables.map(function(t) {
+            return '<code style="background:var(--bg-secondary);padding:1px 4px;border-radius:3px;">' + escapeHtml(t) + '</code>';
+          }).join(' ') + '</div>';
+        }
+
+        // 字段来源详情
+        if (f) {
+          var sources = f.sources || [];
+          if (sources.length > 0) {
+            html += '<div style="font-size:12px;margin-top:4px;">';
+            sources.forEach(function(src) {
+              var tt = f.transform_type || 'expression';
+              var ttLabel = {'direct':'直取','value':'赋值','aggregate':'聚合','pivot':'行转列',
+                            'window':'窗口','fallback':'兜底','case_when':'条件','expression':'加工'}[tt] || tt;
+              html += '<div style="margin-top:2px;">';
+              if (src.table && src.field) {
+                html += '<code>' + escapeHtml(src.table) + '.' + escapeHtml(src.field) + '</code>';
+              }
+              html += ' <span style="color:var(--text-muted);">→ ' + escapeHtml(fieldName) + '</span>';
+              html += ' [' + ttLabel + ']';
+              html += '</div>';
+            });
+            html += '</div>';
+          }
+        }
+        html += '</div>';
+      });
+      html += '</div>';
+    });
+
     html += '</div>';
   }
 
