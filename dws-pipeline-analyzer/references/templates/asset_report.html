@@ -1,0 +1,2279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>资产说明书 - {{TARGET_TABLE}}</title>
+<style>
+/* ============================================================
+   CSS Custom Properties
+   ============================================================ */
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-code: #f1f5f9;
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --text-muted: #94a3b8;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-light: #dbeafe;
+  --border: #e2e8f0;
+  --border-light: #f1f5f9;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+  --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 6px rgba(0,0,0,0.07), 0 2px 4px rgba(0,0,0,0.06);
+  --shadow-lg: 0 10px 15px rgba(0,0,0,0.1), 0 4px 6px rgba(0,0,0,0.05);
+  --radius: 8px;
+  --radius-sm: 4px;
+  /* transform type tags */
+  --tag-direct: #22c55e;
+  --tag-aggregate: #3b82f6;
+  --tag-pivot: #f97316;
+  --tag-case-when: #8b5cf6;
+  --tag-value: #94a3b8;
+  --tag-expression: #0ea5e9;
+  --tag-fallback: #eab308;
+  --tag-window: #6366f1;
+  /* severity */
+  --severity-critical: #ef4444;
+  --severity-medium: #f97316;
+  --severity-info: #3b82f6;
+  --panel-width: 480px;
+  --transition: 0.2s ease;
+  /* lineage node colors */
+  --node-source-fill: #dbeafe;
+  --node-source-stroke: #3b82f6;
+  --node-cte-fill: #ffedd5;
+  --node-cte-stroke: #f97316;
+  --node-step-fill: #ede9fe;
+  --node-step-stroke: #8b5cf6;
+  --node-target-fill: #dcfce7;
+  --node-target-stroke: #22c55e;
+  --node-downstream-fill: #fef9c3;
+  --node-downstream-stroke: #eab308;
+}
+
+/* ============================================================
+   Reset & Base
+   ============================================================ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ============================================================
+   Layout
+   ============================================================ */
+.page-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 32px 80px;
+}
+
+/* ============================================================
+   Section 1: Header
+   ============================================================ */
+.report-header {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px 28px;
+  margin-bottom: 20px;
+  box-shadow: var(--shadow-sm);
+}
+
+.report-header h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.report-header .header-table-name {
+  font-size: 13px;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.header-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  align-items: center;
+}
+
+.header-meta .meta-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.header-meta .meta-value {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.source-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--accent-light);
+  color: var(--accent-hover);
+}
+
+/* ============================================================
+   Section Cards (shared)
+   ============================================================ */
+.section-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 20px;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.section-header {
+  padding: 14px 20px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-header .section-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.section-header .section-count {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-left: 4px;
+}
+
+.section-body {
+  padding: 20px;
+}
+
+/* ============================================================
+   Section 2: Overview
+   ============================================================ */
+.metric-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.metric-card {
+  padding: 20px 24px;
+  background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-card) 100%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  transition: box-shadow var(--transition), transform var(--transition);
+}
+
+.metric-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+
+.metric-card .metric-icon {
+  width: 28px;
+  height: 28px;
+  margin: 0 auto 6px;
+  color: var(--accent);
+  opacity: 0.6;
+}
+
+.metric-card .metric-value {
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.1;
+}
+
+.metric-card .metric-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.overview-description {
+  padding: 14px 18px;
+  background: var(--bg-secondary);
+  border-left: 4px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+
+.pattern-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.pattern-tags-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-right: 4px;
+}
+
+.pattern-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: help;
+  position: relative;
+  transition: filter var(--transition);
+}
+
+.pattern-tag:hover { filter: brightness(0.95); }
+
+.pattern-cat-structure     { background: #dbeafe; color: #1e40af; }
+.pattern-cat-transform     { background: #ffedd5; color: #c2410c; }
+.pattern-cat-data_quality  { background: #dcfce7; color: #166534; }
+.pattern-cat-load_strategy { background: #ede9fe; color: #6d28d9; }
+.pattern-cat-filter        { background: #fee2e2; color: #991b1b; }
+.pattern-cat-metadata      { background: #f1f5f9; color: #475569; }
+.pattern-cat-dimension     { background: #cffafe; color: #0e7490; }
+
+/* Pattern tooltip */
+.pattern-tag .pattern-tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 10;
+  pointer-events: none;
+  box-shadow: var(--shadow-md);
+}
+
+.pattern-tag .pattern-tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: var(--text-primary);
+}
+
+.pattern-tag:hover .pattern-tooltip { display: block; }
+
+/* ============================================================
+   Section 3: Lineage Graph
+   ============================================================ */
+.lineage-wrapper {
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+}
+
+.lineage-svg {
+  display: block;
+  min-width: 100%;
+}
+
+.lineage-svg .node-rect {
+  rx: 6;
+  ry: 6;
+  stroke-width: 1.5;
+  cursor: pointer;
+  transition: filter var(--transition);
+}
+
+.lineage-svg .node-rect:hover {
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,0.2));
+}
+
+.lineage-svg .node-rect.source     { fill: var(--node-source-fill); stroke: var(--node-source-stroke); }
+.lineage-svg .node-rect.cte        { fill: var(--node-cte-fill); stroke: var(--node-cte-stroke); }
+.lineage-svg .node-rect.step       { fill: var(--node-step-fill); stroke: var(--node-step-stroke); }
+.lineage-svg .node-rect.target     { fill: var(--node-target-fill); stroke: var(--node-target-stroke); }
+.lineage-svg .node-rect.downstream { fill: var(--node-downstream-fill); stroke: var(--node-downstream-stroke); }
+
+.lineage-svg .edge-path {
+  fill: none;
+  stroke: #94a3b8;
+  stroke-width: 1.5;
+  marker-end: url(#lh-arrow);
+}
+
+.lineage-svg .edge-path.self-ref {
+  stroke: #f97316;
+  stroke-dasharray: 5 3;
+  marker-end: url(#lh-arrow-self);
+}
+
+.lineage-svg .edge-label {
+  font-size: 10px;
+  fill: var(--text-secondary);
+}
+
+.lineage-svg .node-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+  text-align: center;
+  pointer-events: none;
+  padding: 0 4px;
+}
+
+.lineage-svg .node-name {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  word-break: break-all;
+  overflow-wrap: break-word;
+  color: var(--text-primary);
+}
+
+.lineage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.lineage-legend .legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1.5px solid;
+}
+
+.legend-dot.source-dot     { background: var(--node-source-fill); border-color: var(--node-source-stroke); }
+.legend-dot.cte-dot        { background: var(--node-cte-fill); border-color: var(--node-cte-stroke); }
+.legend-dot.step-dot       { background: var(--node-step-fill); border-color: var(--node-step-stroke); }
+.legend-dot.target-dot     { background: var(--node-target-fill); border-color: var(--node-target-stroke); }
+.legend-dot.downstream-dot { background: var(--node-downstream-fill); border-color: var(--node-downstream-stroke); }
+
+/* Node tooltip (native title in SVG works, but custom is nicer) */
+.lh-node-tooltip {
+  position: absolute;
+  z-index: 50;
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  max-width: 320px;
+  word-break: break-all;
+  pointer-events: none;
+  box-shadow: var(--shadow-md);
+  display: none;
+}
+
+/* ============================================================
+   Section 4: Schema Table
+   ============================================================ */
+.schema-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.schema-table th {
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: color var(--transition);
+}
+
+.schema-table th:hover { color: var(--accent); }
+
+.schema-table th .sort-indicator {
+  font-size: 10px;
+  margin-left: 4px;
+  opacity: 0.4;
+}
+
+.schema-table th.sorted .sort-indicator { opacity: 1; color: var(--accent); }
+
+.schema-table td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border-light);
+  vertical-align: middle;
+}
+
+.schema-table tbody tr {
+  transition: background var(--transition);
+  cursor: pointer;
+}
+
+.schema-table tbody tr:hover { background: var(--accent-light); }
+
+.schema-table .field-name {
+  font-weight: 600;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.schema-table .field-type {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.schema-table .field-meaning {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+/* ============================================================
+   Tags (transform types)
+   ============================================================ */
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tag-direct      { background: #dcfce7; color: #15803d; }
+.tag-aggregate   { background: #dbeafe; color: #1d4ed8; }
+.tag-pivot       { background: #ffedd5; color: #c2410c; }
+.tag-case_when   { background: #ede9fe; color: #6d28d9; }
+.tag-value       { background: #f1f5f9; color: #475569; }
+.tag-expression  { background: #e0f2fe; color: #0369a1; }
+.tag-fallback    { background: #fef9c3; color: #a16207; }
+.tag-window      { background: #e0e7ff; color: #4338ca; }
+
+/* ============================================================
+   Section 5: Step Cards
+   ============================================================ */
+.step-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+  overflow: hidden;
+  transition: box-shadow var(--transition);
+}
+
+.step-card:hover { box-shadow: var(--shadow); }
+
+.step-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  background: var(--bg-secondary);
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid transparent;
+  transition: all var(--transition);
+}
+
+.step-card-header:hover { background: var(--accent-light); }
+.step-card.open .step-card-header { border-bottom-color: var(--border); }
+
+.step-toggle {
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: transform var(--transition);
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+}
+
+.step-card.open .step-toggle { transform: rotate(90deg); }
+
+.step-title-block { flex: 1; min-width: 0; }
+
+.step-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.step-purpose {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.write-mode-tag {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #e0e7ff;
+  color: #3730a3;
+  white-space: nowrap;
+}
+
+.exec-seq {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.step-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.4s ease;
+}
+
+.step-card.open .step-body { max-height: 8000px; }
+
+.step-body-inner {
+  padding: 18px 20px;
+}
+
+.step-logic {
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+
+.step-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.step-detail-item {
+  padding: 12px 14px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.step-detail-item .detail-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.step-detail-item .detail-value {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  word-break: break-all;
+}
+
+.step-detail-item.full-width {
+  grid-column: 1 / -1;
+}
+
+.cte-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cte-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 6px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.cte-item .cte-name {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-weight: 600;
+  color: var(--tag-pivot);
+}
+
+.cte-item .cte-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* SQL code block with syntax highlighting */
+.sql-block {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+  max-height: 500px;
+  overflow-y: auto;
+  color: #e2e8f0;
+}
+
+.sql-kw       { color: #c084fc; font-weight: 600; }
+.sql-fn       { color: #60a5fa; }
+.sql-str      { color: #4ade80; }
+.sql-comment  { color: #64748b; font-style: italic; }
+.sql-num      { color: #fb923c; }
+
+/* ============================================================
+   Section 6: Field Mapping
+   ============================================================ */
+.field-search-box {
+  width: 100%;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  outline: none;
+  transition: border-color var(--transition);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  margin-bottom: 12px;
+}
+
+.field-search-box:focus { border-color: var(--accent); }
+.field-search-box::placeholder { color: var(--text-muted); }
+
+.field-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.field-table th {
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.field-table td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border-light);
+  vertical-align: middle;
+}
+
+.field-table tbody tr {
+  transition: background var(--transition);
+  cursor: pointer;
+}
+
+.field-table tbody tr:hover { background: var(--accent-light); }
+.field-table tbody tr.highlight { background: #fef9c3; }
+
+.field-table .field-name {
+  font-weight: 600;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.field-table .source-info {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+}
+
+/* ============================================================
+   Section 7: Quality
+   ============================================================ */
+.quality-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.quality-stat {
+  padding: 12px 14px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.quality-stat .stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.quality-stat .stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.transform-dist {
+  margin-bottom: 16px;
+}
+
+.transform-dist-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.dist-bar {
+  display: flex;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.dist-segment {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--bg-primary);
+  transition: filter var(--transition);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.dist-segment:hover { filter: brightness(1.1); }
+
+.dist-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.dist-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+}
+
+.dist-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.issue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.issue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.issue-severity {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.severity-critical { background: #fee2e2; color: #991b1b; }
+.severity-medium   { background: #ffedd5; color: #9a3412; }
+.severity-info     { background: #dbeafe; color: #1e40af; }
+
+.issue-group {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.issue-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.issue-group-toggle:hover { background: var(--bg-secondary); }
+
+.issue-group-toggle .toggle-arrow {
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform var(--transition);
+}
+
+.issue-group-count {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.issue-group-warn {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.issue-group-body {
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.issue-group-body .issue-item {
+  background: var(--bg-secondary);
+}
+
+.insight-card {
+  padding: 14px 16px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  border-left: 4px solid var(--accent);
+  margin-bottom: 8px;
+}
+
+.insight-card .insight-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.insight-card .insight-detail {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.insight-card .insight-suggestion {
+  font-size: 12px;
+  color: var(--accent);
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: var(--accent-light);
+  border-radius: var(--radius-sm);
+}
+
+/* ============================================================
+   Collapsible (Quality section)
+   ============================================================ */
+.collapsible-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 20px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-align: left;
+  transition: background var(--transition);
+  border-bottom: 1px solid transparent;
+}
+
+.collapsible-toggle:hover { background: var(--accent-light); }
+
+.collapsible-toggle .toggle-arrow {
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: transform var(--transition);
+}
+
+.collapsible-toggle .section-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.collapsible-toggle.open .toggle-arrow { transform: rotate(90deg); }
+.collapsible-toggle.open { border-bottom-color: var(--border); }
+
+.collapsible-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.4s ease;
+}
+
+.collapsible-body.open { max-height: 5000px; }
+
+/* ============================================================
+   Detail Panel (Slide-out)
+   ============================================================ */
+.detail-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.3);
+  z-index: 500;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+
+.detail-overlay.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.detail-panel {
+  position: fixed;
+  top: 0;
+  right: calc(-1 * var(--panel-width) - 20px);
+  width: var(--panel-width);
+  height: 100vh;
+  background: var(--bg-card);
+  box-shadow: var(--shadow-lg);
+  z-index: 600;
+  transition: right 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.detail-panel.open { right: 0; }
+
+.detail-top {
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-shrink: 0;
+  gap: 12px;
+}
+
+.detail-top h3 {
+  font-size: 18px;
+  font-weight: 700;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  color: var(--accent);
+  word-break: break-all;
+}
+
+.detail-close {
+  background: none;
+  border: none;
+  font-size: 22px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.detail-close:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.detail-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+
+.detail-section {
+  margin-bottom: 24px;
+}
+
+.detail-section h4 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+
+.detail-meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.detail-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.detail-meta-item .label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.detail-meta-item .value {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* Penetration chain */
+.penetration-chain {
+  display: flex;
+  flex-direction: column;
+}
+
+.chain-node {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  position: relative;
+}
+
+.chain-node[data-level="0"] { background: #eff6ff; border-left: 3px solid #3b82f6; }
+.chain-node[data-level="1"] { background: #f0fdf4; border-left: 3px solid #22c55e; margin-left: 20px; }
+.chain-node[data-level="2"] { background: #fffbeb; border-left: 3px solid #f59e0b; margin-left: 40px; }
+.chain-node[data-level="3"] { background: #fdf2f8; border-left: 3px solid #ec4899; margin-left: 60px; }
+
+.chain-node .chain-node-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.chain-node .chain-node-field {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.chain-node .chain-node-name {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.chain-node .chain-expr {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-code);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.chain-arrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 4px 24px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.chain-arrow svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.5;
+}
+
+/* ============================================================
+   No-results
+   ============================================================ */
+.no-results {
+  padding: 32px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* ============================================================
+   Responsive
+   ============================================================ */
+@media (max-width: 768px) {
+  .page-container { padding: 12px 16px 60px; }
+  .report-header { padding: 16px; }
+  .report-header h1 { font-size: 18px; }
+  .metric-cards { grid-template-columns: repeat(2, 1fr); }
+  .step-detail-grid { grid-template-columns: 1fr; }
+  :root { --panel-width: 100vw; }
+  .detail-panel { width: 100vw; right: -100vw; }
+}
+
+/* ============================================================
+   Print
+   ============================================================ */
+@media print {
+  body { background: white; }
+  .detail-panel, .detail-overlay { display: none !important; }
+  .step-body { max-height: none !important; }
+  .collapsible-body { max-height: none !important; }
+  .section-card { break-inside: avoid; }
+  .lineage-wrapper { overflow: visible; }
+}
+</style>
+</head>
+<body>
+
+<div class="page-container">
+
+  <!-- Section 1: Header -->
+  <div class="report-header" id="reportHeader"></div>
+
+  <!-- Section 2: Overview -->
+  <div class="section-card">
+    <div class="section-header">
+      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      资产概览
+    </div>
+    <div class="section-body">
+      <div class="metric-cards" id="metricCards"></div>
+      <div class="overview-description" id="overviewDescription"></div>
+      <div class="pattern-tags" id="patternTags"></div>
+    </div>
+  </div>
+
+  <!-- Section 3: Lineage -->
+  <div class="section-card">
+    <div class="section-header">
+      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+      数据流向图
+    </div>
+    <div class="section-body">
+      <div class="lineage-wrapper" id="lineageWrapper"></div>
+      <div class="lineage-legend" id="lineageLegend"></div>
+    </div>
+  </div>
+
+  <!-- Section 4: Schema -->
+  <div class="section-card" id="schemaSection">
+    <button class="collapsible-toggle" id="schemaToggle">
+      <span class="toggle-arrow">&#9654;</span>
+      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      目标表结构
+      <span class="section-count" id="schemaCount"></span>
+    </button>
+    <div class="collapsible-body" id="schemaBody">
+      <div class="section-body" style="padding:0;">
+        <div style="overflow-x:auto;">
+          <table class="schema-table" id="schemaTable"></table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 5: Steps -->
+  <div class="section-card">
+    <div class="section-header">
+      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      加工逻辑详情
+      <span class="section-count" id="stepsCount"></span>
+    </div>
+    <div class="section-body">
+      <div id="stepsContainer"></div>
+    </div>
+  </div>
+
+  <!-- Section 6: Field Mapping -->
+  <div class="section-card" id="fieldMappingSection">
+    <button class="collapsible-toggle" id="fieldMappingToggle">
+      <span class="toggle-arrow">&#9654;</span>
+      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="1" fill="currentColor"/><circle cx="8" cy="12" r="1" fill="currentColor"/><circle cx="8" cy="18" r="1" fill="currentColor"/></svg>
+      字段映射
+      <span class="section-count" id="fieldMappingCount"></span>
+    </button>
+    <div class="collapsible-body" id="fieldMappingBody">
+      <div class="section-body">
+        <input type="text" class="field-search-box" id="fieldSearch"
+               placeholder="搜索字段名、来源表、加工类型...">
+        <div style="overflow-x:auto;">
+          <table class="field-table" id="fieldMappingTable"></table>
+        </div>
+        <div class="no-results" id="fieldNoResults" style="display:none;">未找到匹配的字段</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 7: Quality -->
+  <div class="section-card" id="qualitySection">
+    <button class="collapsible-toggle" id="qualityToggle">
+      <span class="toggle-arrow">&#9654;</span>
+      <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      质量评估
+      <span class="section-count" id="qualityCount"></span>
+    </button>
+    <div class="collapsible-body" id="qualityBody">
+      <div class="section-body" id="qualityContent"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Detail Panel -->
+<div class="detail-overlay" id="detailOverlay"></div>
+<div class="detail-panel" id="detailPanel">
+  <div class="detail-top">
+    <h3 id="detailTitle">-</h3>
+    <button class="detail-close" id="detailClose" title="关闭 (Esc)">&times;</button>
+  </div>
+  <div class="detail-body" id="detailBody"></div>
+</div>
+
+<!-- Node tooltip element -->
+<div class="lh-node-tooltip" id="lhTooltip"></div>
+
+<script>
+// ================================================================
+// REPORT_DATA injected by view_generator.py
+// ================================================================
+const REPORT_DATA = {{REPORT_DATA}};
+
+// ================================================================
+// Utility Functions
+// ================================================================
+function escapeHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function tagHtml(type) {
+  const labels = {
+    direct: '直取', aggregate: '聚合', pivot: '行转列',
+    case_when: '条件', value: '赋值', expression: '表达式',
+    fallback: '兜底', window: '窗口'
+  };
+  return '<span class="tag tag-' + (type || 'value') + '">' + escapeHtml(labels[type] || type || '?') + '</span>';
+}
+
+function formatDateTime(dt) {
+  if (!dt) return '-';
+  // Try to parse ISO format
+  var d = new Date(dt);
+  if (isNaN(d.getTime())) return escapeHtml(dt);
+  var yyyy = d.getFullYear();
+  var mm = String(d.getMonth() + 1).padStart(2, '0');
+  var dd = String(d.getDate()).padStart(2, '0');
+  var hh = String(d.getHours()).padStart(2, '0');
+  var mi = String(d.getMinutes()).padStart(2, '0');
+  return yyyy + '-' + mm + '-' + dd + ' ' + hh + ':' + mi;
+}
+
+// ================================================================
+// SQL Syntax Highlighter (built-in tokenizer, no external libs)
+// ================================================================
+var SQL_KEYWORDS = [
+  'SELECT','DISTINCT','FROM','WHERE','JOIN','LEFT','RIGHT','INNER','OUTER','FULL',
+  'CROSS','ON','USING','GROUP BY','ORDER BY','HAVING','UNION','ALL','AS','AND',
+  'OR','NOT','IN','EXISTS','BETWEEN','LIKE','IS','NULL','CASE','WHEN','THEN',
+  'ELSE','END','WITH','RECURSIVE','INSERT','INTO','VALUES','UPDATE','SET','DELETE',
+  'CREATE','TABLE','VIEW','MATERIALIZED','DROP','ALTER','TRUNCATE','MERGE',
+  'OVER','PARTITION','BY','ROW_NUMBER','RANK','DENSE_RANK','LIMIT','OFFSET',
+  'INTERSECT','EXCEPT','GRANT','REVOKE','PRIMARY','KEY','FOREIGN','REFERENCES',
+  'CONSTRAINT','CHECK','DEFAULT','UNIQUE','INDEX','CAST','CONVERT'
+];
+
+var SQL_FUNCTIONS = [
+  'SUM','COUNT','AVG','MAX','MIN','COALESCE','NVL','NVL2','DECODE','CAST',
+  'SUBSTR','SUBSTRING','LENGTH','TRIM','LTRIM','RTRIM','UPPER','LOWER',
+  'CONCAT','REPLACE','INSTR','LPAD','RPAD','ROUND','CEIL','FLOOR','ABS',
+  'MOD','POWER','SQRT','EXP','LN','LOG','TO_CHAR','TO_NUMBER','TO_DATE',
+  'CURRENT_TIMESTAMP','CURRENT_DATE','NOW','EXTRACT','DATE_TRUNC','DATE_ADD',
+  'DATE_SUB','STRING_AGG','ARRAY_AGG','LISTAGG','ROW_NUMBER','LEAD','LAG',
+  'FIRST_VALUE','LAST_VALUE','NTILE','CUME_DIST','PERCENT_RANK','STDDEV',
+  'VARIANCE','MEDIAN','PERCENTILE_CONT','PERCENTILE_DISC'
+];
+
+function highlightSQL(sql) {
+  if (!sql) return '';
+  var placeholders = [];
+  var PLACEHOLDER_PREFIX = '@@SQL';
+  var PLACEHOLDER_SUFFIX = '@@';
+
+  // Step 1: Extract block comments /* ... */
+  sql = sql.replace(/\/\*[\s\S]*?\*\//g, function(m) {
+    placeholders.push({ type: 'comment', text: m });
+    return PLACEHOLDER_PREFIX + 'C' + (placeholders.length - 1) + PLACEHOLDER_SUFFIX;
+  });
+
+  // Step 2: Extract line comments -- ...
+  sql = sql.replace(/--[^\r\n]*/g, function(m) {
+    placeholders.push({ type: 'comment', text: m });
+    return PLACEHOLDER_PREFIX + 'C' + (placeholders.length - 1) + PLACEHOLDER_SUFFIX;
+  });
+
+  // Step 3: Extract single-quoted strings '...'
+  sql = sql.replace(/'(?:[^']|'')*'/g, function(m) {
+    placeholders.push({ type: 'string', text: m });
+    return PLACEHOLDER_PREFIX + 'S' + (placeholders.length - 1) + PLACEHOLDER_SUFFIX;
+  });
+
+  // Step 4: Escape HTML
+  var escaped = escapeHtml(sql);
+
+  // Step 5: Highlight multi-word keywords first (GROUP BY, ORDER BY)
+  var multiWordKws = ['GROUP BY', 'ORDER BY', 'PARTITION BY', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'CROSS JOIN', 'OUTER JOIN'];
+  var multiWordKwPattern = multiWordKws.map(function(kw) {
+    return kw.replace(/\s+/g, '\\s+');
+  });
+  var multiWordRegex = new RegExp('\\b(' + multiWordKwPattern.join('|') + ')\\b', 'gi');
+  // Temporarily protect multi-word keywords
+  escaped = escaped.replace(multiWordRegex, function(m) {
+    return '\x01KW\x01' + m + '\x01EK\x01';
+  });
+
+  // Step 6: Build keyword + function sets for fast lookup
+  var kwSet = {};
+  SQL_KEYWORDS.forEach(function(kw) { kwSet[kw.toUpperCase()] = true; });
+  var fnSet = {};
+  SQL_FUNCTIONS.forEach(function(fn) { fnSet[fn.toUpperCase()] = true; });
+
+  // Step 7: Highlight single-word tokens
+  escaped = escaped.replace(/\b([A-Za-z_][A-Za-z_0-9]*)\b/g, function(match, word) {
+    // Skip if inside protected multi-word kw
+    var upper = word.toUpperCase();
+    if (kwSet[upper]) return '<span class="sql-kw">' + word + '</span>';
+    if (fnSet[upper]) return '<span class="sql-fn">' + word + '</span>';
+    return match;
+  });
+
+  // Step 8: Restore multi-word keywords
+  escaped = escaped.replace(/\x01KW\x01([\s\S]*?)\x01EK\x01/g, function(m, inner) {
+    return '<span class="sql-kw">' + inner + '</span>';
+  });
+
+  // Step 9: Highlight numbers (not inside tags) — use capturing group for compatibility
+  escaped = escaped.replace(/(^|[^A-Za-z_>])\b(\d+(?:\.\d+)?)\b/g, '$1<span class="sql-num">$2</span>');
+
+  // Step 10: Restore placeholders (comments and strings)
+  var restoreRegex = new RegExp(PLACEHOLDER_PREFIX.replace(/[@]/g, '\\@') + '([CS])(\\d+)' + PLACEHOLDER_SUFFIX.replace(/[@]/g, '\\@'), 'g');
+  escaped = escaped.replace(restoreRegex, function(m, type, idx) {
+    var p = placeholders[parseInt(idx, 10)];
+    if (!p) return m;
+    var text = escapeHtml(p.text);
+    if (p.type === 'comment') return '<span class="sql-comment">' + text + '</span>';
+    if (p.type === 'string') return '<span class="sql-string">' + text + '</span>';
+    return text;
+  });
+
+  return escaped;
+}
+
+// ================================================================
+// Section 1: Render Header
+// ================================================================
+function renderHeader() {
+  var s = REPORT_DATA.summary || {};
+  var html = '';
+
+  html += '<h1>' + escapeHtml(s.table_cn_name || s.target_table || '{{TARGET_TABLE}}') + '</h1>';
+  if (s.target_table) {
+    html += '<div class="header-table-name">' + escapeHtml(s.target_table) + '</div>';
+  }
+
+  html += '<div class="header-meta">';
+  html += '<div class="meta-item"><span>生成时间</span> <span class="meta-value">' + formatDateTime(s.generated_at) + '</span></div>';
+  html += '<div class="meta-item"><span>步骤数</span> <span class="meta-value">' + (s.rule_count || 0) + '</span></div>';
+  html += '<div class="meta-item"><span>字段数</span> <span class="meta-value">' + (s.field_count || 0) + '</span></div>';
+  html += '<div class="meta-item"><span>源表数</span> <span class="meta-value">' + (s.source_count || 0) + '</span></div>';
+  // Source type badge
+  html += '<div class="meta-item"><span class="source-type-badge">DWS / PostgreSQL</span></div>';
+  html += '</div>';
+
+  document.getElementById('reportHeader').innerHTML = html;
+  document.title = '资产说明书 - ' + (s.table_cn_name || s.target_table || '{{TARGET_TABLE}}');
+}
+
+// ================================================================
+// Section 2: Render Overview
+// ================================================================
+function renderOverview() {
+  var s = REPORT_DATA.summary || {};
+  var complexity = s.complexity || {};
+
+  // Count CTEs from steps if max_cte_count not available
+  var cteCount = complexity.max_cte_count || 0;
+  if (!cteCount && REPORT_DATA.steps) {
+    cteCount = REPORT_DATA.steps.reduce(function(sum, step) {
+      return sum + (step.ctes ? step.ctes.length : 0);
+    }, 0);
+  }
+
+  // Metric cards
+  var metrics = [
+    { label: '来源表', value: s.source_count || complexity.total_source_tables || 0 },
+    { label: '加工步骤', value: s.rule_count || (REPORT_DATA.steps ? REPORT_DATA.steps.length : 0) },
+    { label: '目标字段', value: s.field_count || (REPORT_DATA.schema_fields ? REPORT_DATA.schema_fields.length : 0) },
+    { label: 'CTE 数', value: cteCount }
+  ];
+
+  var metricsHtml = '';
+  metrics.forEach(function(m, i) {
+    var icons = [
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>',
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'
+    ];
+    metricsHtml += '<div class="metric-card">';
+    metricsHtml += '<div class="metric-icon">' + icons[i] + '</div>';
+    metricsHtml += '<div class="metric-value">' + m.value + '</div>';
+    metricsHtml += '<div class="metric-label">' + m.label + '</div>';
+    metricsHtml += '</div>';
+  });
+  document.getElementById('metricCards').innerHTML = metricsHtml;
+
+  // Description
+  var desc = s.description || '';
+  document.getElementById('overviewDescription').innerHTML = desc ? escapeHtml(desc) : '<span style="color:var(--text-muted);">暂无描述</span>';
+
+  // Pattern tags
+  var patterns = s.patterns || [];
+  var patternsHtml = '<span class="pattern-tags-label">加工模式:</span>';
+  if (patterns.length === 0) {
+    patternsHtml += '<span style="color:var(--text-muted);font-size:12px;">无</span>';
+  } else {
+    patterns.forEach(function(p) {
+      var cat = p.category || 'metadata';
+      patternsHtml += '<span class="pattern-tag pattern-cat-' + cat + '" title="' + escapeHtml(p.detail || '') + '">';
+      patternsHtml += escapeHtml(p.label || cat);
+      if (p.detail) {
+        patternsHtml += '<span class="pattern-tooltip">' + escapeHtml(p.detail) + '</span>';
+      }
+      patternsHtml += '</span>';
+    });
+  }
+  document.getElementById('patternTags').innerHTML = patternsHtml;
+}
+
+// ================================================================
+// Section 3: Render Lineage Graph
+// ================================================================
+function renderLineage() {
+  var lineage = REPORT_DATA.lineage;
+  var wrapper = document.getElementById('lineageWrapper');
+
+  if (!lineage || !lineage.nodes || lineage.nodes.length === 0) {
+    wrapper.innerHTML = '<div class="no-results">无血缘数据</div>';
+    document.getElementById('lineageLegend').innerHTML = '';
+    return;
+  }
+
+  var nodes = lineage.nodes;
+  var edges = lineage.edges || [];
+  var selfRefs = lineage.self_references || [];
+  var layout = lineage.layout || {};
+
+  // Use layout dimensions or compute from nodes
+  var svgW = layout.width || Math.max.apply(null, nodes.map(function(n) { return n.x + n.width; })) + 40;
+  var svgH = layout.height || Math.max.apply(null, nodes.map(function(n) { return n.y + n.height; })) + 40;
+
+  // Build node lookup
+  var nodeMap = {};
+  nodes.forEach(function(n) { nodeMap[n.id] = n; });
+
+  // Build SVG
+  var svg = '<svg class="lineage-svg" viewBox="0 0 ' + svgW + ' ' + svgH + '" xmlns="http://www.w3.org/2000/svg" style="min-width:' + svgW + 'px" xmlns:xhtml="http://www.w3.org/1999/xhtml">';
+
+  // Arrow markers
+  svg += '<defs>';
+  svg += '<marker id="lh-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">';
+  svg += '<path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/></marker>';
+  svg += '<marker id="lh-arrow-self" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">';
+  svg += '<path d="M 0 0 L 10 5 L 0 10 z" fill="#f97316"/></marker>';
+  svg += '</defs>';
+
+  // Render edges
+  edges.forEach(function(e) {
+    var fromNode = nodeMap[e.from];
+    var toNode = nodeMap[e.to];
+    if (!fromNode || !toNode) return;
+
+    var x1 = fromNode.x + fromNode.width;
+    var y1 = fromNode.y + fromNode.height / 2;
+    var x2 = toNode.x;
+    var y2 = toNode.y + toNode.height / 2;
+
+    var isSelfRef = selfRefs.indexOf(e.from) >= 0;
+    var cp = Math.max(30, Math.abs(x2 - x1) * 0.4);
+
+    svg += '<path class="edge-path' + (isSelfRef ? ' self-ref' : '') + '"';
+    svg += ' d="M ' + x1 + ' ' + y1 + ' C ' + (x1 + cp) + ' ' + y1 + ', ' + (x2 - cp) + ' ' + y2 + ', ' + x2 + ' ' + y2 + '"';
+    svg += ' marker-end="url(#' + (isSelfRef ? 'lh-arrow-self' : 'lh-arrow') + ')"';
+
+    if (e.label) {
+      var mx = (x1 + x2) / 2;
+      var my = (y1 + y2) / 2 - 6;
+      svg += '/>';
+      svg += '<text class="edge-label" x="' + mx + '" y="' + my + '" text-anchor="middle">' + escapeHtml(e.label) + '</text>';
+    } else {
+      svg += '/>';
+    }
+  });
+
+  // Self-reference loops
+  selfRefs.forEach(function(ref) {
+    var n = nodeMap[ref];
+    if (!n) return;
+    var cx = n.x + n.width - 15;
+    var cy = n.y + n.height;
+    svg += '<path class="edge-path self-ref"';
+    svg += ' d="M ' + cx + ' ' + cy + ' C ' + (cx + 30) + ' ' + (cy + 30) + ', ' + (cx - 40) + ' ' + (cy + 30) + ', ' + (cx - 20) + ' ' + cy + '"';
+    svg += ' marker-end="url(#lh-arrow-self)"/>';
+    svg += '<text class="edge-label" x="' + cx + '" y="' + (cy + 24) + '" text-anchor="middle">self-ref</text>';
+  });
+
+  // Render nodes
+  nodes.forEach(function(n) {
+    var nodeType = n.type || 'source';
+    svg += '<g class="lh-node" data-id="' + escapeHtml(n.id) + '" data-name="' + escapeHtml(n.name || n.label || '') + '" style="cursor:pointer;">';
+    svg += '<rect class="node-rect ' + nodeType + '" x="' + n.x + '" y="' + n.y + '" width="' + n.width + '" height="' + n.height + '"/>';
+
+    // foreignObject for text wrapping
+    var pad = 6;
+    svg += '<foreignObject x="' + (n.x + pad) + '" y="' + (n.y + 2) + '" width="' + Math.max(10, n.width - pad * 2) + '" height="' + Math.max(10, n.height - 4) + '">';
+    svg += '<div xmlns="http://www.w3.org/1999/xhtml" class="node-content">';
+    svg += '<div class="node-name">' + escapeHtml(n.label || n.name || '') + '</div>';
+    svg += '</div>';
+    svg += '</foreignObject>';
+
+    svg += '</g>';
+  });
+
+  svg += '</svg>';
+  wrapper.innerHTML = svg;
+
+  // Tooltip on hover
+  var tooltip = document.getElementById('lhTooltip');
+  var lhNodes = wrapper.querySelectorAll('.lh-node');
+  lhNodes.forEach(function(g) {
+    g.addEventListener('mouseenter', function(e) {
+      var name = g.getAttribute('data-name');
+      if (name) {
+        tooltip.textContent = name;
+        tooltip.style.display = 'block';
+      }
+    });
+    g.addEventListener('mousemove', function(e) {
+      tooltip.style.left = (e.clientX + 12) + 'px';
+      tooltip.style.top = (e.clientY - 30) + 'px';
+    });
+    g.addEventListener('mouseleave', function() {
+      tooltip.style.display = 'none';
+    });
+  });
+
+  // Legend
+  var legendHtml = '';
+  var hasCte = nodes.some(function(n) { return n.type === 'cte'; });
+  var hasDownstream = nodes.some(function(n) { return n.type === 'downstream'; });
+
+  legendHtml += '<div class="legend-item"><div class="legend-dot source-dot"></div>源表</div>';
+  if (hasCte) legendHtml += '<div class="legend-item"><div class="legend-dot cte-dot"></div>CTE</div>';
+  legendHtml += '<div class="legend-item"><div class="legend-dot step-dot"></div>加工步骤</div>';
+  legendHtml += '<div class="legend-item"><div class="legend-dot target-dot"></div>目标表</div>';
+  if (hasDownstream) legendHtml += '<div class="legend-item"><div class="legend-dot downstream-dot"></div>下游表</div>';
+  if (selfRefs.length > 0) {
+    legendHtml += '<div class="legend-item" style="border-left:1px solid var(--border);padding-left:16px;color:#f97316;">&#x21BB; 自引用</div>';
+  }
+
+  document.getElementById('lineageLegend').innerHTML = legendHtml;
+}
+
+// ================================================================
+// Section 4: Render Schema Table
+// ================================================================
+var schemaSortCol = null;
+var schemaSortAsc = true;
+var schemaFieldsData = [];
+
+function renderSchema() {
+  schemaFieldsData = (REPORT_DATA.schema_fields || []).slice();
+  document.getElementById('schemaCount').textContent = '(' + schemaFieldsData.length + ' 字段)';
+  renderSchemaTable();
+}
+
+function renderSchemaTable() {
+  var data = schemaFieldsData.slice();
+
+  // Sort
+  if (schemaSortCol) {
+    data.sort(function(a, b) {
+      var va = (a[schemaSortCol] || '').toString().toLowerCase();
+      var vb = (b[schemaSortCol] || '').toString().toLowerCase();
+      if (va < vb) return schemaSortAsc ? -1 : 1;
+      if (va > vb) return schemaSortAsc ? 1 : -1;
+      return 0;
+    });
+  }
+
+  var html = '';
+  html += '<thead><tr>';
+  var cols = [
+    { key: 'name', label: '字段名', width: '25%' },
+    { key: 'type', label: '类型', width: '18%' },
+    { key: 'meaning', label: '业务含义', width: '37%' },
+    { key: 'transform_type', label: '加工类型', width: '20%' }
+  ];
+  cols.forEach(function(c) {
+    var sorted = schemaSortCol === c.key ? 'sorted' : '';
+    var indicator = schemaSortCol === c.key ? (schemaSortAsc ? ' &#9650;' : ' &#9660;') : ' &#9650;';
+    html += '<th class="' + sorted + '" style="width:' + c.width + '" onclick="sortSchema(\'' + c.key + '\')">';
+    html += c.label + '<span class="sort-indicator">' + indicator + '</span>';
+    html += '</th>';
+  });
+  html += '</tr></thead><tbody>';
+
+  data.forEach(function(f) {
+    html += '<tr onclick="openDetail(\'' + escapeHtml(f.name) + '\')">';
+    html += '<td><span class="field-name">' + escapeHtml(f.name) + '</span></td>';
+    html += '<td><span class="field-type">' + escapeHtml(f.type || '-') + '</span></td>';
+    html += '<td><span class="field-meaning">' + escapeHtml(f.meaning || '-') + '</span></td>';
+    html += '<td>' + tagHtml(f.transform_type) + '</td>';
+    html += '</tr>';
+  });
+
+  html += '</tbody>';
+  document.getElementById('schemaTable').innerHTML = html;
+}
+
+function sortSchema(col) {
+  if (schemaSortCol === col) {
+    schemaSortAsc = !schemaSortAsc;
+  } else {
+    schemaSortCol = col;
+    schemaSortAsc = true;
+  }
+  renderSchemaTable();
+}
+
+// ================================================================
+// Section 5: Render Steps
+// ================================================================
+function renderSteps() {
+  var steps = REPORT_DATA.steps || [];
+  document.getElementById('stepsCount').textContent = '(' + steps.length + ' 步骤)';
+
+  if (steps.length === 0) {
+    document.getElementById('stepsContainer').innerHTML = '<div class="no-results">无步骤数据</div>';
+    return;
+  }
+
+  var html = '';
+  steps.forEach(function(step, idx) {
+    var isOpen = idx === 0 ? ' open' : '';
+    html += '<div class="step-card' + isOpen + '">';
+    html += '<div class="step-card-header" onclick="toggleStepCard(this)">';
+    html += '<span class="step-toggle">&#9654;</span>';
+    html += '<div class="step-title-block">';
+    html += '<div class="step-title">' + escapeHtml(step.step_id || '?');
+    if (step.rule_code) html += ' <span style="color:var(--text-muted);font-weight:400;font-size:12px;">(' + escapeHtml(step.rule_code) + ')</span>';
+    html += '</div>';
+    if (step.purpose) {
+      html += '<div class="step-purpose">' + escapeHtml(step.purpose) + '</div>';
+    }
+    html += '</div>';
+    // Right side: write_mode + exec_sequence
+    if (step.write_mode) {
+      html += '<span class="write-mode-tag">' + escapeHtml(step.write_mode) + '</span>';
+    }
+    html += '<span class="exec-seq">#' + (step.exec_sequence || (idx + 1)) + '</span>';
+    html += '</div>';
+
+    // Body
+    html += '<div class="step-body"><div class="step-body-inner">';
+
+    // Logic description
+    if (step.logic) {
+      html += '<div class="step-logic">' + escapeHtml(step.logic) + '</div>';
+    }
+
+    // Detail grid
+    html += '<div class="step-detail-grid">';
+
+    // Source tables
+    var srcTables = step.source_tables || [];
+    html += '<div class="step-detail-item">';
+    html += '<div class="detail-label">来源表 (' + srcTables.length + ')</div>';
+    html += '<div class="detail-value">' + (srcTables.length > 0 ? srcTables.map(escapeHtml).join('<br>') : '-') + '</div>';
+    html += '</div>';
+
+    // JOIN summary
+    html += '<div class="step-detail-item">';
+    html += '<div class="detail-label">JOIN 关系</div>';
+    html += '<div class="detail-value">' + escapeHtml(step.joins_summary || '-') + '</div>';
+    html += '</div>';
+
+    // WHERE summary
+    html += '<div class="step-detail-item">';
+    html += '<div class="detail-label">过滤条件</div>';
+    html += '<div class="detail-value">' + escapeHtml(step.where_summary || '-') + '</div>';
+    html += '</div>';
+
+    // GROUP BY
+    var groupBy = step.group_by || [];
+    html += '<div class="step-detail-item">';
+    html += '<div class="detail-label">分组字段 (' + groupBy.length + ')</div>';
+    html += '<div class="detail-value">' + (groupBy.length > 0 ? groupBy.map(escapeHtml).join(', ') : '-') + '</div>';
+    html += '</div>';
+
+    // CTEs
+    var ctes = step.ctes || [];
+    if (ctes.length > 0) {
+      html += '<div class="step-detail-item full-width">';
+      html += '<div class="detail-label">CTE 列表 (' + ctes.length + ')</div>';
+      html += '<div class="cte-list">';
+      ctes.forEach(function(cte) {
+        html += '<div class="cte-item">';
+        html += '<span class="cte-name">' + escapeHtml(cte.name) + '</span>';
+        var cteSrcs = cte.source_tables || [];
+        if (cteSrcs.length > 0) {
+          var srcNames = cteSrcs.map(function(st) {
+            if (typeof st === 'string') return st;
+            return st.name || st.table || '';
+          }).filter(Boolean);
+          if (srcNames.length > 0) {
+            html += '<span class="cte-meta">&larr; ' + srcNames.map(escapeHtml).join(', ') + '</span>';
+          }
+        }
+        if (cte.field_count !== undefined) {
+          html += '<span class="cte-meta">' + cte.field_count + ' fields</span>';
+        }
+        html += '</div>';
+      });
+      html += '</div>';
+      html += '</div>';
+    }
+
+    html += '</div>'; // end grid
+
+    // SQL
+    if (step.raw_sql) {
+      html += '<div style="margin-top:4px;">';
+      html += '<div class="detail-label" style="margin-bottom:6px;">SQL 全文</div>';
+      html += '<pre class="sql-block"><code>' + highlightSQL(step.raw_sql) + '</code></pre>';
+      html += '</div>';
+    }
+
+    html += '</div></div>'; // end body
+    html += '</div>'; // end step-card
+  });
+
+  document.getElementById('stepsContainer').innerHTML = html;
+}
+
+function toggleStepCard(header) {
+  var card = header.closest('.step-card');
+  card.classList.toggle('open');
+}
+
+// ================================================================
+// Section 6: Render Field Mapping
+// ================================================================
+function renderFieldMapping() {
+  var fields = REPORT_DATA.fields || [];
+  document.getElementById('fieldMappingCount').textContent = '(' + fields.length + ' 字段)';
+
+  if (fields.length === 0) {
+    document.getElementById('fieldMappingTable').innerHTML = '';
+    return;
+  }
+
+  var html = '';
+  html += '<thead><tr>';
+  html += '<th style="width:25%">目标字段</th>';
+  html += '<th style="width:35%">来源</th>';
+  html += '<th style="width:12%">加工类型</th>';
+  html += '<th style="width:12%">匹配</th>';
+  html += '<th style="width:16%">步骤</th>';
+  html += '</tr></thead><tbody>';
+
+  fields.forEach(function(f) {
+    var srcText = '-';
+    if (f.sources && f.sources.length > 0) {
+      srcText = f.sources.map(function(s) {
+        var parts = [];
+        if (s.alias) parts.push(s.alias + '.');
+        else if (s.table) parts.push(s.table + '.');
+        parts.push(s.field || '?');
+        return parts.join('');
+      }).join(', ');
+    }
+
+    var matchLabel = '';
+    if (f.in_target_fields === false) {
+      matchLabel = '<span class="tag" style="background:#fef9c3;color:#854d0e;">仅SQL</span>';
+    } else {
+      matchLabel = '<span class="tag" style="background:#dcfce7;color:#166534;">已匹配</span>';
+    }
+
+    html += '<tr data-field="' + escapeHtml(f.target_field) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\')">';
+    html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span></td>';
+    html += '<td><span class="source-info">' + escapeHtml(srcText) + '</span></td>';
+    html += '<td>' + tagHtml(f.transform_type) + '</td>';
+    html += '<td>' + matchLabel + '</td>';
+    html += '<td style="color:var(--text-muted);font-size:12px;">' + escapeHtml(f.producing_step || '-') + '</td>';
+    html += '</tr>';
+  });
+
+  html += '</tbody>';
+  document.getElementById('fieldMappingTable').innerHTML = html;
+}
+
+function handleFieldSearch() {
+  var query = document.getElementById('fieldSearch').value.trim().toLowerCase();
+  var rows = document.querySelectorAll('#fieldMappingTable tbody tr');
+  var noResults = document.getElementById('fieldNoResults');
+  var anyVisible = false;
+
+  rows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    var match = !query || text.indexOf(query) >= 0;
+    row.style.display = match ? '' : 'none';
+    row.classList.toggle('highlight', !!match && !!query);
+    if (match) anyVisible = true;
+  });
+
+  noResults.style.display = anyVisible ? 'none' : '';
+}
+
+// ================================================================
+// Section 7: Render Quality
+// ================================================================
+function renderQuality() {
+  var q = REPORT_DATA.quality;
+  if (!q) {
+    document.getElementById('qualitySection').style.display = 'none';
+    return;
+  }
+
+  var issues = q.issues || [];
+  var aiInsights = q.ai_insights || [];
+  var complexity = q.complexity || {};
+  document.getElementById('qualityCount').textContent = issues.length + ' 问题 / ' + aiInsights.length + ' 洞察';
+
+  var html = '';
+
+  // Complexity stats
+  if (complexity && Object.keys(complexity).length > 0) {
+    html += '<div class="quality-stats">';
+    var stats = [
+      { label: '最大JOIN数', value: complexity.max_join_count },
+      { label: '源表总数', value: complexity.total_source_tables },
+      { label: 'CTE数', value: complexity.max_cte_count || 0 },
+      { label: 'CASE分支', value: complexity.total_case_when_branches || 0 }
+    ];
+    stats.forEach(function(st) {
+      html += '<div class="quality-stat"><div class="stat-label">' + st.label + '</div><div class="stat-value">' + (st.value !== undefined ? st.value : '-') + '</div></div>';
+    });
+    html += '</div>';
+  }
+
+  // Transform distribution
+  var dist = complexity.transform_distribution || {};
+  var distKeys = Object.keys(dist);
+  if (distKeys.length > 0) {
+    var total = distKeys.reduce(function(sum, k) { return sum + dist[k]; }, 0);
+    if (total > 0) {
+      html += '<div class="transform-dist">';
+      html += '<div class="transform-dist-title">加工类型分布</div>';
+      html += '<div class="dist-bar">';
+      var distColors = {
+        direct: '#22c55e', aggregate: '#3b82f6', pivot: '#f97316',
+        case_when: '#8b5cf6', value: '#94a3b8', expression: '#0ea5e9',
+        fallback: '#eab308', window: '#6366f1'
+      };
+      distKeys.forEach(function(k) {
+        var pct = Math.round((dist[k] / total) * 100);
+        if (pct > 0) {
+          var bg = distColors[k] || '#94a3b8';
+          html += '<div class="dist-segment" style="width:' + pct + '%;background:' + bg + ';" title="' + k + ': ' + dist[k] + '">' + (pct >= 8 ? dist[k] : '') + '</div>';
+        }
+      });
+      html += '</div>';
+      html += '<div class="dist-legend">';
+      var distLabels = {
+        direct: '直取', aggregate: '聚合', pivot: '行转列',
+        case_when: '条件', value: '赋值', expression: '表达式',
+        fallback: '兜底', window: '窗口'
+      };
+      distKeys.forEach(function(k) {
+        var bg = distColors[k] || '#94a3b8';
+        html += '<div class="dist-legend-item"><div class="dist-legend-dot" style="background:' + bg + ';"></div>' + (distLabels[k] || k) + ' (' + dist[k] + ')</div>';
+      });
+      html += '</div>';
+      html += '</div>';
+    }
+  }
+
+  // Issues — 按 category 分组，每组可折叠
+  if (issues.length > 0) {
+    // 按类别分组
+    var groups = {};
+    issues.forEach(function(iss) {
+      var cat = iss.category || 'other';
+      var catLabels = {
+        'data_quality': '数据质量',
+        'data_lineage': '数据血缘',
+        'performance': '性能',
+        'maintainability': '可维护性',
+        'field_mapping': '字段映射',
+        'other': '其他'
+      };
+      var catLabel = catLabels[cat] || cat;
+      if (!groups[catLabel]) groups[catLabel] = [];
+      groups[catLabel].push(iss);
+    });
+
+    var groupKeys = Object.keys(groups);
+    html += '<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;">问题列表 <span style="font-weight:400;color:var(--text-muted);">(' + issues.length + ' 个，按类别分组)</span></div>';
+    
+    groupKeys.forEach(function(catLabel) {
+      var catIssues = groups[catLabel];
+      var hasMedium = catIssues.some(function(i) { return i.severity === 'medium' || i.severity === 'critical'; });
+      var groupId = 'issueGroup_' + catLabel.replace(/[^a-zA-Z0-9]/g, '_');
+      
+      // 组头：可折叠
+      html += '<div class="issue-group">';
+      html += '<button class="issue-group-toggle' + (hasMedium ? '' : ' collapsed') + '" onclick="toggleIssueGroup(this)">';
+      html += '<span class="toggle-arrow"' + (hasMedium ? '' : ' style="transform:rotate(90deg)"') + '>&#9654;</span>';
+      html += '<span>' + escapeHtml(catLabel) + '</span>';
+      html += '<span class="issue-group-count">' + catIssues.length + ' 个</span>';
+      if (hasMedium) {
+        html += '<span class="issue-group-warn">需关注</span>';
+      }
+      html += '</button>';
+      
+      // 组内问题列表
+      html += '<div class="issue-group-body"' + (hasMedium ? '' : ' style="display:none;"') + '>';
+      catIssues.forEach(function(iss) {
+        html += '<div class="issue-item">';
+        html += '<span class="issue-severity severity-' + (iss.severity || 'info') + '">' + escapeHtml(iss.severity || 'info') + '</span>';
+        html += '<div>';
+        html += '<div style="font-weight:500;">' + escapeHtml(iss.title || '') + '</div>';
+        if (iss.detail) html += '<div style="color:var(--text-secondary);font-size:12px;margin-top:2px;">' + escapeHtml(iss.detail) + '</div>';
+        html += '</div>';
+        html += '</div>';
+      });
+      html += '</div>'; // issue-group-body
+      html += '</div>'; // issue-group
+    });
+  }
+
+  // AI Insights — 只显示有实际问题的（severity 非 info）
+  var problemInsights = aiInsights.filter(function(ins) {
+    return ins.severity && ins.severity !== 'info';
+  });
+  if (problemInsights.length > 0) {
+    html += '<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px;">AI 洞察 <span style="font-weight:400;color:var(--text-muted);">(' + problemInsights.length + ' 个需关注)</span></div>';
+    problemInsights.forEach(function(ins) {
+      html += '<div class="insight-card">';
+      html += '<div class="insight-title">' + escapeHtml(ins.title || '') + '</div>';
+      if (ins.detail) html += '<div class="insight-detail">' + escapeHtml(ins.detail) + '</div>';
+      if (ins.suggestion) html += '<div class="insight-suggestion">&#9656; ' + escapeHtml(ins.suggestion) + '</div>';
+      html += '</div>';
+    });
+  }
+
+  if (!html) html = '<div class="no-results">无质量问题</div>';
+  document.getElementById('qualityContent').innerHTML = html;
+}
+
+// ================================================================
+// Detail Panel
+// ================================================================
+function openDetail(fieldName) {
+  var details = REPORT_DATA.field_details || {};
+  var detail = details[fieldName];
+
+  // Also try to find from schema_fields or fields as fallback
+  if (!detail) {
+    var schemaField = (REPORT_DATA.schema_fields || []).find(function(f) { return f.name === fieldName; });
+    var fieldEntry = (REPORT_DATA.fields || []).find(function(f) { return f.target_field === fieldName; });
+    if (schemaField || fieldEntry) {
+      detail = {
+        target_field: fieldName,
+        transform_type: (schemaField || {}).transform_type || (fieldEntry || {}).transform_type,
+        meaning: (schemaField || {}).meaning || '',
+        producing_step: (schemaField || {}).producing_step || (fieldEntry || {}).producing_step,
+        penetration_chain: []
+      };
+    }
+  }
+
+  if (!detail) return;
+
+  var panel = document.getElementById('detailPanel');
+  var overlay = document.getElementById('detailOverlay');
+
+  document.getElementById('detailTitle').textContent = detail.target_field || fieldName;
+
+  var html = '';
+
+  // Basic info
+  html += '<div class="detail-section"><h4>基本信息</h4>';
+  html += '<div class="detail-meta-grid">';
+  html += '<div class="detail-meta-item"><span class="label">加工类型</span><span class="value">' + tagHtml(detail.transform_type) + '</span></div>';
+  html += '<div class="detail-meta-item"><span class="label">所属步骤</span><span class="value">' + escapeHtml(detail.producing_step || '-') + '</span></div>';
+  html += '</div></div>';
+
+  // Meaning
+  if (detail.meaning) {
+    html += '<div class="detail-section"><h4>业务含义</h4>';
+    html += '<p style="font-size:14px;line-height:1.7;">' + escapeHtml(detail.meaning) + '</p>';
+    html += '</div>';
+  }
+
+  // Penetration chain
+  var chain = detail.penetration_chain || [];
+  if (chain.length > 0) {
+    html += '<div class="detail-section"><h4>CTE 穿透血缘链</h4>';
+    html += '<div class="penetration-chain">';
+
+    // Target field at top
+    html += '<div class="chain-node" data-level="0">';
+    html += '<div class="chain-node-type">&#9733; 目标字段</div>';
+    html += '<div class="chain-node-field">' + escapeHtml(detail.target_field) + '</div>';
+    html += '</div>';
+
+    chain.forEach(function(node, idx) {
+      // Arrow before each node
+      var arrowText = '';
+      if (node.transform_type === 'aggregate') arrowText = 'SUM() 聚合';
+      else if (node.transform_type === 'fallback') arrowText = 'COALESCE 兜底';
+      else if (node.transform_type === 'pivot') arrowText = '行转列';
+      else if (node.transform_type === 'direct') arrowText = '直接映射';
+      else if (node.transform_type === 'case_when') arrowText = '条件判断';
+      else if (node.transform_type) arrowText = node.transform_type;
+
+      html += '<div class="chain-arrow">';
+      html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>';
+      if (arrowText) html += '<span>' + escapeHtml(arrowText) + '</span>';
+      html += '</div>';
+
+      // Node
+      var nodeTypeLabel = '';
+      var nodeTypeIcon = '';
+      if (node.node_type === 'cte') { nodeTypeLabel = 'CTE'; nodeTypeIcon = '&#9881;'; }
+      else if (node.node_type === 'physical') { nodeTypeLabel = '物理表'; nodeTypeIcon = '&#128229;'; }
+      else if (node.node_type === 'step') { nodeTypeLabel = '步骤'; nodeTypeIcon = '&#9881;'; }
+      else if (node.node_type === 'target') { nodeTypeLabel = '目标'; nodeTypeIcon = '&#9733;'; }
+      else { nodeTypeLabel = node.node_type || '来源'; nodeTypeIcon = '&#9679;'; }
+
+      html += '<div class="chain-node" data-level="' + (idx + 1) + '">';
+      html += '<div class="chain-node-type">' + nodeTypeIcon + ' ' + escapeHtml(nodeTypeLabel) + '</div>';
+      if (node.name) {
+        html += '<div class="chain-node-name">' + escapeHtml(node.name) + (node.alias ? ' (' + escapeHtml(node.alias) + ')' : '') + '</div>';
+      }
+      html += '<div class="chain-node-field">' + escapeHtml(node.field || '?') + '</div>';
+      if (node.transform_type) {
+        html += '<div style="margin-top:4px;">' + tagHtml(node.transform_type) + '</div>';
+      }
+      if (node.expression) {
+        html += '<div class="chain-expr">' + escapeHtml(node.expression) + '</div>';
+      }
+      html += '</div>';
+    });
+
+    html += '</div></div>';
+  }
+
+  // Fallback: show field-level lineage from old format
+  if (chain.length === 0 && detail.lineage && detail.lineage.length > 0) {
+    html += '<div class="detail-section"><h4>字段级血缘</h4>';
+    html += '<div class="penetration-chain">';
+    detail.lineage.forEach(function(l) {
+      var srcParts = [];
+      if (l.source_table) srcParts.push(l.source_table);
+      if (l.source_field) srcParts.push(l.source_field);
+      var srcText = srcParts.join('.') || '?';
+
+      html += '<div class="chain-node" data-level="0">';
+      html += '<div class="chain-node-type">&#128229; 来源</div>';
+      html += '<div class="chain-node-field">' + escapeHtml(srcText) + '</div>';
+      if (l.transform) html += '<div style="margin-top:4px;">' + tagHtml(l.transform) + '</div>';
+      html += '</div>';
+
+      html += '<div class="chain-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg></div>';
+
+      html += '<div class="chain-node" data-level="1">';
+      html += '<div class="chain-node-type">&#9733; 目标</div>';
+      html += '<div class="chain-node-field">' + escapeHtml(detail.target_field) + '</div>';
+      html += '</div>';
+
+      if (l.raw_sql) {
+        html += '<div style="margin-top:8px;"><pre class="sql-block" style="max-height:200px;"><code>' + highlightSQL(l.raw_sql) + '</code></pre></div>';
+      }
+    });
+    html += '</div></div>';
+  }
+
+  document.getElementById('detailBody').innerHTML = html;
+  panel.classList.add('open');
+  overlay.classList.add('open');
+}
+
+function closeDetail() {
+  document.getElementById('detailPanel').classList.remove('open');
+  document.getElementById('detailOverlay').classList.remove('open');
+}
+
+// ================================================================
+// Event Listeners
+// ================================================================
+document.getElementById('fieldSearch').addEventListener('input', handleFieldSearch);
+document.getElementById('detailClose').addEventListener('click', closeDetail);
+document.getElementById('detailOverlay').addEventListener('click', closeDetail);
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeDetail(); });
+
+// Quality collapsible — default collapsed
+document.getElementById('qualityToggle').addEventListener('click', function() {
+  this.classList.toggle('open');
+  document.getElementById('qualityBody').classList.toggle('open');
+});
+
+// Schema collapsible — default collapsed
+document.getElementById('schemaToggle').addEventListener('click', function() {
+  this.classList.toggle('open');
+  document.getElementById('schemaBody').classList.toggle('open');
+});
+
+// Field Mapping collapsible — default collapsed
+document.getElementById('fieldMappingToggle').addEventListener('click', function() {
+  this.classList.toggle('open');
+  document.getElementById('fieldMappingBody').classList.toggle('open');
+});
+
+// Issue group toggle (inline function used by onclick)
+function toggleIssueGroup(btn) {
+  var body = btn.nextElementSibling;
+  var arrow = btn.querySelector('.toggle-arrow');
+  if (body.style.display === 'none') {
+    body.style.display = '';
+    arrow.style.transform = '';
+    btn.classList.remove('collapsed');
+  } else {
+    body.style.display = 'none';
+    arrow.style.transform = 'rotate(90deg)';
+    btn.classList.add('collapsed');
+  }
+}
+window.toggleIssueGroup = toggleIssueGroup;
+
+// ================================================================
+// Init
+// ================================================================
+renderHeader();
+renderOverview();
+renderLineage();
+renderSchema();
+renderSteps();
+renderFieldMapping();
+renderQuality();
+</script>
+
+</body>
+</html>

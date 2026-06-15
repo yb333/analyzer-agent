@@ -1,0 +1,1427 @@
+#!/usr/bin/env python3
+"""
+dws-pipeline-analyzer view_generator — 视图生成器
+从 knowledge_final.json 生成多种输出视图。
+
+Usage:
+    dws-run analyzer view_generator \
+        --input knowledge_final.json \
+        --output docs/output/{target_table}/ \
+        [--views mapping,asset,techspec]
+
+支持的视图:
+    mapping   → mapping.xlsx        (实体级+属性级字段映射)
+    asset     → asset_report.html   (资产说明书，交互式 HTML)
+    techspec  → tech_design.md      (技术设计文档)
+
+默认: all (生成全部视图)
+"""
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+# ── 工具函数 ──────────────────────────────────────────────
+
+def _clean(s):
+    """清洗字符串，None 转 空字符串"""
+    if s is None:
+        return ""
+    return str(s).strip()
+
+
+def _schema_table(schema, table):
+    """拼接 schema.table"""
+    s = _clean(schema)
+    t = _clean(table)
+    if s and t:
+        return f"{s}.{t}"
+    return t or s
+
+
+def _split_schema_table(full):
+    """拆分 schema.table"""
+    if "." in full:
+        parts = full.split(".", 1)
+        return parts[0].strip(), parts[1].strip()
+    return "", full.strip()
+
+
+def _layer_from_schema(schema, table=""):
+    """从 schema 和 table 推断数仓层级"""
+    s = (schema or "").upper()
+    t = (table or "").upper()
+    combined = s + "." + t if s else t
+
+    if "ODS" in combined:
+        return "ODS"
+    if "DIM" in combined:
+        return "DIM"
+    if "DWB" in combined or "DWD" in combined or "DWL" in combined:
+        return "DWB"
+    if "DWS" in combined:
+        return "DWS"
+    if "ADS" in combined or "RPT" in combined or "SLPRD" in combined:
+        return "ADS"
+    if "TMP" in combined or "TEMP" in combined:
+        return "TMP"
+    # 无 schema 的短名（CTE、子查询）标记为 CTE
+    if not s and t:
+        return "CTE"
+    return ""  # 不显示 UNKNOWN
+
+
+# ── 数据转换 ──────────────────────────────────────────────
+
+def build_report_data(knowledge):
+    """将 knowledge 结构转换为 HTML 模板所需的 REPORT_DATA"""
+
+    meta = knowledge.get("meta", {})
+    topo = knowledge.get("topology", {})
+    df = knowledge.get("data_flow", {})
+    fm = knowledge.get("field_mappings", {})
+    bl = knowledge.get("business_logic", {})
+    quality = knowledge.get("quality", {})
+
+    steps_list = topo.get("steps", [])
+    data_flow_steps = df.get("steps", [])
+    fields_list = fm.get("fields", [])
+
+    # ── 构建 CTE 索引（用于穿透）──
+    cte_index = _build_cte_index(data_flow_steps)
+    cte_names_upper = set(cte_index.keys())
+    target_types = meta.get("target_field_types", {})
+    patterns = meta.get("patterns", [])
+
+    # ── summary ──
+    target_table = ""
+    if steps_list:
+        ts = steps_list[0].get("target_schema", "")
+        tt = steps_list[0].get("target_table", "")
+        target_table = _schema_table(ts, tt)
+
+    cm = quality.get("complexity_metrics", {})
+    summary = {
+        "target_table": target_table,
+        "table_cn_name": bl.get("summary", "").split("，")[0] if bl.get("summary") else "",
+        "description": bl.get("summary", ""),
+        "rule_count": len(steps_list),
+        "field_count": len(fields_list),
+        "source_count": len(df.get("tables", [])),
+        "generated_at": meta.get("analysis_time", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        "patterns": patterns,
+        "complexity": {
+            "max_join_count": cm.get("max_join_count", 0),
+            "max_cte_count": cm.get("max_cte_count", 0),
+            "total_source_tables": cm.get("total_source_tables", 0),
+            "total_case_when_branches": cm.get("total_case_when_branches", 0),
+        },
+    }
+
+    # ── lineage (分层布局) ──
+    lineage = _build_lineage_layout(topo, df, bl)
+
+    # ── target_schema (目标表结构) ──
+    schema_fields = []
+    # 去重：同名字段只保留一个（跨步骤合并）
+    seen_fields = {}
+    for f in fields_list:
+        fname = f.get("target_field", "")
+        if fname and fname not in seen_fields:
+            ai_transform = next(
+                (kt for kt in bl.get("key_transforms", []) if kt.get("field") == fname),
+                {}
+            )
+            seen_fields[fname] = {
+                "name": fname,
+                "type": target_types.get(fname.lower(), ""),
+                "meaning": ai_transform.get("meaning", ""),
+                "transform_type": f.get("transform_type", ""),
+                "producing_step": f.get("producing_step", ""),
+            }
+    schema_fields = list(seen_fields.values())
+
+    # ── steps (步骤详情 + SQL) ──
+    steps_out = []
+    for s in steps_list:
+        step_id = s["step_id"]
+        df_step = next((d for d in data_flow_steps if d.get("step_id") == step_id), {})
+        ai_step = next(
+            (d for d in bl.get("step_descriptions", []) if d.get("step_id") == step_id),
+            {}
+        )
+        src_tables = s.get("source_tables_from_sql", [])
+        write_mode = "TRUNCATE+INSERT" if s.get("delete_mode") == "1" else "APPEND"
+
+        step_fields = [f for f in fields_list if f.get("producing_step") == step_id]
+
+        steps_out.append({
+            "step_id": step_id,
+            "rule_code": s.get("rule_code", ""),
+            "exec_sequence": s.get("exec_sequence", 0),
+            "source_tables": src_tables,
+            "target_table": s.get("target_table", ""),
+            "write_mode": write_mode,
+            "field_count": len(step_fields),
+            "purpose": ai_step.get("purpose", ""),
+            "logic": ai_step.get("logic", ""),
+            "joins_summary": ", ".join(
+                _format_join(j.get("join_type", ""), j.get("source_table", ""))
+                for j in df_step.get("joins", [])
+            ),
+            "where_summary": _clean(df_step.get("where_clause", "")),
+            "group_by": df_step.get("group_by", []),
+            "raw_sql": df_step.get("raw_sql", ""),
+            "ctes": [
+                {
+                    "name": c.get("name", ""),
+                    "source_tables": [
+                        {"name": st.get("name", ""), "alias": st.get("alias", ""), "join_type": st.get("join_type", "FROM")}
+                        for st in c.get("source_tables", [])
+                    ],
+                    "field_count": len(c.get("fields", [])),
+                }
+                for c in df_step.get("ctes", [])
+            ],
+        })
+
+    # ── fields (含 CTE 穿透) ──
+    fields_out = []
+    for f in fields_list:
+        sources = []
+        for l in f.get("lineage", []):
+            src_tbl = l.get("source_table", "")
+            if src_tbl and src_tbl.upper() not in ("NULL", "NONE"):
+                sources.append({
+                    "table": src_tbl,
+                    "alias": l.get("alias", ""),
+                    "field": l.get("source_field", ""),
+                })
+
+        fields_out.append({
+            "target_field": f.get("target_field", ""),
+            "producing_step": f.get("producing_step", ""),
+            "transform_type": f.get("transform_type", "expression"),
+            "in_target_fields": f.get("in_target_fields", False),
+            "excel_source_field": f.get("excel_source_field", ""),
+            "validation": f.get("validation", None),
+            "sources": sources,
+        })
+
+    # ── field_details (CTE 穿透血缘链) ──
+    field_details = {}
+    for f in fields_list:
+        fname = f.get("target_field", "")
+        new_type = f.get("transform_type", "expression")
+        if fname in field_details:
+            existing_type = field_details[fname].get("transform_type", "expression")
+            if existing_type != "direct" and new_type == "direct":
+                continue
+        ai_transform = next(
+            (kt for kt in bl.get("key_transforms", []) if kt.get("field") == fname),
+            {}
+        )
+
+        # CTE 穿透血缘链
+        penetration_chain = _build_penetration_chain(f.get("lineage", []), cte_index, cte_names_upper)
+
+        field_details[fname] = {
+            "target_field": fname,
+            "producing_step": f.get("producing_step", ""),
+            "rule_code": f.get("rule_code", ""),
+            "transform_type": new_type,
+            "in_target_fields": f.get("in_target_fields", False),
+            "lineage": f.get("lineage", []),
+            "penetration_chain": penetration_chain,
+            "validation": f.get("validation", None),
+            "meaning": ai_transform.get("meaning", ""),
+        }
+
+    # ── quality ──
+    quality_out = {
+        "complexity": quality.get("complexity_metrics", {}),
+        "issues": quality.get("issues", []),
+        "ai_insights": quality.get("ai_insights", []),
+    }
+
+    return {
+        "summary": summary,
+        "lineage": lineage,
+        "schema_fields": schema_fields,
+        "steps": steps_out,
+        "fields": fields_out,
+        "field_details": field_details,
+        "quality": quality_out,
+    }
+
+
+def _format_join(join_type: str, source_table: str) -> str:
+    """格式化 JOIN 描述（避免 'LEFT JOIN JOIN ON' 重复）"""
+    if join_type == "FROM":
+        return f"FROM {source_table}"
+    return f"{join_type} {source_table}"
+
+
+def _build_cte_index(data_flow_steps):
+    """构建 CTE 索引用于穿透。"""
+    cte_index = {}
+    for s in data_flow_steps:
+        for cte in s.get("ctes", []):
+            cte_key = cte.get("name", "").upper()
+            alias_to_table = {}
+            for st in cte.get("source_tables", []):
+                talias = st.get("alias", "").upper()
+                tname = st.get("name", "")
+                if talias:
+                    alias_to_table[talias] = tname
+            fields_map = {}
+            for cf in cte.get("fields", []):
+                if isinstance(cf, dict) and cf.get("name"):
+                    fields_map[cf["name"].upper()] = cf
+            cte_index[cte_key] = {
+                "alias_to_table": alias_to_table,
+                "fields_map": fields_map,
+                "source_tables": cte.get("source_tables", []),
+            }
+    return cte_index
+
+
+def _build_penetration_chain(lineages, cte_index, cte_names_upper, visited=None, depth=0):
+    """构建字段穿透血缘链（用于详情面板展示）。
+
+    返回: [{level, node_type, name, field, transform_type, expression}, ...]
+    """
+    if visited is None:
+        visited = set()
+    if depth > 10 or not lineages:
+        return []
+
+    chain = []
+    for l in lineages:
+        src_table = l.get("source_table", "")
+        src_field = l.get("source_field", "")
+        cte_name = l.get("cte_name", "")
+        raw_sql = l.get("raw_sql", "")
+        cte_transform = l.get("cte_transform_type", "")
+
+        if cte_name and cte_name.upper() in cte_index:
+            if cte_name.upper() in visited:
+                continue
+            visited.add(cte_name.upper())
+
+            # CTE 节点
+            chain.append({
+                "level": depth,
+                "node_type": "cte",
+                "name": cte_name,
+                "field": src_field,
+                "transform_type": cte_transform or "unknown",
+                "expression": l.get("cte_expression", raw_sql),
+            })
+
+            # 递归 CTE 内部
+            cte_info = cte_index[cte_name.upper()]
+            cte_field_info = cte_info["fields_map"].get(src_field.upper(), {})
+            cte_source_fields = cte_field_info.get("source_fields", l.get("cte_source_fields", []))
+            cte_alias_to_table = cte_info["alias_to_table"]
+
+            for csf in cte_source_fields:
+                csf_alias = csf.get("alias", "").upper()
+                csf_field = csf.get("field", "")
+                physical_table = cte_alias_to_table.get(csf_alias, "")
+
+                if physical_table:
+                    sch, tbl = _split_schema_table(physical_table)
+                    chain.append({
+                        "level": depth + 1,
+                        "node_type": "physical",
+                        "name": physical_table,
+                        "field": csf_field,
+                        "alias": csf.get("alias", ""),
+                        "transform_type": "direct",
+                        "expression": "",
+                    })
+                elif csf_alias in cte_names_upper:
+                    # 嵌套 CTE
+                    nested_chain = _build_penetration_chain(
+                        [{"source_table": csf_alias, "source_field": csf_field, "cte_name": csf_alias}],
+                        cte_index, cte_names_upper, visited, depth + 2
+                    )
+                    chain.extend(nested_chain)
+
+            visited.discard(cte_name.upper())
+        elif src_table and src_table.upper() not in cte_names_upper:
+            # 物理源表
+            chain.append({
+                "level": depth,
+                "node_type": "physical",
+                "name": src_table,
+                "field": src_field,
+                "alias": l.get("alias", ""),
+                "transform_type": l.get("transform", "direct"),
+                "expression": raw_sql,
+            })
+
+    return chain
+
+
+def _build_lineage_layout(topo, df, bl=None):
+    """构建分层布局的血缘图数据（Python 端预计算坐标）。
+
+    分层策略：
+    - Layer 0: 物理源表（ODS/DWB/DIM）
+    - Layer 1: CTE（如果有）
+    - Layer 2: 步骤节点
+    - Layer 3: 目标表
+    - Layer 4: 下游视图/表
+
+    复杂场景：每层垂直排列，支持滚动。
+    """
+    tables = df.get("tables", [])
+    steps_list = topo.get("steps", [])
+    data_deps = topo.get("data_dependencies", [])
+    self_refs = topo.get("self_references", [])
+    data_flow_steps = df.get("steps", [])
+    bl = bl or {}
+
+    # ── 1. 分类节点 ──
+    target_tables = set()
+    for s in steps_list:
+        tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
+        target_tables.add(tf)
+
+    # 收集 CTE 名
+    cte_names = set()
+    cte_source_tables = {}  # {cte_name: [physical_tables]}
+    for s in data_flow_steps:
+        for cte in s.get("ctes", []):
+            cn = cte.get("name", "")
+            if cn:
+                cte_names.add(cn)
+                phys = []
+                for st in cte.get("source_tables", []):
+                    tname = st.get("name", "")
+                    if tname and tname.upper() not in cte_names:
+                        phys.append(tname)
+                cte_source_tables[cn] = phys
+
+    # 物理源表（排除 CTE 名和目标表）
+    physical_sources = []
+    seen_phys = set()
+    for t in tables:
+        tname = _schema_table(t.get("schema", ""), t.get("name", ""))
+        if tname in target_tables:
+            continue
+        if tname.upper() in cte_names:
+            continue
+        if tname in seen_phys:
+            continue
+        seen_phys.add(tname)
+        physical_sources.append(tname)
+
+    # 加上 CTE 内部的物理表
+    for cte_name, phys_list in cte_source_tables.items():
+        for p in phys_list:
+            if p not in seen_phys and p not in target_tables:
+                seen_phys.add(p)
+                physical_sources.append(p)
+
+    # ── 2. 分层 ──
+    # Layer 0: 物理源表
+    layer0 = physical_sources
+    # Layer 1: CTE
+    layer1 = list(cte_names)
+    # Layer 2: 步骤
+    layer2 = [s["step_id"] for s in steps_list]
+    # Layer 3: 主目标表
+    layer3 = []
+    # Layer 4: 下游表（视图等）
+    layer4 = []
+    main_target = ""
+    if steps_list:
+        main_target = _schema_table(steps_list[0].get("target_schema", ""), steps_list[0].get("target_table", ""))
+        layer3.append(main_target)
+        for s in steps_list[1:]:
+            tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
+            if tf != main_target and tf not in layer4:
+                layer4.append(tf)
+
+    layers = [l for l in [layer0, layer1, layer2, layer3, layer4] if l]
+
+    # ── 3. 计算坐标 ──
+    LAYER_WIDTH = 240
+    NODE_HEIGHT = 32
+    NODE_GAP = 10
+    NODE_WIDTH = 200
+    MARGIN_TOP = 30
+    MARGIN_LEFT = 20
+
+    max_nodes_in_layer = max(len(l) for l in layers) if layers else 0
+    total_width = MARGIN_LEFT * 2 + len(layers) * LAYER_WIDTH
+    total_height = MARGIN_TOP * 2 + max_nodes_in_layer * (NODE_HEIGHT + NODE_GAP)
+
+    # 紧凑模式：超过 8 个节点启用
+    compact = max_nodes_in_layer > 8
+    if compact:
+        NODE_HEIGHT = 26
+        NODE_GAP = 6
+
+    positions = {}
+    node_meta = {}
+    for li, layer in enumerate(layers):
+        x = MARGIN_LEFT + li * LAYER_WIDTH
+        layer_count = len(layer)
+        total_h = layer_count * (NODE_HEIGHT + NODE_GAP) - NODE_GAP
+        # 垂直居中
+        start_y = (total_height - total_h) / 2 if total_h < total_height else MARGIN_TOP
+
+        for ni, name in enumerate(layer):
+            y = start_y + ni * (NODE_HEIGHT + NODE_GAP)
+            node_id = f"n_{li}_{ni}"
+            positions[name] = (x, y, node_id)
+
+            # 节点元数据
+            if li == 0:
+                node_type = "source"
+            elif li == 1:
+                node_type = "cte"
+            elif li == 2:
+                node_type = "step"
+            elif li == 3:
+                node_type = "target"
+            else:
+                node_type = "downstream"
+
+            # 步骤节点附加信息
+            label = name
+            step_data = None
+            if node_type == "step":
+                step_idx = int(name.split("_")[1]) - 1 if "_" in name else 0
+                if step_idx < len(steps_list):
+                    s = steps_list[step_idx]
+                    ai_step = next(
+                        (d for d in bl.get("step_descriptions", []) if d.get("step_id") == name),
+                        {}
+                    )
+                    purpose = ai_step.get("purpose", "")
+                    label = f"{name}: {purpose}" if purpose else f"{name} ({s.get('rule_code', '')})"
+                    step_data = {"rule_code": s.get("rule_code", ""), "exec_sequence": s.get("exec_sequence", 0)}
+            elif node_type == "target":
+                cn = bl.get("summary", "").split("，")[0] if bl.get("summary") else ""
+                label = name
+                if cn:
+                    label = f"{name}\n({cn})"
+
+            node_meta[node_id] = {
+                "id": node_id,
+                "name": name,
+                "label": label,
+                "x": x,
+                "y": y,
+                "width": NODE_WIDTH,
+                "height": NODE_HEIGHT,
+                "type": node_type,
+                "layer": li,
+                "step_data": step_data,
+            }
+
+    # ── 4. 计算边 ──
+    edges = []
+
+    # 物理源表 → CTE
+    for cte_name, phys_list in cte_source_tables.items():
+        for phys in phys_list:
+            if phys in positions and cte_name in positions:
+                edges.append({
+                    "from": positions[phys][2],
+                    "to": positions[cte_name][2],
+                    "label": "",
+                    "type": "source_to_cte",
+                })
+
+    # 物理源表 → 步骤（主查询 JOIN）
+    for s in steps_list:
+        sid = s["step_id"]
+        if sid not in positions:
+            continue
+        for src in s.get("source_tables_from_sql", []):
+            if src in positions:
+                edges.append({
+                    "from": positions[src][2],
+                    "to": positions[sid][2],
+                    "label": "",
+                    "type": "source_to_step",
+                })
+
+    # CTE → 步骤
+    for s in data_flow_steps:
+        sid = s.get("step_id", "")
+        if sid not in positions:
+            continue
+        for cte in s.get("ctes", []):
+            cn = cte.get("name", "")
+            if cn in positions:
+                edges.append({
+                    "from": positions[cn][2],
+                    "to": positions[sid][2],
+                    "label": "",
+                    "type": "cte_to_step",
+                })
+
+    # 步骤 → 目标表
+    for s in steps_list:
+        sid = s["step_id"]
+        tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
+        if sid in positions and tf in positions:
+            edges.append({
+                "from": positions[sid][2],
+                "to": positions[tf][2],
+                "label": sid,
+                "type": "step_to_target",
+            })
+
+    # 自引用
+    self_ref_ids = []
+    for sr in self_refs:
+        target = sr.get("table", "")
+        if target in positions:
+            self_ref_ids.append(positions[target][2])
+
+    return {
+        "nodes": list(node_meta.values()),
+        "edges": edges,
+        "self_references": self_ref_ids,
+        "layout": {
+            "width": total_width,
+            "height": total_height,
+            "layer_count": len(layers),
+            "compact": compact,
+            "layer_width": LAYER_WIDTH,
+            "node_width": NODE_WIDTH,
+            "node_height": NODE_HEIGHT,
+            "node_gap": NODE_GAP,
+        },
+        "schedule_groups": [
+            {"sequence": g.get("sequence", 0), "steps": g.get("parallel_steps", [])}
+            for g in topo.get("schedule_plan", [])
+        ],
+    }
+
+
+def _build_lineage(topo, df, bl=None):
+    """构建血缘图的节点和边"""
+    tables = df.get("tables", [])
+    steps_list = topo.get("steps", [])
+    data_deps = topo.get("data_dependencies", [])
+    self_refs = topo.get("self_references", [])
+    sched_plan = topo.get("schedule_plan", [])
+    bl = bl or {}
+
+    nodes = []
+    edges = []
+    node_ids = set()
+
+    # Target node — show full schema.table
+    target_full = ""
+    if steps_list:
+        ts = steps_list[0].get("target_schema", "")
+        tt = steps_list[0].get("target_table", "")
+        target_full = _schema_table(ts, tt)
+        cn_name = bl.get("summary", "").split("，")[0] if bl.get("summary") else ""
+        nodes.append({
+            "id": "target",
+            "name": target_full if ts else tt,
+            "schema": ts,
+            "role": "target",
+            "layer": _layer_from_schema(ts, tt),
+            "label_extra": cn_name,
+        })
+        node_ids.add("target")
+
+    # Source nodes — show full schema.table or CTE name
+    seen_sources = set()
+    for s in steps_list:
+        for src in s.get("source_tables_from_sql", []):
+            if src in seen_sources:
+                continue
+            seen_sources.add(src)
+            sch, tbl = _split_schema_table(src)
+            # Don't add target table as source (self-ref handled separately)
+            if _schema_table(sch, tbl) == target_full:
+                continue
+            nid = f"src_{len(nodes)}"
+            display_name = src if sch else tbl  # CTE has no schema, show short name
+            nodes.append({
+                "id": nid,
+                "name": display_name,
+                "schema": sch,
+                "role": "source",
+                "layer": _layer_from_schema(sch, tbl),
+            })
+            node_ids.add(nid)
+
+    # 建立 source_table -> node_id 映射
+    # key 用原始 source_tables_from_sql 的值（与 steps 中的引用一致）
+    src_to_node = {}
+    for raw_src in seen_sources:
+        sch, tbl = _split_schema_table(raw_src)
+        if _schema_table(sch, tbl) == target_full:
+            continue
+        # 找到对应的 node
+        for n in nodes:
+            if n["role"] != "source":
+                continue
+            n_sch = n.get("schema", "")
+            n_tbl_raw = n.get("name", "")
+            # 匹配：schema.table 或 裸名
+            if raw_src == n_tbl_raw or (n_sch and f"{n_sch}.{n_tbl_raw}" == raw_src) or (n_sch and n_tbl_raw == raw_src):
+                src_to_node[raw_src] = n["id"]
+                break
+
+    # Step nodes + edges
+    for i, s in enumerate(steps_list):
+        sid = f"step_{i}"
+        rc = s.get("rule_code", "")
+        # Find AI purpose for this step
+        ai_step = next(
+            (d for d in bl.get("step_descriptions", []) if d.get("step_id") == s["step_id"]),
+            {}
+        )
+        purpose = ai_step.get("purpose", "")
+        step_label = f"{rc}"
+        if purpose:
+            step_label += f": {purpose}"
+
+        nodes.append({
+            "id": sid,
+            "name": step_label,
+            "schema": "",
+            "role": "step",
+            "layer": "",
+        })
+
+        # edges: source → step
+        for src in s.get("source_tables_from_sql", []):
+            sch, tbl = _split_schema_table(src)
+            full = _schema_table(sch, tbl)
+            if full == target_full:
+                # self-reference: target → step (用虚线)
+                edges.append({"from": "target", "to": sid, "label": s["step_id"]})
+            else:
+                nid = src_to_node.get(src)
+                if nid:
+                    edges.append({"from": nid, "to": sid, "label": ""})
+
+        # edges: step → target (只有写入非视图的步骤才连 target)
+        # 视图步骤(step_2)写入的是 _i 表，不直接写入目标 _f 表
+        step_target = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
+        if step_target == target_full:
+            edges.append({"from": sid, "to": "target", "label": s["step_id"]})
+        else:
+            # 非主目标的写入步骤：创建一个对应的 target 节点
+            alt_target_id = None
+            for n in nodes:
+                if n["role"] == "target" and n.get("name") == step_target:
+                    alt_target_id = n["id"]
+                    break
+            if not alt_target_id:
+                alt_id = f"tgt_{len(nodes)}"
+                ts, tt = _split_schema_table(step_target)
+                nodes.append({
+                    "id": alt_id,
+                    "name": step_target,
+                    "schema": ts,
+                    "role": "target",
+                    "layer": _layer_from_schema(ts, tt),
+                })
+                alt_target_id = alt_id
+            edges.append({"from": sid, "to": alt_target_id, "label": s["step_id"]})
+
+    # Self-reference node ids
+    self_ref_ids = []
+    for sr in self_refs:
+        self_ref_ids.append("target")  # self-ref always on target
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "self_references": self_ref_ids,
+        "schedule_groups": [{"sequence": g.get("sequence", 0), "steps": g.get("parallel_steps", [])} for g in sched_plan],
+    }
+
+
+# ── 视图生成: asset_report.html ─────────────────────────
+
+def generate_asset_report(knowledge, output_dir):
+    """生成资产说明书 HTML"""
+    report_data = build_report_data(knowledge)
+
+    # 读取模板
+    template_path = Path(__file__).parent / "templates" / "asset_report.html"
+    if not template_path.exists():
+        print(f"  错误: 模板文件不存在: {template_path}", file=sys.stderr)
+        return False
+
+    template = template_path.read_text(encoding="utf-8")
+
+    # 替换占位符
+    json_str = json.dumps(report_data, ensure_ascii=False, indent=2)
+    # 转义 </script> 避免浏览器误解析
+    json_str_safe = json_str.replace("</script>", "<\\/script>")
+    html = template.replace("{{REPORT_DATA}}", json_str_safe)
+
+    # 替换 title 占位符
+    target_table = report_data["summary"]["target_table"]
+    html = html.replace("{{TARGET_TABLE}}", target_table)
+
+    # 写入
+    output_path = Path(output_dir) / "asset_report.html"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html, encoding="utf-8")
+    print(f"  ✓ 资产说明书: {output_path}")
+    return True
+
+
+# ── 视图生成: mapping.xlsx ──────────────────────────────
+
+def generate_mapping(knowledge, output_dir):
+    """生成 Mapping Excel
+
+    规则：
+    - 实体级 mapping：只展示物理源表 → 目标表（CTE/中间表不显示）
+    - 属性级 mapping：穿透 CTE 到物理源表字段
+    """
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        print("  错误: 缺少 openpyxl，请 pip install openpyxl", file=sys.stderr)
+        return False
+
+    topo = knowledge.get("topology", {})
+    df = knowledge.get("data_flow", {})
+    fm = knowledge.get("field_mappings", {})
+    bl = knowledge.get("business_logic", {})
+
+    steps_list = topo.get("steps", [])
+    data_flow_steps = df.get("steps", [])
+    fields_list = fm.get("fields", [])
+    tables_info = df.get("tables", [])
+
+    # ── 构建 CTE 字典：{CTE名(UPPER): {source_tables, fields_map}} ──
+    cte_index = {}
+    cte_names_upper = set()
+    for s in data_flow_steps:
+        for cte in s.get("ctes", []):
+            cte_key = cte.get("name", "").upper()
+            cte_names_upper.add(cte_key)
+            src_tables = cte.get("source_tables", [])
+            # 构建 alias → 物理表名 的映射
+            alias_to_table = {}
+            for st in src_tables:
+                talias = st.get("alias", "").upper()
+                tname = st.get("name", "")
+                if talias:
+                    alias_to_table[talias] = tname
+            # 构建 field_name → source_fields 的映射
+            fields_map = {}
+            for cf in cte.get("fields", []):
+                if isinstance(cf, dict) and cf.get("name"):
+                    fields_map[cf["name"].upper()] = cf
+            cte_index[cte_key] = {
+                "alias_to_table": alias_to_table,
+                "fields_map": fields_map,
+                "source_tables": src_tables,
+            }
+
+    # ── 构建 target table 列表（用于过滤）──
+    target_tables_set = set()
+    for s in steps_list:
+        tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
+        target_tables_set.add(tf)
+
+    wb = Workbook()
+
+    # DDL 元数据（字段类型+中文名）
+    meta = knowledge.get("meta", {})
+    ddl_types = meta.get("target_field_types", {})
+    ddl_comments = meta.get("target_field_comments", {})
+
+    # ════════════════════════════════════════════════════════════
+    # Sheet 1: 实体级 mapping — 物理源表 → 目标表
+    # ════════════════════════════════════════════════════════════
+    ws1 = wb.active
+    ws1.title = "实体级mapping"
+    # 源表别名放在源表表名后面
+    headers1 = [
+        "源表schema", "源表物理表名", "源表别名", "源表中文名",
+        "目标表schema", "目标表中文名", "目标表物理表名",
+        "关联&限定条件", "备注", "调度任务名称", "执行路径", "依赖参数"
+    ]
+    ws1.append(headers1)
+
+    target_schema = steps_list[0].get("target_schema", "") if steps_list else ""
+    target_table = steps_list[0].get("target_table", "") if steps_list else ""
+    target_cn = bl.get("summary", "").split("，")[0] if bl.get("summary") else target_table
+
+    # 收集所有物理源表（含 CTE 内部物理表），排除 CTE 名和目标表自身
+    seen_sources = set()
+    entity_rows = []
+    for s in steps_list:
+        sid = s["step_id"]
+        df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
+        joins = df_step.get("joins", [])
+        ctes = df_step.get("ctes", [])
+
+        # 主查询 JOIN（物理表）
+        for j in joins:
+            src_full = j.get("source_table", "")
+            if src_full in seen_sources or src_full in target_tables_set:
+                continue
+            # 排除 CTE 名（无 schema 的短名）
+            if src_full.upper() in cte_names_upper:
+                continue
+            seen_sources.add(src_full)
+            sch, tbl = _split_schema_table(src_full)
+            join_type = j.get("join_type", "")
+            join_cond = j.get("join_condition", "")
+            if join_type == "FROM":
+                relation = "主表"
+            else:
+                relation = f"{join_type} ON {join_cond}" if join_cond else join_type
+            entity_rows.append([
+                sch, tbl, j.get("alias", ""), "",
+                target_schema, target_cn, target_table,
+                relation, "", "", "", "",
+            ])
+
+        # CTE 内部物理表
+        for cte in ctes:
+            for st in cte.get("source_tables", []):
+                tname = st.get("name", "")
+                if not tname or tname in seen_sources or tname in target_tables_set:
+                    continue
+                # 排除 CTE 名引用（嵌套 CTE）
+                if tname.upper() in cte_names_upper:
+                    continue
+                seen_sources.add(tname)
+                sch, tbl = _split_schema_table(tname)
+                talias = st.get("alias", "")
+                jt = st.get("join_type", "FROM")
+                relation = f"CTE {cte['name']} 内部 {jt}" if jt != "FROM" else f"CTE {cte['name']} 主表"
+                entity_rows.append([
+                    sch, tbl, talias, "",
+                    target_schema, target_cn, target_table,
+                    relation, "", "", "", "",
+                ])
+
+    for row in entity_rows:
+        ws1.append(row)
+
+    # ════════════════════════════════════════════════════════════
+    # Sheet 2: 属性级 mapping — 穿透 CTE 到物理源表字段
+    # ════════════════════════════════════════════════════════════
+    ws2 = wb.create_sheet("属性级mapping")
+    # 源表别名放在源表物理表名后面
+    headers2 = [
+        "源表schema", "源表物理表名", "源表别名", "源字段名", "源字段类型",
+        "映射规则", "映射表达式",
+        "目标字段名", "目标字段中文名", "目标字段类型"
+    ]
+    ws2.append(headers2)
+
+    # 过滤视图步骤：只取真正写数据的步骤（TRUNCATE+INSERT），
+    # 排除纯投影视图步骤（CREATE VIEW / APPEND 且 SQL 含 CREATE VIEW）
+    def _is_view_step(step_id: str) -> bool:
+        df_step = next((d for d in data_flow_steps if d.get("step_id") == step_id), {})
+        topo_step = next((s for s in steps_list if s.get("step_id") == step_id), {})
+        raw_sql = (df_step.get("raw_sql", "") or "").upper()
+        delete_mode = topo_step.get("delete_mode", "1")
+        # 视图步骤特征：delete_mode != "1" 且 SQL 含 CREATE VIEW
+        if "CREATE VIEW" in raw_sql or "CREATE OR REPLACE VIEW" in raw_sql:
+            return True
+        return False
+
+    # 去重：同一目标字段名只保留一次（优先保留非 direct 的加工版本）
+    seen_target_fields = {}
+    filtered_fields = []
+    for f in fields_list:
+        fname = f.get("target_field", "")
+        step_id = f.get("producing_step", "")
+        # 跳过视图步骤的字段
+        if _is_view_step(step_id):
+            continue
+        if not fname:
+            continue
+        # 同名字段去重：优先保留有加工逻辑的
+        if fname in seen_target_fields:
+            existing_idx = seen_target_fields[fname]
+            existing_tt = filtered_fields[existing_idx].get("transform_type", "expression")
+            new_tt = f.get("transform_type", "expression")
+            priority = {"unknown": -1, "value": 0, "direct": 1, "expression": 2, "fallback": 3, "case_when": 4, "aggregate": 5, "pivot": 6, "window": 7}
+            if priority.get(new_tt, 0) > priority.get(existing_tt, 0):
+                filtered_fields[existing_idx] = f
+        else:
+            seen_target_fields[fname] = len(filtered_fields)
+            filtered_fields.append(f)
+
+    for f in filtered_fields:
+        tt = f.get("transform_type", "expression")
+        rule_map = {"direct": "直取", "value": "赋值"}
+        rule = rule_map.get(tt, "加工")
+
+        target_field_name = f.get("target_field", "")
+        # 字段中文名：优先 DDL COMMENT，留空而非瞎写
+        field_cn = ddl_comments.get(target_field_name.lower(), "")
+        # 字段类型：以 DDL 为准
+        field_type = ddl_types.get(target_field_name.lower(), "")
+
+        lineages = f.get("lineage", [])
+
+        # ── 穿透 CTE 到物理源表 ──
+        physical_sources = _resolve_physical_sources(lineages, cte_index, cte_names_upper, set())
+
+        if not physical_sources:
+            # 无来源（审计字段 value 类型等）
+            ws2.append([
+                "", "", "", "", "",
+                rule, "",
+                target_field_name, field_cn, field_type,
+            ])
+        else:
+            for ps in physical_sources:
+                ws2.append([
+                    ps["schema"], ps["table"], ps.get("alias", ""), ps["field"], "",
+                    rule, ps.get("raw_sql", ""),
+                    target_field_name, field_cn, field_type,
+                ])
+
+    # 写入
+    output_path = Path(output_dir) / "mapping.xlsx"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(str(output_path))
+    print(f"  ✓ Mapping Excel: {output_path}")
+    return True
+
+
+def _resolve_physical_sources(lineages, cte_index, cte_names_upper, visited, depth=0):
+    """穿透 CTE 到物理源表字段。
+
+    lineages: field.lineage 列表
+    cte_index: {CTE名(UPPER): {alias_to_table, fields_map, source_tables}}
+    cte_names_upper: 所有 CTE 名的大写集合
+    visited: 已访问的 CTE 名（防循环）
+    depth: 递归深度（最大 10）
+
+    返回: [{schema, table, field, alias, raw_sql}, ...]
+    """
+    if depth > 10 or not lineages:
+        return []
+
+    results = []
+    for l in lineages:
+        src_table = l.get("source_table", "")
+        src_field = l.get("source_field", "")
+        cte_name = l.get("cte_name", "")
+        raw_sql = l.get("raw_sql", "")
+
+        if cte_name and cte_name.upper() in cte_index:
+            # 来源是 CTE — 递归穿透
+            cte_info = cte_index[cte_name.upper()]
+            if cte_name.upper() in visited:
+                continue
+            visited.add(cte_name.upper())
+
+            cte_field_info = cte_info["fields_map"].get(src_field.upper(), {})
+            cte_source_fields = cte_field_info.get("source_fields", l.get("cte_source_fields", []))
+            cte_alias_to_table = cte_info["alias_to_table"]
+
+            for csf in cte_source_fields:
+                csf_alias = csf.get("alias", "").upper()
+                csf_field = csf.get("field", "")
+
+                # alias → 物理表
+                physical_table = cte_alias_to_table.get(csf_alias, "")
+
+                if physical_table:
+                    # 找到物理表
+                    sch, tbl = _split_schema_table(physical_table)
+                    results.append({
+                        "schema": sch,
+                        "table": tbl,
+                        "field": csf_field,
+                        "alias": csf.get("alias", ""),
+                        "raw_sql": raw_sql,
+                    })
+                elif csf_alias in cte_names_upper:
+                    # 嵌套 CTE — 递归穿透
+                    nested_cte = cte_index.get(csf_alias, {})
+                    nested_fields_map = nested_cte.get("fields_map", {})
+                    nested_field = nested_fields_map.get(csf_field.upper(), {})
+                    nested_sources = nested_field.get("source_fields", [])
+                    nested_alias_to_table = nested_cte.get("alias_to_table", {})
+                    for nsf in nested_sources:
+                        nsf_alias = nsf.get("alias", "").upper()
+                        nsf_table = nested_alias_to_table.get(nsf_alias, "")
+                        if nsf_table:
+                            sch, tbl = _split_schema_table(nsf_table)
+                            results.append({
+                                "schema": sch,
+                                "table": tbl,
+                                "field": nsf.get("field", ""),
+                                "alias": nsf.get("alias", ""),
+                                "raw_sql": raw_sql,
+                            })
+
+            visited.discard(cte_name.upper())
+        elif src_table and src_table.upper() not in cte_names_upper:
+            # 直接物理源表
+            sch, tbl = _split_schema_table(src_table)
+            results.append({
+                "schema": sch,
+                "table": tbl,
+                "field": src_field,
+                "alias": l.get("alias", ""),
+                "raw_sql": raw_sql,
+            })
+
+    return results
+
+
+# ── 视图生成: tech_design.md ────────────────────────────
+
+def generate_tech_design(knowledge, output_dir):
+    """生成技术设计文档 Markdown"""
+    topo = knowledge.get("topology", {})
+    df = knowledge.get("data_flow", {})
+    fm = knowledge.get("field_mappings", {})
+    bl = knowledge.get("business_logic", {})
+    quality = knowledge.get("quality", {})
+    source = knowledge.get("source", {})
+
+    steps_list = topo.get("steps", [])
+    data_flow_steps = df.get("steps", [])
+    fields_list = fm.get("fields", [])
+    sched_plan = topo.get("schedule_plan", [])
+    self_refs = topo.get("self_references", [])
+
+    target_schema = steps_list[0].get("target_schema", "") if steps_list else ""
+    target_table = steps_list[0].get("target_table", "") if steps_list else ""
+    target_full = _schema_table(target_schema, target_table)
+
+    lines = []
+    lines.append(f"# {target_table} 技术设计文档")
+    lines.append("")
+    lines.append(f"> 由 dws-pipeline-analyzer 从制品包反向生成")
+    lines.append(f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append("")
+
+    # ── 1. 概述 ──
+    lines.append("## 1. 概述")
+    lines.append("")
+    lines.append("| 项目 | 值 |")
+    lines.append("|------|-----|")
+    lines.append(f"| 目标表 | {target_full} |")
+    lines.append(f"| 中文名 | {bl.get('summary', '').split('，')[0] if bl.get('summary') else '-'} |")
+    lines.append(f"| 业务定位 | {bl.get('summary', '-')} |")
+    lines.append(f"| 步骤数 | {len(steps_list)} |")
+    lines.append(f"| 源表数 | {len(df.get('tables', []))} |")
+    lines.append(f"| 字段数 | {len(fields_list)} |")
+    lines.append(f"| 方言 | {knowledge.get('meta', {}).get('dialect', 'dws')} |")
+    lines.append("")
+
+    # ── 2. 复杂度分析 ──
+    cm = quality.get("complexity_metrics", {})
+    lines.append("## 2. 复杂度分析")
+    lines.append("")
+    lines.append("| 维度 | 值 |")
+    lines.append("|------|-----|")
+    lines.append(f"| 最大 JOIN 数 | {cm.get('max_join_count', '-')} |")
+    lines.append(f"| CTE 数 | {cm.get('max_cte_count', '-')} |")
+    lines.append(f"| 源表总数 | {cm.get('total_source_tables', '-')} |")
+    lines.append(f"| CASE WHEN 分支 | {cm.get('total_case_when_branches', '-')} |")
+    td = cm.get("transform_distribution", {})
+    if td:
+        dist_str = ", ".join(f"{k}={v}" for k, v in td.items())
+        lines.append(f"| 转换类型分布 | {dist_str} |")
+    lines.append("")
+
+    # ── 3. 分段策略 ──
+    lines.append("## 3. 分段策略")
+    lines.append("")
+    lines.append("| 步骤 | 规则编码 | 执行序列 | 源表 | 写入模式 |")
+    lines.append("|------|---------|---------|------|---------|")
+    for s in steps_list:
+        wm = "TRUNCATE+INSERT" if s.get("delete_mode") == "1" else "APPEND"
+        srcs = ", ".join(s.get("source_tables_from_sql", []))
+        lines.append(f"| {s['step_id']} | {s.get('rule_code', '')} | {s.get('exec_sequence', 0)} | {srcs} | {wm} |")
+    lines.append("")
+
+    # 并行/串行说明
+    if sched_plan:
+        lines.append("**并行/串行关系:**")
+        for g in sched_plan:
+            seq = g.get("sequence", 0)
+            psteps = ", ".join(g.get("parallel_steps", []))
+            if len(g.get("parallel_steps", [])) > 1:
+                lines.append(f"- 序列 {seq}: {psteps} （并行）")
+            else:
+                lines.append(f"- 序列 {seq}: {psteps}")
+        lines.append("")
+
+    # ── 4. 表级血缘 ──
+    lines.append("## 4. 表级血缘")
+    lines.append("")
+    lines.append("```mermaid")
+    lines.append("flowchart LR")
+
+    # 构建 CTE 索引
+    cte_index = _build_cte_index(data_flow_steps)
+    cte_names_upper = set(cte_index.keys())
+    target_tables_set = set()
+    for s in steps_list:
+        tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
+        target_tables_set.add(tf)
+
+    # 收集所有物理源表（含 CTE 内部表）
+    all_phys_sources = []
+    seen_src = set()
+    for s in data_flow_steps:
+        # 主查询 JOIN
+        for j in s.get("joins", []):
+            src_tbl = j.get("source_table", "")
+            if src_tbl and src_tbl.upper() not in cte_names_upper and src_tbl not in target_tables_set and src_tbl not in seen_src:
+                seen_src.add(src_tbl)
+                all_phys_sources.append(src_tbl)
+        # CTE 内部物理表
+        for cte in s.get("ctes", []):
+            for st in cte.get("source_tables", []):
+                tname = st.get("name", "")
+                if tname and tname.upper() not in cte_names_upper and tname not in target_tables_set and tname not in seen_src:
+                    seen_src.add(tname)
+                    all_phys_sources.append(tname)
+
+    # 画物理源表 → 目标表
+    target_safe = target_table.replace(".", "_")
+    for src in all_phys_sources:
+        src_safe = src.replace(".", "_")
+        lines.append(f'    {src_safe}["{src}"] --> {target_safe}["{target_full}"]')
+
+    # 目标表 → 下游视图
+    for s in steps_list[1:]:
+        tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
+        if tf != target_full:
+            tf_safe = tf.replace(".", "_")
+            lines.append(f'    {target_safe}["{target_full}"] --> {tf_safe}["{tf}"]')
+
+    # 自引用
+    if self_refs:
+        for sr in self_refs:
+            lines.append(f'    {target_safe} -.->|自引用| {target_safe}')
+    lines.append("```")
+    lines.append("")
+
+    # ── 5. 字段映射对照表 ──
+    lines.append("## 5. 字段映射对照表")
+    lines.append("")
+    for s in steps_list:
+        sid = s["step_id"]
+        rc = s.get("rule_code", "")
+        step_fields = [f for f in fields_list if f.get("producing_step") == sid]
+        if not step_fields:
+            continue
+
+        lines.append(f"### {sid} ({rc})")
+        lines.append("")
+        lines.append("| # | 目标字段 | 物理源表 | 物理源字段 | 转换类型 | 映射表达式 |")
+        lines.append("|---|---------|---------|-----------|---------|-----------|")
+        for i, f in enumerate(step_fields, 1):
+            # CTE 穿透获取物理源
+            phys_sources = _resolve_physical_sources(
+                f.get("lineage", []), cte_index, cte_names_upper, set()
+            )
+            tt = f.get('transform_type', '')
+            raw_sql = ""
+            if f.get("lineage"):
+                raw_sql = f["lineage"][0].get("raw_sql", "")
+            if len(raw_sql) > 100:
+                raw_sql = raw_sql[:97] + "..."
+
+            if phys_sources:
+                ps0 = phys_sources[0]
+                lines.append(f"| {i} | {f.get('target_field', '')} | {ps0.get('table', '-')} | {ps0.get('field', '-')} | {tt} | {raw_sql} |")
+            else:
+                lines.append(f"| {i} | {f.get('target_field', '')} | - | - | {tt} | {raw_sql} |")
+        lines.append("")
+
+    # ── 6. 数据处理逻辑 ──
+    lines.append("## 6. 数据处理逻辑")
+    lines.append("")
+    for s in data_flow_steps:
+        sid = s.get("step_id", "")
+        ai_step = next(
+            (d for d in bl.get("step_descriptions", []) if d.get("step_id") == sid), {}
+        )
+        lines.append(f"### {sid}: {ai_step.get('purpose', '')}")
+        if ai_step.get("logic"):
+            lines.append(f"- **加工逻辑**: {ai_step['logic']}")
+        where = s.get("where_clause", "")
+        if where:
+            lines.append(f"- **过滤条件**: {where}")
+        group_by = s.get("group_by", [])
+        if group_by:
+            lines.append(f"- **分组**: {', '.join(group_by)}")
+        lines.append("")
+        lines.append("```sql")
+        lines.append(s.get("raw_sql", ""))
+        lines.append("```")
+        lines.append("")
+
+    # ── 7. 质量评估 ──
+    lines.append("## 7. 质量评估")
+    lines.append("")
+    issues = quality.get("issues", [])
+    ai_insights = quality.get("ai_insights", [])
+    if issues:
+        lines.append("### 检测到的问题")
+        lines.append("")
+        lines.append("| 级别 | 类别 | 描述 |")
+        lines.append("|------|------|------|")
+        for iss in issues:
+            lines.append(f"| {iss.get('severity', '')} | {iss.get('category', '')} | {iss.get('title', '')} |")
+        lines.append("")
+
+    if ai_insights:
+        lines.append("### AI 建议")
+        lines.append("")
+        for ins in ai_insights:
+            lines.append(f"- **[{ins.get('severity', '')}]** {ins.get('title', '')}")
+            if ins.get("detail"):
+                lines.append(f"  - {ins['detail']}")
+            if ins.get("suggestion"):
+                lines.append(f"  - 建议: {ins['suggestion']}")
+        lines.append("")
+
+    # ── 8. 上游任务依赖 ──
+    lines.append("## 8. 上游任务依赖")
+    lines.append("")
+    lines.append("| 源表 | 别名 | 关联方式 | CTE归属 | 调度任务 |")
+    lines.append("|------|------|---------|---------|---------|")
+    seen_dep = set()
+    for s in data_flow_steps:
+        # 主查询 JOIN
+        for j in s.get("joins", []):
+            src = j.get("source_table", "")
+            if src in seen_dep or src.upper() in cte_names_upper:
+                continue
+            seen_dep.add(src)
+            jt = j.get("join_type", "")
+            lines.append(f"| {src} | {j.get('alias', '-')} | {_format_join(jt, src)} | - | 待配置 |")
+        # CTE 内部物理表
+        for cte in s.get("ctes", []):
+            cte_name = cte.get("name", "")
+            for st in cte.get("source_tables", []):
+                tname = st.get("name", "")
+                if tname in seen_dep or tname.upper() in cte_names_upper:
+                    continue
+                seen_dep.add(tname)
+                jt = st.get("join_type", "FROM")
+                lines.append(f"| {tname} | {st.get('alias', '-')} | {_format_join(jt, tname)} | {cte_name} | 待配置 |")
+    lines.append("")
+
+    # ── 9. 执行平台配置 ──
+    lines.append("## 9. 执行平台配置")
+    lines.append("")
+    raw_rules = source.get("rule_sheet_raw", [])
+    if raw_rules:
+        lines.append("| 配置项 | 值 |")
+        lines.append("|--------|-----|")
+        r0 = raw_rules[0] if raw_rules else {}
+        config_map = {
+            "项目编码": r0.get("project_code", ""),
+            "数据源": r0.get("data_source", ""),
+        }
+        for k, v in config_map.items():
+            lines.append(f"| {k} | {v or '待配置'} |")
+    else:
+        lines.append("*无执行平台配置信息*")
+    lines.append("")
+
+    # 写入
+    output_path = Path(output_dir) / "tech_design.md"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"  ✓ 技术设计文档: {output_path}")
+    return True
+
+
+# ── CLI ──────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="dws-pipeline-analyzer 视图生成器",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  dws-run analyzer view_generator --input knowledge_final.json --output docs/output/table/
+  dws-run analyzer view_generator --input knowledge_final.json --output docs/output/table/ --views mapping,asset
+        """,
+    )
+    parser.add_argument("--input", required=True, help="knowledge_final.json 路径")
+    parser.add_argument("--output", required=True, help="输出目录")
+    parser.add_argument(
+        "--views",
+        default="all",
+        help="要生成的视图，逗号分隔: mapping,asset,techspec (默认: all)",
+    )
+
+    args = parser.parse_args()
+
+    # 读取 knowledge
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"错误: 输入文件不存在: {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(input_path, "r", encoding="utf-8") as f:
+        knowledge = json.load(f)
+
+    # 输出目录: {output}/analyzer/views/
+    views_dir = Path(args.output) / "analyzer" / "views"
+    views_dir.mkdir(parents=True, exist_ok=True)
+    views_str = args.views.strip().lower()
+    if views_str == "all":
+        views = ["mapping", "asset", "techspec"]
+    else:
+        views = [v.strip() for v in views_str.split(",") if v.strip()]
+
+    print(f"═══ dws-pipeline-analyzer 视图生成器 ═══")
+    print(f"输入: {input_path}")
+    print(f"输出: {views_dir}")
+    print(f"视图: {', '.join(views)}")
+    print()
+
+    results = {}
+    for view in views:
+        if view == "mapping":
+            results["mapping"] = generate_mapping(knowledge, str(views_dir))
+        elif view == "asset":
+            results["asset"] = generate_asset_report(knowledge, str(views_dir))
+        elif view == "techspec":
+            results["techspec"] = generate_tech_design(knowledge, str(views_dir))
+        else:
+            print(f"  警告: 未知视图类型 '{view}'，跳过", file=sys.stderr)
+
+    print()
+    success = sum(1 for v in results.values() if v)
+    total = len(results)
+    print(f"═══ 完成: {success}/{total} 视图生成成功 ═══")
+
+    if success < total:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
