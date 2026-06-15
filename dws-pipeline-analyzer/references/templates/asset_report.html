@@ -1770,53 +1770,61 @@ function renderFieldMapping() {
     return;
   }
 
-  var html = '';
-  html += '<thead><tr>';
-  html += '<th style="width:20%">目标字段</th>';
-  html += '<th style="width:12%">类型</th>';
-  html += '<th style="width:25%">业务含义</th>';
-  html += '<th style="width:20%">来源</th>';
-  html += '<th style="width:10%">加工类型</th>';
-  html += '<th style="width:13%">场景/步骤</th>';
-  html += '</tr></thead><tbody>';
-
-  // 构建 schema_fields 查找表（字段类型+含义）
+  // schema_fields 查找表
   var schemaMap = {};
-  (REPORT_DATA.schema_fields || []).forEach(function(sf) {
-    schemaMap[sf.name] = sf;
+  (REPORT_DATA.schema_fields || []).forEach(function(sf) { schemaMap[sf.name] = sf; });
+
+  // 按场景分组
+  var groups = {};
+  var groupOrder = [];
+  fields.forEach(function(f) {
+    var sc = f.scenario || '默认';
+    if (!groups[sc]) { groups[sc] = []; groupOrder.push(sc); }
+    groups[sc].push(f);
   });
 
-  fields.forEach(function(f) {
-    var sf = schemaMap[f.target_field] || {};
-    var fieldType = sf.type || '';
-    var fieldMeaning = sf.meaning || '';
+  var html = '<thead><tr>' +
+    '<th style="width:20%">目标字段</th>' +
+    '<th style="width:12%">类型</th>' +
+    '<th style="width:20%">业务含义</th>' +
+    '<th style="width:22%">来源</th>' +
+    '<th style="width:10%">加工类型</th>' +
+    '<th style="width:16%">目标表/步骤</th>' +
+    '</tr></thead><tbody>';
 
-    var srcText = '-';
-    if (f.sources && f.sources.length > 0) {
-      srcText = f.sources.map(function(s) {
-        var parts = [];
-        if (s.alias) parts.push(s.alias + '.');
-        else if (s.table) parts.push(s.table + '.');
-        parts.push(s.field || '?');
-        return parts.join('');
-      }).join(', ');
-    }
+  groupOrder.forEach(function(sc) {
+    // 场景分组标题行
+    var scColor = sc === '公共步骤' ? '#6b7280' : (sc.indexOf('1') >= 0 ? '#8b5cf6' : '#3b82f6');
+    html += '<tr style="background:var(--bg-secondary);"><td colspan="6" style="padding:6px 12px;">';
+    html += '<span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:12px;font-weight:600;color:white;background:' + scColor + ';">' + escapeHtml(sc) + '</span>';
+    html += '<span style="margin-left:8px;color:var(--text-muted);font-size:12px;">' + groups[sc].length + ' 个字段</span>';
+    html += '</td></tr>';
 
-    // 找步骤的规则中文名
-    var stepInfo = '-';
-    var st = (REPORT_DATA.steps || []).find(function(s) { return s.step_id === f.producing_step; });
-    if (st) {
-      stepInfo = st.rule_name || st.step_id || '-';
-    }
+    groups[sc].forEach(function(f) {
+      var sf = schemaMap[f.target_field] || {};
+      var srcText = '-';
+      if (f.sources && f.sources.length > 0) {
+        srcText = f.sources.map(function(s) {
+          var p = [];
+          if (s.alias) p.push(s.alias + '.');
+          else if (s.table) p.push(s.table + '.');
+          p.push(s.field || '?');
+          return p.join('');
+        }).join(', ');
+      }
+      var st = (REPORT_DATA.steps || []).find(function(s) { return s.step_id === f.producing_step; });
+      var stepInfo = st ? (st.rule_name || st.step_id) : '-';
+      var tblInfo = f.target_table ? f.target_table : '';
 
-    html += '<tr data-field="' + escapeHtml(f.target_field) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\')" style="cursor:pointer;">';
-    html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span></td>';
-    html += '<td><span class="field-type">' + escapeHtml(fieldType || '-') + '</span></td>';
-    html += '<td><span style="font-size:12px;color:var(--text-secondary);">' + escapeHtml(fieldMeaning || '-') + '</span></td>';
-    html += '<td><span class="source-info">' + escapeHtml(srcText) + '</span></td>';
-    html += '<td>' + tagHtml(f.transform_type) + '</td>';
-    html += '<td style="color:var(--text-muted);font-size:12px;">' + escapeHtml(stepInfo) + '</td>';
-    html += '</tr>';
+      html += '<tr data-field="' + escapeHtml(f.target_field) + '" data-scenario="' + escapeHtml(sc) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\',\'' + escapeHtml(sc) + '\')" style="cursor:pointer;">';
+      html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span></td>';
+      html += '<td><span class="field-type">' + escapeHtml(sf.type || '-') + '</span></td>';
+      html += '<td><span style="font-size:12px;color:var(--text-secondary);">' + escapeHtml(sf.meaning || '-') + '</span></td>';
+      html += '<td><span class="source-info">' + escapeHtml(srcText) + '</span></td>';
+      html += '<td>' + tagHtml(f.transform_type) + '</td>';
+      html += '<td style="font-size:12px;"><div>' + escapeHtml(tblInfo) + '</div><div style="color:var(--text-muted);">' + escapeHtml(stepInfo) + '</div></td>';
+      html += '</tr>';
+    });
   });
 
   html += '</tbody>';
@@ -1985,26 +1993,35 @@ function renderQuality() {
 // ================================================================
 // Detail Panel
 // ================================================================
-function openDetail(fieldName) {
-  var details = REPORT_DATA.field_details || {};
-  var detail = details[fieldName];
-
-  // Also try to find from schema_fields or fields as fallback
-  if (!detail) {
-    var schemaField = (REPORT_DATA.schema_fields || []).find(function(f) { return f.name === fieldName; });
-    var fieldEntry = (REPORT_DATA.fields || []).find(function(f) { return f.target_field === fieldName; });
-    if (schemaField || fieldEntry) {
-      detail = {
-        target_field: fieldName,
-        transform_type: (schemaField || {}).transform_type || (fieldEntry || {}).transform_type,
-        meaning: (schemaField || {}).meaning || '',
-        producing_step: (schemaField || {}).producing_step || (fieldEntry || {}).producing_step,
-        penetration_chain: []
-      };
-    }
+function openDetail(fieldName, scenario) {
+  // 从 fields 列表找指定场景的字段
+  var fieldEntry = (REPORT_DATA.fields || []).find(function(f) {
+    return f.target_field === fieldName && (!scenario || f.scenario === scenario);
+  });
+  // fallback: 不限场景
+  if (!fieldEntry) {
+    fieldEntry = (REPORT_DATA.fields || []).find(function(f) { return f.target_field === fieldName; });
   }
 
-  if (!detail) return;
+  var schemaField = (REPORT_DATA.schema_fields || []).find(function(f) { return f.name === fieldName; });
+
+  var detail = {
+    target_field: fieldName,
+    transform_type: fieldEntry ? fieldEntry.transform_type : (schemaField || {}).transform_type,
+    meaning: (schemaField || {}).meaning || '',
+    producing_step: fieldEntry ? fieldEntry.producing_step : '',
+    sources: fieldEntry ? fieldEntry.sources : [],
+  };
+
+  // 找所有涉及该字段的步骤（不限场景）
+  var allSteps = REPORT_DATA.steps || [];
+  var fieldSteps = allSteps.filter(function(st) {
+    return (REPORT_DATA.fields || []).some(function(f) {
+      return f.target_field === fieldName && f.producing_step === st.step_id;
+    });
+  });
+  // 倒序（最终步骤在上）
+  fieldSteps.reverse();
 
   var panel = document.getElementById('detailPanel');
   var overlay = document.getElementById('detailOverlay');
@@ -2027,74 +2044,39 @@ function openDetail(fieldName) {
     html += '</div>';
   }
 
-  // 各场景各步骤的来源（含来源表+加工表达式）
-  var allSteps = REPORT_DATA.steps || [];
-  var fieldSteps = allSteps.filter(function(st) {
-    // 找哪些步骤产出了这个字段
-    return REPORT_DATA.fields.some(function(f) {
-      return f.target_field === fieldName && f.producing_step === st.step_id;
-    });
-  });
-
-  // 倒序排列步骤（最终步骤在最上面，往回追溯）
-  fieldSteps.reverse();
-
+  // 各步骤来源（平铺，不分组，倒序）
   if (fieldSteps.length > 0) {
     html += '<div class="detail-section"><h4>各步骤来源详情</h4>';
 
-    // 按场景分组
-    var scenarioGroups = {};
     fieldSteps.forEach(function(st) {
-      var sc = st.scenario_name || '默认';
-      if (!scenarioGroups[sc]) scenarioGroups[sc] = [];
-      scenarioGroups[sc].push(st);
-    });
-
-    Object.keys(scenarioGroups).forEach(function(sc) {
-      html += '<div style="margin-bottom:16px;">';
-      html += '<div style="font-weight:600;font-size:13px;color:var(--accent);margin-bottom:6px;padding:2px 8px;background:var(--bg-secondary);border-radius:6px;display:inline-block;">' + escapeHtml(sc) + '</div>';
-
-      scenarioGroups[sc].forEach(function(st) {
-        // 找这个步骤里这个字段的来源
-        var f = REPORT_DATA.fields.find(function(f) {
-          return f.target_field === fieldName && f.producing_step === st.step_id;
-        });
-
-        html += '<div style="margin-left:16px;margin-bottom:8px;padding:8px;border-left:3px solid var(--border);">';
-        html += '<div style="font-weight:600;font-size:13px;">' + escapeHtml(st.rule_name || st.step_id) + ' <span style="color:var(--text-muted);font-weight:400;">(' + escapeHtml(st.rule_code || '') + ')</span></div>';
-        if (st.purpose) html += '<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">' + escapeHtml(st.purpose) + '</div>';
-        if (st.delete_mode_label) html += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">写入: ' + escapeHtml(st.delete_mode_label) + (st.delete_condition ? ' → ' + escapeHtml(st.delete_condition) : '') + '</div>';
-
-        // 来源表
-        var srcTables = st.source_tables || [];
-        if (srcTables.length > 0) {
-          html += '<div style="font-size:12px;margin-top:4px;">来源表: ' + srcTables.map(function(t) {
-            return '<code style="background:var(--bg-secondary);padding:1px 4px;border-radius:3px;">' + escapeHtml(t) + '</code>';
-          }).join(' ') + '</div>';
-        }
-
-        // 字段来源详情
-        if (f) {
-          var sources = f.sources || [];
-          if (sources.length > 0) {
-            html += '<div style="font-size:12px;margin-top:4px;">';
-            sources.forEach(function(src) {
-              var tt = f.transform_type || 'expression';
-              var ttLabel = {'direct':'直取','value':'赋值','aggregate':'聚合','pivot':'行转列',
-                            'window':'窗口','fallback':'兜底','case_when':'条件','expression':'加工'}[tt] || tt;
-              html += '<div style="margin-top:2px;">';
-              if (src.table && src.field) {
-                html += '<code>' + escapeHtml(src.table) + '.' + escapeHtml(src.field) + '</code>';
-              }
-              html += ' <span style="color:var(--text-muted);">→ ' + escapeHtml(fieldName) + '</span>';
-              html += ' [' + ttLabel + ']';
-              html += '</div>';
-            });
-            html += '</div>';
-          }
-        }
-        html += '</div>';
+      var f = (REPORT_DATA.fields || []).find(function(f) {
+        return f.target_field === fieldName && f.producing_step === st.step_id;
       });
+
+      html += '<div style="margin-bottom:10px;padding:10px;border-left:3px solid var(--accent);background:var(--bg-secondary);border-radius:0 6px 6px 0;">';
+      html += '<div style="font-weight:600;font-size:13px;">' + escapeHtml(st.rule_name || st.step_id) + ' <span style="color:var(--text-muted);font-weight:400;">(' + escapeHtml(st.rule_code || '') + ')</span></div>';
+      html += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">目标表: ' + escapeHtml(st.target_table || '-') + ' · 写入: ' + escapeHtml(st.delete_mode_label || '-') + (st.delete_condition ? ' → ' + escapeHtml(st.delete_condition) : '') + '</div>';
+      if (st.purpose) html += '<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">' + escapeHtml(st.purpose) + '</div>';
+
+      // 来源表
+      var srcTables = st.source_tables || [];
+      if (srcTables.length > 0) {
+        html += '<div style="font-size:12px;margin-top:4px;">来源表: ' + srcTables.map(function(t) {
+          return '<code style="background:var(--bg-card);padding:1px 4px;border-radius:3px;">' + escapeHtml(t) + '</code>';
+        }).join(' ') + '</div>';
+      }
+
+      // 字段来源
+      if (f && f.sources && f.sources.length > 0) {
+        var tt = f.transform_type || 'expression';
+        var ttLabel = {'direct':'直取','value':'赋值','aggregate':'聚合','pivot':'行转列',
+                       'window':'窗口','fallback':'兜底','case_when':'条件','expression':'加工'}[tt] || tt;
+        html += '<div style="font-size:12px;margin-top:4px;color:var(--text-secondary);">';
+        f.sources.forEach(function(src) {
+          html += '<div><code style="background:var(--bg-card);padding:1px 4px;border-radius:3px;">' + escapeHtml((src.alias || src.table || '') + '.' + (src.field || '?')) + '</code> → ' + escapeHtml(fieldName) + ' [' + ttLabel + ']</div>';
+        });
+        html += '</div>';
+      }
       html += '</div>';
     });
 

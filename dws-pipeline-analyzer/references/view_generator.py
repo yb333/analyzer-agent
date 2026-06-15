@@ -189,28 +189,69 @@ def build_report_data(knowledge):
             ],
         })
 
-    # ── fields (含 CTE 穿透) ──
-    fields_out = []
-    for f in fields_list:
-        sources = []
-        for l in f.get("lineage", []):
-            src_tbl = l.get("source_table", "")
-            if src_tbl and src_tbl.upper() not in ("NULL", "NONE"):
-                sources.append({
-                    "table": src_tbl,
-                    "alias": l.get("alias", ""),
-                    "field": l.get("source_field", ""),
-                })
+    # ── fields (按场景分组，同场景内按目标表+字段名去重) ──
+    step_info_map = {}
+    for s in steps_list:
+        step_info_map[s["step_id"]] = {
+            "target_table": s.get("target_table", ""),
+            "scenario_name": s.get("scenario_name", "默认"),
+            "rule_name": s.get("rule_name", ""),
+        }
 
-        fields_out.append({
-            "target_field": f.get("target_field", ""),
-            "producing_step": f.get("producing_step", ""),
-            "transform_type": f.get("transform_type", "expression"),
-            "in_target_fields": f.get("in_target_fields", False),
-            "excel_source_field": f.get("excel_source_field", ""),
-            "validation": f.get("validation", None),
-            "sources": sources,
-        })
+    # 先按场景分组
+    scenario_field_groups = {}  # {scenario: [fields]}
+    for f in fields_list:
+        step_id = f.get("producing_step", "")
+        si = step_info_map.get(step_id, {})
+        scenario = si.get("scenario_name", "默认")
+        if scenario not in scenario_field_groups:
+            scenario_field_groups[scenario] = []
+        scenario_field_groups[scenario].append(f)
+
+    # 每个场景内按 (target_table, field_name) 去重
+    fields_out = []
+    for scenario, sc_fields in scenario_field_groups.items():
+        seen = {}  # {(target_table, field): idx_in_fields_out}
+        for f in sc_fields:
+            fname = f.get("target_field", "")
+            si = step_info_map.get(f.get("producing_step", ""), {})
+            target_table = si.get("target_table", "")
+            key = (target_table, fname)
+            if key in seen:
+                existing_idx = seen[key]
+                existing_tt = fields_out[existing_idx].get("transform_type", "expression")
+                new_tt = f.get("transform_type", "expression")
+                priority = {"unknown": -1, "value": 0, "direct": 1, "expression": 2, "fallback": 3, "case_when": 4, "aggregate": 5, "pivot": 6, "window": 7}
+                if priority.get(new_tt, 0) > priority.get(existing_tt, 0):
+                    sources = []
+                    for l in f.get("lineage", []):
+                        src_tbl = l.get("source_table", "")
+                        if src_tbl and src_tbl.upper() not in ("NULL", "NONE"):
+                            sources.append({"table": src_tbl, "alias": l.get("alias", ""), "field": l.get("source_field", "")})
+                    fields_out[existing_idx] = {
+                        "target_field": fname, "producing_step": f.get("producing_step", ""),
+                        "target_table": target_table, "scenario": scenario,
+                        "transform_type": new_tt, "in_target_fields": f.get("in_target_fields", False),
+                        "sources": sources,
+                    }
+                continue
+            seen[key] = len(fields_out)
+            sources = []
+            for l in f.get("lineage", []):
+                src_tbl = l.get("source_table", "")
+                if src_tbl and src_tbl.upper() not in ("NULL", "NONE"):
+                    sources.append({"table": src_tbl, "alias": l.get("alias", ""), "field": l.get("source_field", "")})
+            fields_out.append({
+                "target_field": fname,
+                "producing_step": f.get("producing_step", ""),
+                "target_table": target_table,
+                "scenario": scenario,
+                "transform_type": f.get("transform_type", "expression"),
+                "in_target_fields": f.get("in_target_fields", False),
+                "excel_source_field": f.get("excel_source_field", ""),
+                "validation": f.get("validation", None),
+                "sources": sources,
+            })
 
     # ── field_details (CTE 穿透血缘链) ──
     field_details = {}
