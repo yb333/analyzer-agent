@@ -2013,11 +2013,14 @@ function openDetail(fieldName, scenario) {
     sources: fieldEntry ? fieldEntry.sources : [],
   };
 
-  // 找所有涉及该字段的步骤（不限场景）
+  // 找该场景内涉及该字段的步骤
   var allSteps = REPORT_DATA.steps || [];
   var fieldSteps = allSteps.filter(function(st) {
+    // 步骤的场景必须和点击的场景一致（公共步骤也纳入）
+    var stScenario = st.scenario_name || '';
+    if (scenario && stScenario && stScenario !== scenario && stScenario !== '公共步骤') return false;
     return (REPORT_DATA.fields || []).some(function(f) {
-      return f.target_field === fieldName && f.producing_step === st.step_id;
+      return f.target_field === fieldName && f.producing_step === st.step_id && (!scenario || f.scenario === scenario);
     });
   });
   // 倒序（最终步骤在上）
