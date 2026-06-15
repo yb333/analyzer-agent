@@ -2247,9 +2247,8 @@ def main():
     args = parser.parse_args()
 
     input_path = Path(args.input)
-    base_output = Path(args.output)
-    # 独立输出目录: {output}/analyzer/
-    output_dir = base_output / "analyzer"
+    # 直接用用户指定的 output 目录，不自动加子目录
+    output_dir = Path(args.output)
 
     if not input_path.exists():
         print(f"错误: 文件不存在: {input_path}", file=sys.stderr)

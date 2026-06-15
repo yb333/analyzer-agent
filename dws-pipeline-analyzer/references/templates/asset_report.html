@@ -73,7 +73,6 @@ body {
    Layout
    ============================================================ */
 .page-container {
-  max-width: 1200px;
   margin: 0 auto;
   padding: 24px 32px 80px;
 }
@@ -313,11 +312,12 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-secondary);
+  /* 不限制宽度，SVG 按内容自然展开 */
 }
 
 .lineage-svg {
   display: block;
-  min-width: 100%;
+  /* 不设 min-width/max-width，让 SVG 按预计算坐标自然展开 */
 }
 
 .lineage-svg .node-rect {
@@ -1786,76 +1786,22 @@ function renderSteps() {
     // Body
     html += '<div class="step-body"><div class="step-body-inner">';
 
-    // Logic description
+    // Purpose (总结性目的)
+    if (step.purpose) {
+      html += '<div class="step-purpose" style="font-size:14px;font-weight:600;color:var(--accent);margin-bottom:8px;">' + escapeHtml(step.purpose) + '</div>';
+    }
+
+    // Logic description (加工逻辑总结)
     if (step.logic) {
-      html += '<div class="step-logic">' + escapeHtml(step.logic) + '</div>';
+      html += '<div class="step-logic" style="font-size:13px;line-height:1.7;color:var(--text-secondary);white-space:pre-wrap;">' + escapeHtml(step.logic) + '</div>';
     }
 
-    // Detail grid
-    html += '<div class="step-detail-grid">';
-
-    // Source tables
-    var srcTables = step.source_tables || [];
-    html += '<div class="step-detail-item">';
-    html += '<div class="detail-label">来源表 (' + srcTables.length + ')</div>';
-    html += '<div class="detail-value">' + (srcTables.length > 0 ? srcTables.map(escapeHtml).join('<br>') : '-') + '</div>';
-    html += '</div>';
-
-    // JOIN summary
-    html += '<div class="step-detail-item">';
-    html += '<div class="detail-label">JOIN 关系</div>';
-    html += '<div class="detail-value">' + escapeHtml(step.joins_summary || '-') + '</div>';
-    html += '</div>';
-
-    // WHERE summary
-    html += '<div class="step-detail-item">';
-    html += '<div class="detail-label">过滤条件</div>';
-    html += '<div class="detail-value">' + escapeHtml(step.where_summary || '-') + '</div>';
-    html += '</div>';
-
-    // GROUP BY
-    var groupBy = step.group_by || [];
-    html += '<div class="step-detail-item">';
-    html += '<div class="detail-label">分组字段 (' + groupBy.length + ')</div>';
-    html += '<div class="detail-value">' + (groupBy.length > 0 ? groupBy.map(escapeHtml).join(', ') : '-') + '</div>';
-    html += '</div>';
-
-    // CTEs
-    var ctes = step.ctes || [];
-    if (ctes.length > 0) {
-      html += '<div class="step-detail-item full-width">';
-      html += '<div class="detail-label">CTE 列表 (' + ctes.length + ')</div>';
-      html += '<div class="cte-list">';
-      ctes.forEach(function(cte) {
-        html += '<div class="cte-item">';
-        html += '<span class="cte-name">' + escapeHtml(cte.name) + '</span>';
-        var cteSrcs = cte.source_tables || [];
-        if (cteSrcs.length > 0) {
-          var srcNames = cteSrcs.map(function(st) {
-            if (typeof st === 'string') return st;
-            return st.name || st.table || '';
-          }).filter(Boolean);
-          if (srcNames.length > 0) {
-            html += '<span class="cte-meta">&larr; ' + srcNames.map(escapeHtml).join(', ') + '</span>';
-          }
-        }
-        if (cte.field_count !== undefined) {
-          html += '<span class="cte-meta">' + cte.field_count + ' fields</span>';
-        }
-        html += '</div>';
-      });
-      html += '</div>';
-      html += '</div>';
-    }
-
-    html += '</div>'; // end grid
-
-    // SQL
+    // SQL 全文（折叠）
     if (step.raw_sql) {
-      html += '<div style="margin-top:4px;">';
-      html += '<div class="detail-label" style="margin-bottom:6px;">SQL 全文</div>';
-      html += '<pre class="sql-block"><code>' + highlightSQL(step.raw_sql) + '</code></pre>';
-      html += '</div>';
+      html += '<details style="margin-top:12px;">';
+      html += '<summary style="cursor:pointer;font-size:12px;color:var(--text-muted);font-weight:600;">SQL 全文</summary>';
+      html += '<pre class="sql-block" style="margin-top:8px;"><code>' + highlightSQL(step.raw_sql) + '</code></pre>';
+      html += '</details>';
     }
 
     html += '</div></div>'; // end body
