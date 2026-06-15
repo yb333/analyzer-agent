@@ -303,8 +303,9 @@ def read_excel(excel_path: str) -> dict:
         except (ValueError, TypeError):
             rt = 0
 
-        # 只处理规则类型=1（取数规则）
-        if rt != 1:
+        # 跳过参数变量规则（类型 12），处理所有有 SQL 的取数类规则
+        # 规则类型：1=标签, 2=报表项, 3=宽表, 12=参数变量（无 SQL）
+        if rt == 12:
             continue
 
         query = _get_val(row, ci.get("query_sql"))
@@ -2266,7 +2267,7 @@ def main():
     rules = raw["rules"]
 
     if not rules:
-        print("错误: 未找到规则类型=1 的 RULE 行", file=sys.stderr)
+        print("错误: 未找到有效的 RULE 行（需要有 SQL 的取数类规则，类型 1/2/3）", file=sys.stderr)
         sys.exit(1)
 
     print(f"  RULE 行: {len(rules)}")
