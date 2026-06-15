@@ -2105,6 +2105,9 @@ function openDetail(fieldName) {
     });
   });
 
+  // 倒序排列步骤（最终步骤在最上面，往回追溯）
+  fieldSteps.reverse();
+
   if (fieldSteps.length > 0) {
     html += '<div class="detail-section"><h4>各步骤来源详情</h4>';
 
@@ -2167,58 +2170,7 @@ function openDetail(fieldName) {
     html += '</div>';
   }
 
-  // Penetration chain
-  var chain = detail.penetration_chain || [];
-  if (chain.length > 0) {
-    html += '<div class="detail-section"><h4>CTE 穿透血缘链</h4>';
-    html += '<div class="penetration-chain">';
-
-    // Target field at top
-    html += '<div class="chain-node" data-level="0">';
-    html += '<div class="chain-node-type">&#9733; 目标字段</div>';
-    html += '<div class="chain-node-field">' + escapeHtml(detail.target_field) + '</div>';
-    html += '</div>';
-
-    chain.forEach(function(node, idx) {
-      // Arrow before each node
-      var arrowText = '';
-      if (node.transform_type === 'aggregate') arrowText = 'SUM() 聚合';
-      else if (node.transform_type === 'fallback') arrowText = 'COALESCE 兜底';
-      else if (node.transform_type === 'pivot') arrowText = '行转列';
-      else if (node.transform_type === 'direct') arrowText = '直接映射';
-      else if (node.transform_type === 'case_when') arrowText = '条件判断';
-      else if (node.transform_type) arrowText = node.transform_type;
-
-      html += '<div class="chain-arrow">';
-      html += '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>';
-      if (arrowText) html += '<span>' + escapeHtml(arrowText) + '</span>';
-      html += '</div>';
-
-      // Node
-      var nodeTypeLabel = '';
-      var nodeTypeIcon = '';
-      if (node.node_type === 'cte') { nodeTypeLabel = 'CTE'; nodeTypeIcon = '&#9881;'; }
-      else if (node.node_type === 'physical') { nodeTypeLabel = '物理表'; nodeTypeIcon = '&#128229;'; }
-      else if (node.node_type === 'step') { nodeTypeLabel = '步骤'; nodeTypeIcon = '&#9881;'; }
-      else if (node.node_type === 'target') { nodeTypeLabel = '目标'; nodeTypeIcon = '&#9733;'; }
-      else { nodeTypeLabel = node.node_type || '来源'; nodeTypeIcon = '&#9679;'; }
-
-      html += '<div class="chain-node" data-level="' + (idx + 1) + '">';
-      html += '<div class="chain-node-type">' + nodeTypeIcon + ' ' + escapeHtml(nodeTypeLabel) + '</div>';
-      if (node.name) {
-        html += '<div class="chain-node-name">' + escapeHtml(node.name) + (node.alias ? ' (' + escapeHtml(node.alias) + ')' : '') + '</div>';
-      }
-      html += '<div class="chain-node-field">' + escapeHtml(node.field || '?') + '</div>';
-      if (node.transform_type) {
-        html += '<div style="margin-top:4px;">' + tagHtml(node.transform_type) + '</div>';
-      }
-      if (node.expression) {
-        html += '<div class="chain-expr">' + escapeHtml(node.expression) + '</div>';
-      }
-      html += '</div>';
-    });
-
-    html += '</div></div>';
+  // Meaning
   }
 
   // Fallback: show field-level lineage from old format
