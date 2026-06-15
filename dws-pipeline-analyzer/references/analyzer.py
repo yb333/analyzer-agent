@@ -303,9 +303,8 @@ def read_excel(excel_path: str) -> dict:
         except (ValueError, TypeError):
             rt = 0
 
-        # 跳过参数变量规则（类型 12），处理所有有 SQL 的取数类规则
-        # 规则类型：1=标签, 2=报表项, 3=宽表, 12=参数变量（无 SQL）
-        if rt == 12:
+        # 只处理取数类规则（1=标签, 2=报表项, 3=宽表），跳过其他（如12=参数变量）
+        if rt not in (1, 2, 3):
             continue
 
         query = _get_val(row, ci.get("query_sql"))
