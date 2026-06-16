@@ -41,25 +41,19 @@ python -c "import openpyxl, sqlglot; print('OK')"
 
 ---
 
-## 工作流程（2 步全自动）
+## 工作流程
 
-### Step 1: 分析 + AI 增强 + 生成全部视图
-
-#### 1a. 执行分析脚本
-
-**核心分析脚本是 `references/analyzer.py`**，通过 `run.py` 分发器调用：
+### Step 1: 执行分析脚本
 
 ```bash
 python {skill_dir}/run.py analyzer --input {input_xlsx} --output {output_dir} [--ddl-dir {ddl_dir}]
 ```
 
-如果已安装 dws-run（opencode 平台），也可以用 `dws-run analyzer analyzer ...`，效果一样。
-
 DDL 目录自动检测：同级的 `04_ddl/` 有则传入，没有则跳过。
 
-输出：`knowledge_draft.json`
+产出：`knowledge_draft.json` + `knowledge_summary.md`
 
-#### 1b. AI 补充业务理解
+### Step 2: AI 补充业务理解
 
 **AI 只读 `knowledge_summary.md`（2-4KB 摘要），不读 34KB 的 JSON。**
 
@@ -79,7 +73,7 @@ AI 基于摘要，按模板格式输出自然语言，保存为 `knowledge_ai.md
 - 字段名: 业务含义
 ```
 
-#### 1c. 生成全部视图
+### Step 3: 生成全部视图
 
 ```bash
 python {skill_dir}/run.py view_generator \
