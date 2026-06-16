@@ -1972,59 +1972,37 @@ function renderFieldMapping() {
 
   // schema_fields 查找表
   var schemaMap = {};
-  (REPORT_DATA.schema_fields || []).forEach(function(sf) { schemaMap[sf.name] = sf; });
-
-  // 按场景分组
-  var groups = {};
-  var groupOrder = [];
-  fields.forEach(function(f) {
-    var sc = f.scenario || '默认';
-    if (!groups[sc]) { groups[sc] = []; groupOrder.push(sc); }
-    groups[sc].push(f);
-  });
+  (REPORT_DATA.schema_fields || []).forEach(function(sf) { schemaMap[sf.name.toLowerCase()] = sf; });
 
   var html = '<thead><tr>' +
     '<th style="width:20%">目标字段</th>' +
     '<th style="width:12%">类型</th>' +
-    '<th style="width:20%">业务含义</th>' +
+    '<th style="width:22%">业务含义</th>' +
     '<th style="width:22%">来源</th>' +
     '<th style="width:10%">加工类型</th>' +
-    '<th style="width:16%">目标表/步骤</th>' +
+    '<th style="width:14%">最终步骤</th>' +
     '</tr></thead><tbody>';
 
-  groupOrder.forEach(function(sc) {
-    // 场景分组标题行
-    var scColor = sc === '公共步骤' ? '#6b7280' : (sc.indexOf('1') >= 0 ? '#8b5cf6' : '#3b82f6');
-    html += '<tr style="background:var(--bg-secondary);"><td colspan="6" style="padding:6px 12px;">';
-    html += '<span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:12px;font-weight:600;color:white;background:' + scColor + ';">' + escapeHtml(sc) + '</span>';
-    html += '<span style="margin-left:8px;color:var(--text-muted);font-size:12px;">' + groups[sc].length + ' 个字段</span>';
-    html += '</td></tr>';
+  // 不分场景，直接平铺
+  fields.forEach(function(f) {
+    var sf = schemaMap[f.target_field.toLowerCase()] || {};
+    var srcText = '-';
+    if (f.sources && f.sources.length > 0) {
+      srcText = f.sources.map(function(s) {
+        return (s.table || '') + '.' + (s.field || '?');
+      }).join(', ');
+    }
+    var st = (REPORT_DATA.steps || []).find(function(s) { return s.step_id === f.producing_step; });
+    var stepInfo = st ? (st.rule_name || st.step_id) : '-';
 
-    groups[sc].forEach(function(f) {
-      var sf = schemaMap[f.target_field] || {};
-      var srcText = '-';
-      if (f.sources && f.sources.length > 0) {
-        srcText = f.sources.map(function(s) {
-          var p = [];
-          if (s.alias) p.push(s.alias + '.');
-          else if (s.table) p.push(s.table + '.');
-          p.push(s.field || '?');
-          return p.join('');
-        }).join(', ');
-      }
-      var st = (REPORT_DATA.steps || []).find(function(s) { return s.step_id === f.producing_step; });
-      var stepInfo = st ? (st.rule_name || st.step_id) : '-';
-      var tblInfo = f.target_table ? f.target_table : '';
-
-      html += '<tr data-field="' + escapeHtml(f.target_field) + '" data-scenario="' + escapeHtml(sc) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\',\'' + escapeHtml(sc) + '\')" style="cursor:pointer;">';
-      html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span></td>';
-      html += '<td><span class="field-type">' + escapeHtml(sf.type || '-') + '</span></td>';
-      html += '<td><span style="font-size:12px;color:var(--text-secondary);">' + escapeHtml(sf.meaning || '-') + '</span></td>';
-      html += '<td><span class="source-info">' + escapeHtml(srcText) + '</span></td>';
-      html += '<td>' + tagHtml(f.transform_type) + '</td>';
-      html += '<td style="font-size:12px;"><div>' + escapeHtml(tblInfo) + '</div><div style="color:var(--text-muted);">' + escapeHtml(stepInfo) + '</div></td>';
-      html += '</tr>';
-    });
+    html += '<tr data-field="' + escapeHtml(f.target_field) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\')" style="cursor:pointer;">';
+    html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span></td>';
+    html += '<td><span class="field-type">' + escapeHtml(sf.type || '-') + '</span></td>';
+    html += '<td><span style="font-size:12px;color:var(--text-secondary);">' + escapeHtml(sf.meaning || '-') + '</span></td>';
+    html += '<td><span class="source-info" style="font-size:12px;">' + escapeHtml(srcText) + '</span></td>';
+    html += '<td>' + tagHtml(f.transform_type) + '</td>';
+    html += '<td style="font-size:12px;color:var(--text-muted);">' + escapeHtml(stepInfo) + '</td>';
+    html += '</tr>';
   });
 
   html += '</tbody>';
@@ -2254,18 +2232,8 @@ function openDetail(fieldName, scenario) {
   if (fieldChain && fieldChain.chains && fieldChain.chains.length > 0) {
     html += '<div class="detail-section"><h4>数据流链路</h4>';
 
-    // 按 exec_sequence 倒序（最终步骤在上）
     var chains = fieldChain.chains.slice().sort(function(a, b) {
       return (b.exec_sequence || 0) - (a.exec_sequence || 0);
-    });
-
-    // 按 exec_sequence 分组，同 seq 的为同一层（多场景分叉）
-    var seqGroups = {};
-    var seqOrder = [];
-    chains.forEach(function(c) {
-      var seq = c.exec_sequence || 0;
-      if (!seqGroups[seq]) { seqGroups[seq] = []; seqOrder.push(seq); }
-      seqGroups[seq].push(c);
     });
 
     var ttLabelMap = {'direct':'直取','value':'赋值','aggregate':'聚合','pivot':'行转列',
@@ -2273,66 +2241,43 @@ function openDetail(fieldName, scenario) {
     var ttColorMap = {'direct':'#22c55e','value':'#6b7280','aggregate':'#f97316','pivot':'#8b5cf6',
                       'window':'#3b82f6','fallback':'#eab308','case_when':'#ec4899','expression':'#6366f1'};
 
-    seqOrder.forEach(function(seq, seqIdx) {
-      var group = seqGroups[seq];
-      var isLast = seqIdx === seqOrder.length - 1;
+    // 用时间轴风格渲染：左边竖线 + 节点圆点
+    html += '<div style="position:relative;padding-left:24px;">';
+    html += '<div style="position:absolute;left:8px;top:8px;bottom:8px;width:2px;background:var(--border);"></div>';
 
-      // 多分支分叉
-      if (group.length > 1) {
-        html += '<div style="margin-bottom:2px;">';
-        group.forEach(function(c, ci) {
-          var tt = c.transform_type || 'expression';
-          var ttLabel = ttLabelMap[tt] || tt;
-          var ttColor = ttColorMap[tt] || '#6b7280';
-          var scTag = c.scenario ? '<span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(c.scenario) + ']</span> ' : '';
+    chains.forEach(function(c, idx) {
+      var tt = c.transform_type || 'expression';
+      var ttLabel = ttLabelMap[tt] || tt;
+      var ttColor = ttColorMap[tt] || '#6b7280';
+      var scTag = '';
+      if (c.scenario && c.scenario !== '默认') {
+        scTag = '<span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:10px;font-weight:600;color:white;background:#8b5cf6;margin-right:6px;">' + escapeHtml(c.scenario) + '</span>';
+      }
 
-          html += '<div style="margin-left:' + (ci * 8) + 'px;margin-bottom:4px;padding:6px 10px;border-left:2px solid ' + ttColor + ';background:var(--bg-secondary);border-radius:0 6px 6px 0;">';
-          html += '<div style="font-weight:600;font-size:13px;color:var(--accent);">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
-          if (c.sources && c.sources.length > 0) {
-            c.sources.forEach(function(src) {
-              html += '<div style="font-size:12px;color:var(--text-secondary);margin-left:12px;">';
-              html += '← <code style="background:var(--bg-card);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.table || '') + '</code>';
-              html += '.<code style="background:var(--bg-card);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.field || '?') + '</code>';
-              html += ' <span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;font-weight:600;color:white;background:' + ttColor + ';">' + ttLabel + '</span>';
-              html += '</div>';
-            });
-          } else {
-            html += '<div style="font-size:12px;color:var(--text-muted);margin-left:12px;">← 无来源（' + ttLabel + '）</div>';
-          }
+      // 节点圆点
+      html += '<div style="position:relative;margin-bottom:8px;">';
+      html += '<div style="position:absolute;left:-20px;top:4px;width:10px;height:10px;border-radius:50%;background:' + ttColor + ';border:2px solid var(--bg-card);"></div>';
+
+      // 步骤名
+      html += '<div style="font-weight:600;font-size:13px;margin-bottom:2px;">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
+
+      // 来源
+      if (c.sources && c.sources.length > 0) {
+        c.sources.forEach(function(src) {
+          html += '<div style="font-size:12px;color:var(--text-secondary);line-height:1.6;">';
+          html += '← <code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;font-size:11px;">' + escapeHtml(src.table || '') + '</code>.';
+          html += '<code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;font-size:11px;">' + escapeHtml(src.field || '?') + '</code>';
+          html += ' <span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:10px;font-weight:600;color:white;background:' + ttColor + ';">' + ttLabel + '</span>';
           html += '</div>';
         });
-        html += '</div>';
       } else {
-        // 单分支
-        var c = group[0];
-        var tt = c.transform_type || 'expression';
-        var ttLabel = ttLabelMap[tt] || tt;
-        var ttColor = ttColorMap[tt] || '#6b7280';
-        var scTag = c.scenario && c.scenario !== '默认' ? '<span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(c.scenario) + ']</span> ' : '';
-
-        html += '<div style="margin-bottom:2px;">';
-        html += '<div style="font-weight:600;font-size:13px;color:var(--accent);">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
-        if (c.sources && c.sources.length > 0) {
-          c.sources.forEach(function(src) {
-            html += '<div style="font-size:12px;color:var(--text-secondary);margin-left:12px;">';
-            html += '← <code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.table || '') + '</code>';
-            html += '.<code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.field || '?') + '</code>';
-            html += ' <span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;font-weight:600;color:white;background:' + ttColor + ';">' + ttLabel + '</span>';
-            html += '</div>';
-          });
-        } else {
-          html += '<div style="font-size:12px;color:var(--text-muted);margin-left:12px;">← 无来源（' + ttLabel + '）</div>';
-        }
-        html += '</div>';
+        html += '<div style="font-size:12px;color:var(--text-muted);">' + ttLabel + '</div>';
       }
-
-      // 箭头
-      if (!isLast) {
-        html += '<div style="text-align:center;color:var(--text-muted);font-size:16px;margin:2px 0;">↑</div>';
-      }
+      html += '</div>';
     });
 
-    html += '</div>';
+    html += '</div>'; // 时间轴
+    html += '</div>'; // detail-section
   }
 
   document.getElementById('detailBody').innerHTML = html;
