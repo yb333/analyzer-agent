@@ -23,6 +23,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+import re
 
 # ── 工具函数 ──────────────────────────────────────────────
 
@@ -31,6 +32,90 @@ def _clean(s):
     if s is None:
         return ""
     return str(s).strip()
+
+
+def _merge_ai_markdown(knowledge: dict, ai_text: str) -> None:
+    """解析 AI 输出的自然语言 markdown，合并到 knowledge 的 business_logic。
+
+    AI 输出格式:
+        # 整体描述
+        （描述文字）
+
+        ## step_1
+        （这步的描述）
+
+        ## step_2
+        ...
+
+        ## 关键字段
+        - 字段名: 含义
+    """
+    bl = knowledge.setdefault("business_logic", {})
+    if "step_descriptions" not in bl:
+        bl["step_descriptions"] = []
+    if "key_transforms" not in bl:
+        bl["key_transforms"] = []
+
+    # 去掉 markdown 代码块标记
+    text = ai_text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:markdown)?\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+
+    # 按 ## 分段
+    sections = re.split(r"^## ", text, flags=re.MULTILINE)
+
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+
+        # 第一行是标题
+        lines = section.split("\n", 1)
+        title = lines[0].strip().lower()
+        content = lines[1].strip() if len(lines) > 1 else ""
+
+        # 去掉标题行的 # 前缀
+        if title.startswith("# "):
+            title = title[2:]
+
+        if "整体描述" in title or title.startswith("# 整体"):
+            bl["summary"] = content
+
+        elif title.startswith("step_") or re.match(r"step_\d+", title):
+            # 提取 step_id
+            step_match = re.match(r"(step_\d+)", title)
+            if step_match:
+                step_id = step_match.group(1)
+                # 找已有的 step_description
+                desc = next((d for d in bl["step_descriptions"] if d.get("step_id") == step_id), None)
+                if desc:
+                    desc["purpose"] = content.split("\n")[0] if content else desc.get("purpose", "")
+                    desc["logic"] = content
+                    desc["is_auto_generated"] = False
+                else:
+                    bl["step_descriptions"].append({
+                        "step_id": step_id,
+                        "purpose": content.split("\n")[0] if content else "",
+                        "logic": content,
+                        "is_auto_generated": False,
+                    })
+
+        elif "关键字段" in title:
+            # 解析 - 字段名: 含义
+            for line in content.split("\n"):
+                line = line.strip()
+                if line.startswith("- ") or line.startswith("* "):
+                    parts = line[2:].split(":", 1)
+                    if len(parts) == 2:
+                        fname = parts[0].strip()
+                        meaning = parts[1].strip()
+                        # 更新或添加 key_transforms
+                        existing = next((kt for kt in bl["key_transforms"] if kt.get("field") == fname), None)
+                        if existing:
+                            existing["meaning"] = meaning
+                        else:
+                            bl["key_transforms"].append({"field": fname, "meaning": meaning})
 
 
 def _schema_table(schema, table):
@@ -1480,7 +1565,8 @@ def main():
   dws-run analyzer view_generator --input knowledge_final.json --output docs/output/table/ --views mapping,asset
         """,
     )
-    parser.add_argument("--input", required=True, help="knowledge_final.json 路径")
+    parser.add_argument("--input", required=True, help="knowledge_draft.json 路径")
+    parser.add_argument("--ai-input", default=None, help="knowledge_ai.md 路径（AI 增强结果，可选）")
     parser.add_argument("--output", required=True, help="输出目录")
     parser.add_argument(
         "--views",
@@ -1498,6 +1584,16 @@ def main():
 
     with open(input_path, "r", encoding="utf-8") as f:
         knowledge = json.load(f)
+
+    # 合并 AI 增强结果（可选）
+    if args.ai_input:
+        ai_path = Path(args.ai_input)
+        if ai_path.exists():
+            ai_text = ai_path.read_text(encoding="utf-8")
+            _merge_ai_markdown(knowledge, ai_text)
+            print(f"  ✓ 已合并 AI 增强: {ai_path}")
+        else:
+            print(f"  ⚠ AI 输入文件不存在: {ai_path}（跳过）")
 
     # 输出目录: 直接用用户指定的 output 目录
     views_dir = Path(args.output)

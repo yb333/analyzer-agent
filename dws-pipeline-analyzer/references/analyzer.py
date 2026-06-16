@@ -2519,6 +2519,121 @@ def build_source(
 # main()
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+# AI 摘要生成（给 AI 增强用的精简输入，2-3KB）
+# ═══════════════════════════════════════════════════════════════
+
+def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality) -> str:
+    """生成 AI 增强用的精简摘要 markdown。
+
+    包含:
+    - 目标表 + 场景结构
+    - 每个步骤的关键信息（规则名/来源表/CTE/加工类型/SQL前200字符）
+    - 字段加工类型分布
+    - 质量问题
+    """
+    lines = []
+    lines.append("# ETL 分析摘要（AI 增强用）")
+    lines.append("")
+    lines.append("> AI 请基于以下信息，补充每个步骤的业务目的和加工逻辑，")
+    lines.append("> 输出格式见文末模板，保存为 knowledge_ai.md")
+    lines.append("")
+
+    # ── 基本信息 ──
+    meta = knowledge.get("meta", {})
+    lines.append(f"## 基本信息")
+    lines.append(f"- 目标表: {meta.get('target_table', '')}")
+    lines.append(f"- 规则数: {len(rules)}")
+    lines.append(f"- 加工模式: {', '.join(p.get('label','') for p in meta.get('patterns', []))}")
+    lines.append("")
+
+    # ── 场景结构 ──
+    scenarios = topology.get("scenarios", [])
+    if scenarios:
+        lines.append("## 场景结构")
+        for sc in scenarios:
+            label = "公共步骤" if sc.get("is_common") else sc["name"]
+            lines.append(f"- {label}: {sc['rule_count']} 个规则 ({', '.join(sc['rule_codes'])})")
+        lines.append("")
+
+    # ── 步骤详情 ──
+    lines.append("## 步骤详情")
+    for rule in rules:
+        parsed = parsed_map.get(rule.rule_code)
+        step = next((s for s in topology["steps"] if s["rule_code"] == rule.rule_code), None)
+        sid = step["step_id"] if step else ""
+
+        # 兜底描述
+        auto_desc = next((d for d in knowledge.get("business_logic", {}).get("step_descriptions", [])
+                         if d.get("step_id") == sid), {})
+
+        lines.append(f"### {sid} ({rule.rule_code}) {rule.rule_name or ''}")
+        rt_label = RULE_TYPE_MAP.get(rule.rule_type, "")
+        lines.append(f"- 规则类型: {rt_label}")
+        lines.append(f"- 执行序列: {rule.exec_sequence}")
+        lines.append(f"- 目标表: {rule.target_table}")
+        dm_label = DELETE_MODE_MAP.get((rule.delete_mode or "").strip(), "")
+        dc = rule.delete_condition or ""
+        lines.append(f"- 写入方式: {dm_label}" + (f" → 分区[{dc}]" if dc else ""))
+
+        if rule.rule_type == 9 and rule.exchange_source_table:
+            lines.append(f"- 分区交换: {rule.target_table} → {rule.exchange_source_table}")
+
+        if parsed:
+            src_tables = [j.source_table for j in parsed.source_tables]
+            lines.append(f"- 来源表: {', '.join(src_tables[:5])}")
+            if parsed.ctes:
+                cte_names = [c.name for c in parsed.ctes]
+                lines.append(f"- CTE: {', '.join(cte_names)}")
+            # 加工类型分布
+            from collections import Counter
+            tt_dist = Counter(c.transform_type for c in parsed.select_columns)
+            tt_str = ", ".join(f"{k}={v}" for k, v in tt_dist.most_common())
+            lines.append(f"- 字段加工: {len(parsed.select_columns)} 列 ({tt_str})")
+
+        # SQL 前 200 字符（不完整 SQL）
+        if rule.query_sql:
+            sql_preview = rule.query_sql[:200].replace("\n", " ")
+            lines.append(f"- SQL 摘要: {sql_preview}...")
+
+        # 兜底描述（脚本已生成）
+        if auto_desc.get("purpose"):
+            lines.append(f"- 脚本兜底 purpose: {auto_desc['purpose']}")
+        if auto_desc.get("logic"):
+            lines.append(f"- 脚本兜底 logic: {auto_desc['logic']}")
+        lines.append("")
+
+    # ── 质量问题 ──
+    issues = quality.get("issues", [])
+    if issues:
+        lines.append("## 质量问题")
+        for iss in issues[:10]:
+            lines.append(f"- [{iss.get('severity','')}] {iss.get('title','')}")
+        lines.append("")
+
+    # ── AI 输出模板 ──
+    lines.append("---")
+    lines.append("")
+    lines.append("## AI 输出模板（按此格式输出，保存为 knowledge_ai.md）")
+    lines.append("")
+    lines.append("```markdown")
+    lines.append("# 整体描述")
+    lines.append("（2-3句话描述这个ETL是干什么的）")
+    lines.append("")
+    for rule in rules:
+        step = next((s for s in topology["steps"] if s["rule_code"] == rule.rule_code), None)
+        sid = step["step_id"] if step else ""
+        lines.append(f"## {sid}")
+        lines.append(f"（描述这步的业务目的和加工逻辑）")
+        lines.append("")
+    lines.append("## 关键字段")
+    lines.append("- 字段名: 业务含义")
+    lines.append("```")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="dws-pipeline-analyzer — 制品包深度分析器",
@@ -2768,13 +2883,20 @@ def main():
         encoding="utf-8",
     )
 
+    # ── 生成 AI 增强用摘要 ──
+    summary_file = output_dir / "knowledge_summary.md"
+    summary_text = _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality)
+    summary_file.write_text(summary_text, encoding="utf-8")
+
     print(f"\n═══ 完成 ═══")
     print(f"输出: {output_file}")
+    print(f"摘要: {summary_file}")
     print(f"目标表: {target_name}")
     print(f"步骤数: {len(rules)}")
     print(f"字段数: {stats['total_in_sql']}")
     print(f"问题数: {len(quality['issues'])}")
-    print(f"\n下一步: 将 knowledge_draft.json 交给 AI 补充业务逻辑（L4 + L5 AI 洞察）")
+    print(f"\n下一步: AI 读 knowledge_summary.md，输出自然语言补充，保存为 knowledge_ai.md")
+    print(f"        然后: python run.py view_generator --input knowledge_draft.json --ai-input knowledge_ai.md ...")
 
 
 if __name__ == "__main__":

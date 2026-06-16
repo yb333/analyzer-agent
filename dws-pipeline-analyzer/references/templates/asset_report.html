@@ -1590,8 +1590,8 @@ function renderLineage() {
   var nodeMap = {};
   nodes.forEach(function(n) { nodeMap[n.id] = n; });
 
-  // Build SVG
-  var svg = '<svg class="lineage-svg" viewBox="0 0 ' + svgW + ' ' + svgH + '" xmlns="http://www.w3.org/2000/svg" style="min-width:' + svgW + 'px" xmlns:xhtml="http://www.w3.org/1999/xhtml">';
+  // Build SVG（用 width/height 固定尺寸，不用 viewBox 避免缩放差异）
+  var svg = '<svg class="lineage-svg" width="' + svgW + '" height="' + svgH + '" xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml">';
 
   // Arrow markers
   svg += '<defs>';
@@ -1697,8 +1697,10 @@ function renderLineage() {
 
   document.getElementById('lineageLegend').innerHTML = legendHtml;
 
-  // 初始化缩放和拖拽
-  initLineageZoom(wrapper, svg);
+  // 初始化缩放和拖拽（用 setTimeout 确保 DOM 已渲染）
+  setTimeout(function() {
+    initLineageZoom();
+  }, 0);
 }
 
 // ── 数据流向图缩放/拖拽 ──
@@ -1719,25 +1721,26 @@ function lineageZoomReset() {
 }
 
 function applyLineageTransform() {
-  var svg = document.querySelector('#lineageWrapper svg');
-  if (!svg) return;
-  var content = svg.querySelector('#lineageContent');
+  var content = document.querySelector('#lineageWrapper #lineageContent');
   if (content) {
     content.setAttribute('transform', 'translate(' + lineagePanX + ',' + lineagePanY + ') scale(' + lineageScale + ')');
   }
 }
 
-function initLineageZoom(wrapper, svg) {
-  if (!svg) return;
-  // 给 SVG 内容加一个 g 容器（如果没有的话）
-  var content = svg.querySelector('#lineageContent');
+function initLineageZoom() {
+  var wrapper = document.getElementById('lineageWrapper');
+  var svgEl = wrapper ? wrapper.querySelector('svg') : null;
+  if (!svgEl) return;
+
+  // 把 SVG 子元素包到一个 g 容器里（用于 transform）
+  var content = svgEl.querySelector('#lineageContent');
   if (!content) {
     content = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     content.setAttribute('id', 'lineageContent');
-    while (svg.firstChild) {
-      content.appendChild(svg.firstChild);
+    while (svgEl.firstChild) {
+      content.appendChild(svgEl.firstChild);
     }
-    svg.appendChild(content);
+    svgEl.appendChild(content);
   }
 
   // 滚轮缩放
@@ -1752,14 +1755,14 @@ function initLineageZoom(wrapper, svg) {
   var startX = 0, startY = 0;
   var startPanX = 0, startPanY = 0;
 
-  svg.style.cursor = 'grab';
-  svg.addEventListener('mousedown', function(e) {
+  svgEl.style.cursor = 'grab';
+  svgEl.addEventListener('mousedown', function(e) {
     isDragging = true;
     startX = e.clientX;
     startY = e.clientY;
     startPanX = lineagePanX;
     startPanY = lineagePanY;
-    svg.style.cursor = 'grabbing';
+    svgEl.style.cursor = 'grabbing';
   });
 
   document.addEventListener('mousemove', function(e) {
@@ -1771,7 +1774,7 @@ function initLineageZoom(wrapper, svg) {
 
   document.addEventListener('mouseup', function() {
     isDragging = false;
-    svg.style.cursor = 'grab';
+    svgEl.style.cursor = 'grab';
   });
 }
 
@@ -1966,9 +1969,9 @@ function renderQuality() {
 
   var html = '';
 
-  // Complexity stats
+  // Complexity stats — 用和其他板块一致的 metric-cards 风格
   if (complexity && Object.keys(complexity).length > 0) {
-    html += '<div class="quality-stats">';
+    html += '<div class="metric-cards" style="margin-bottom:16px;">';
     var stats = [
       { label: '最大JOIN数', value: complexity.max_join_count },
       { label: '源表总数', value: complexity.total_source_tables },
@@ -1976,7 +1979,7 @@ function renderQuality() {
       { label: 'CASE分支', value: complexity.total_case_when_branches || 0 }
     ];
     stats.forEach(function(st) {
-      html += '<div class="quality-stat"><div class="stat-label">' + st.label + '</div><div class="stat-value">' + (st.value !== undefined ? st.value : '-') + '</div></div>';
+      html += '<div class="metric-card"><div class="metric-value">' + (st.value !== undefined ? st.value : '-') + '</div><div class="metric-label">' + st.label + '</div></div>';
     });
     html += '</div>';
   }

@@ -61,28 +61,35 @@ DDL 目录自动检测：同级的 `04_ddl/` 有则传入，没有则跳过。
 
 #### 1b. AI 补充业务理解
 
-读取 `knowledge_draft.json`，补充：
+**AI 只读 `knowledge_summary.md`（2-4KB 摘要），不读 34KB 的 JSON。**
 
-**business_logic（L4）**：
-- `summary`：整体概述（2-3 句话）
-- `step_descriptions`：每个步骤的业务目的和加工逻辑
-- `key_transforms`：关键字段的业务含义（SQL 翻译成人话）
+AI 基于摘要，按模板格式输出自然语言，保存为 `knowledge_ai.md`：
 
-**quality.ai_insights（L5 AI 部分）**：
-- 只补充有实际问题的洞察（severity 非 info）
+```markdown
+# 整体描述
+（2-3句话描述这个ETL是干什么的）
 
-保存为 `knowledge_final.json`。
+## step_1
+（这步的业务目的和加工逻辑）
+
+## step_2
+...
+
+## 关键字段
+- 字段名: 业务含义
+```
 
 #### 1c. 生成全部视图
 
 ```bash
 python {skill_dir}/run.py view_generator \
-    --input knowledge_final.json \
+    --input {output_dir}/knowledge_draft.json \
+    --ai-input {output_dir}/knowledge_ai.md \
     --output {output_dir} \
     --views all
 ```
 
-自动生成 3 个视图，不询问用户选哪些。
+`--ai-input` 是可选的（没有 AI 增强时跳过，用脚本兜底描述）。
 
 ### Step 2: 报告结果
 
