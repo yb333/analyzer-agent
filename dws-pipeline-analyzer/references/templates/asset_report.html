@@ -1790,6 +1790,18 @@ function renderSteps() {
     return;
   }
 
+  // 按拓扑序排序：exec_sequence 升序，同序列内公共步骤排最后
+  steps.sort(function(a, b) {
+    if ((a.exec_sequence || 0) !== (b.exec_sequence || 0)) {
+      return (a.exec_sequence || 0) - (b.exec_sequence || 0);
+    }
+    var scA = a.scenario_name || '';
+    var scB = b.scenario_name || '';
+    if (scA === '公共步骤') return 1;
+    if (scB === '公共步骤') return -1;
+    return scA.localeCompare(scB);
+  });
+
   var html = '';
   steps.forEach(function(step, idx) {
     var isOpen = idx === 0 ? ' open' : '';
