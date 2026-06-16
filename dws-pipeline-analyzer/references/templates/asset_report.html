@@ -2247,42 +2247,87 @@ function openDetail(fieldName, scenario) {
     html += '</div>';
   }
 
-  // 各步骤来源（纯字段链路，只显示这个字段的来源+加工方式）
-  if (fieldSteps.length > 0) {
+  // 用 field_chain_map 构建完整链路树（支持多场景分叉）
+  var chainData = REPORT_DATA.field_chain_map || {};
+  var fieldChain = chainData[fieldName.toLowerCase()];
+
+  if (fieldChain && fieldChain.chains && fieldChain.chains.length > 0) {
     html += '<div class="detail-section"><h4>数据流链路</h4>';
 
-    fieldSteps.forEach(function(st, idx) {
-      var f = (REPORT_DATA.fields || []).find(function(f) {
-        return f.target_field === fieldName && f.producing_step === st.step_id && (!scenario || f.scenario === scenario);
-      });
-      if (!f) return;
+    // 按 exec_sequence 倒序（最终步骤在上）
+    var chains = fieldChain.chains.slice().sort(function(a, b) {
+      return (b.exec_sequence || 0) - (a.exec_sequence || 0);
+    });
 
-      var tt = f.transform_type || 'expression';
-      var ttLabel = {'direct':'直取','value':'赋值','aggregate':'聚合','pivot':'行转列',
-                     'window':'窗口','fallback':'兜底','case_when':'条件','expression':'加工'}[tt] || tt;
-      var ttColor = {'direct':'#22c55e','value':'#6b7280','aggregate':'#f97316','pivot':'#8b5cf6',
-                     'window':'#3b82f6','fallback':'#eab308','case_when':'#ec4899','expression':'#6366f1'}[tt] || '#6b7280';
+    // 按 exec_sequence 分组，同 seq 的为同一层（多场景分叉）
+    var seqGroups = {};
+    var seqOrder = [];
+    chains.forEach(function(c) {
+      var seq = c.exec_sequence || 0;
+      if (!seqGroups[seq]) { seqGroups[seq] = []; seqOrder.push(seq); }
+      seqGroups[seq].push(c);
+    });
 
-      // 步骤名
-      html += '<div style="margin-bottom:2px;">';
-      html += '<div style="font-weight:600;font-size:13px;color:var(--accent);">' + escapeHtml(st.rule_name || st.step_id) + '</div>';
+    var ttLabelMap = {'direct':'直取','value':'赋值','aggregate':'聚合','pivot':'行转列',
+                      'window':'窗口','fallback':'兜底','case_when':'条件','expression':'加工'};
+    var ttColorMap = {'direct':'#22c55e','value':'#6b7280','aggregate':'#f97316','pivot':'#8b5cf6',
+                      'window':'#3b82f6','fallback':'#eab308','case_when':'#ec4899','expression':'#6366f1'};
 
-      // 来源表+字段（只显示这个字段的来源，不是全部来源表）
-      if (f.sources && f.sources.length > 0) {
-        f.sources.forEach(function(src) {
-          html += '<div style="font-size:12px;color:var(--text-secondary);margin-left:12px;">';
-          html += '← <code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.table || '') + '</code>';
-          html += '.<code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.field || '?') + '</code>';
-          html += ' <span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;font-weight:600;color:white;background:' + ttColor + ';">' + ttLabel + '</span>';
+    seqOrder.forEach(function(seq, seqIdx) {
+      var group = seqGroups[seq];
+      var isLast = seqIdx === seqOrder.length - 1;
+
+      // 多分支分叉
+      if (group.length > 1) {
+        html += '<div style="margin-bottom:2px;">';
+        group.forEach(function(c, ci) {
+          var tt = c.transform_type || 'expression';
+          var ttLabel = ttLabelMap[tt] || tt;
+          var ttColor = ttColorMap[tt] || '#6b7280';
+          var scTag = c.scenario ? '<span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(c.scenario) + ']</span> ' : '';
+
+          html += '<div style="margin-left:' + (ci * 8) + 'px;margin-bottom:4px;padding:6px 10px;border-left:2px solid ' + ttColor + ';background:var(--bg-secondary);border-radius:0 6px 6px 0;">';
+          html += '<div style="font-weight:600;font-size:13px;color:var(--accent);">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
+          if (c.sources && c.sources.length > 0) {
+            c.sources.forEach(function(src) {
+              html += '<div style="font-size:12px;color:var(--text-secondary);margin-left:12px;">';
+              html += '← <code style="background:var(--bg-card);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.table || '') + '</code>';
+              html += '.<code style="background:var(--bg-card);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.field || '?') + '</code>';
+              html += ' <span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;font-weight:600;color:white;background:' + ttColor + ';">' + ttLabel + '</span>';
+              html += '</div>';
+            });
+          } else {
+            html += '<div style="font-size:12px;color:var(--text-muted);margin-left:12px;">← 无来源（' + ttLabel + '）</div>';
+          }
           html += '</div>';
         });
+        html += '</div>';
       } else {
-        html += '<div style="font-size:12px;color:var(--text-muted);margin-left:12px;">← 无来源（' + ttLabel + '）</div>';
-      }
-      html += '</div>';
+        // 单分支
+        var c = group[0];
+        var tt = c.transform_type || 'expression';
+        var ttLabel = ttLabelMap[tt] || tt;
+        var ttColor = ttColorMap[tt] || '#6b7280';
+        var scTag = c.scenario && c.scenario !== '默认' ? '<span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(c.scenario) + ']</span> ' : '';
 
-      // 箭头（非最后一个步骤）
-      if (idx < fieldSteps.length - 1) {
+        html += '<div style="margin-bottom:2px;">';
+        html += '<div style="font-weight:600;font-size:13px;color:var(--accent);">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
+        if (c.sources && c.sources.length > 0) {
+          c.sources.forEach(function(src) {
+            html += '<div style="font-size:12px;color:var(--text-secondary);margin-left:12px;">';
+            html += '← <code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.table || '') + '</code>';
+            html += '.<code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.field || '?') + '</code>';
+            html += ' <span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;font-weight:600;color:white;background:' + ttColor + ';">' + ttLabel + '</span>';
+            html += '</div>';
+          });
+        } else {
+          html += '<div style="font-size:12px;color:var(--text-muted);margin-left:12px;">← 无来源（' + ttLabel + '）</div>';
+        }
+        html += '</div>';
+      }
+
+      // 箭头
+      if (!isLast) {
         html += '<div style="text-align:center;color:var(--text-muted);font-size:16px;margin:2px 0;">↑</div>';
       }
     });

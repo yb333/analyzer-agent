@@ -338,50 +338,60 @@ def build_report_data(knowledge):
             "rule_name": s.get("rule_name", ""),
         }
 
-    # 先按场景分组
-    scenario_field_groups = {}  # {scenario: [fields]}
-    for f in fields_list:
-        step_id = f.get("producing_step", "")
-        si = step_info_map.get(step_id, {})
-        scenario = si.get("scenario_name", "默认")
-        if scenario not in scenario_field_groups:
-            scenario_field_groups[scenario] = []
-        scenario_field_groups[scenario].append(f)
-
-    # 每个场景内按 (target_table, field_name) 去重
+    # ── fields (全局去重，不按场景分组；保留全部步骤链路供详情面板) ──
+    # 同字段名只显示一行，取最终步骤（最大 exec_sequence）的版本
     fields_out = []
-    for scenario, sc_fields in scenario_field_groups.items():
-        seen = {}  # {(target_table, field): idx_in_fields_out}
-        for f in sc_fields:
-            fname = f.get("target_field", "")
-            si = step_info_map.get(f.get("producing_step", ""), {})
-            target_table = si.get("target_table", "")
-            key = (target_table, fname)
-            if key in seen:
-                existing_idx = seen[key]
-                existing_tt = fields_out[existing_idx].get("transform_type", "expression")
-                new_tt = f.get("transform_type", "expression")
-                priority = {"unknown": -1, "value": 0, "direct": 1, "expression": 2, "fallback": 3, "case_when": 4, "aggregate": 5, "pivot": 6, "window": 7}
-                if priority.get(new_tt, 0) > priority.get(existing_tt, 0):
-                    fields_out[existing_idx] = {
-                        "target_field": fname, "producing_step": f.get("producing_step", ""),
-                        "target_table": target_table, "scenario": scenario,
-                        "transform_type": new_tt, "in_target_fields": f.get("in_target_fields", False),
-                        "sources": _resolve_sources(f, f.get("producing_step", "")),
-                    }
-                continue
-            seen[key] = len(fields_out)
-            fields_out.append({
+    seen_fields_lower = {}  # {field_lower: idx}
+
+    # 先按 exec_sequence 排序，最终步骤优先
+    sorted_fields = sorted(fields_list, key=lambda f: -step_info_map.get(f.get("producing_step", ""), {}).get("exec_sequence", 0))
+
+    for f in sorted_fields:
+        fname = f.get("target_field", "")
+        fname_lower = fname.lower()
+        si = step_info_map.get(f.get("producing_step", ""), {})
+        scenario = si.get("scenario_name", "默认")
+        target_table = si.get("target_table", "")
+        sources = _resolve_sources(f, f.get("producing_step", ""))
+
+        if fname_lower in seen_fields_lower:
+            continue  # 已有，跳过（最终步骤优先）
+        seen_fields_lower[fname_lower] = len(fields_out)
+        fields_out.append({
+            "target_field": fname,
+            "producing_step": f.get("producing_step", ""),
+            "target_table": target_table,
+            "scenario": scenario,
+            "transform_type": f.get("transform_type", "expression"),
+            "in_target_fields": f.get("in_target_fields", False),
+            "excel_source_field": f.get("excel_source_field", ""),
+            "sources": sources,
+        })
+
+    # ── field_chain_map (字段 → 完整链路树，供详情面板用) ──
+    # 每个 field 收集它在所有步骤+所有场景中的来源
+    field_chain_map = {}
+    for f in fields_list:
+        fname = f.get("target_field", "")
+        fname_lower = fname.lower()
+        si = step_info_map.get(f.get("producing_step", ""), {})
+        step_id = f.get("producing_step", "")
+        sources = _resolve_sources(f, f.get("producing_step", ""))
+
+        if fname_lower not in field_chain_map:
+            field_chain_map[fname_lower] = {
                 "target_field": fname,
-                "producing_step": f.get("producing_step", ""),
-                "target_table": target_table,
-                "scenario": scenario,
-                "transform_type": f.get("transform_type", "expression"),
-                "in_target_fields": f.get("in_target_fields", False),
-                "excel_source_field": f.get("excel_source_field", ""),
-                "validation": f.get("validation", None),
-                "sources": _resolve_sources(f, f.get("producing_step", "")),
-            })
+                "chains": [],  # 所有步骤的来源
+            }
+        field_chain_map[fname_lower]["chains"].append({
+            "step_id": step_id,
+            "rule_name": si.get("rule_name", step_id),
+            "scenario": si.get("scenario_name", ""),
+            "exec_sequence": si.get("exec_sequence", 0),
+            "target_table": si.get("target_table", ""),
+            "transform_type": f.get("transform_type", "expression"),
+            "sources": sources,
+        })
 
     # ── field_details (CTE 穿透血缘链) ──
     field_details = {}
@@ -425,6 +435,7 @@ def build_report_data(knowledge):
         "schema_fields": schema_fields,
         "steps": steps_out,
         "fields": fields_out,
+        "field_chain_map": field_chain_map,
         "field_details": field_details,
         "quality": quality_out,
     }
