@@ -50,13 +50,10 @@ python -c "import openpyxl, sqlglot; print('OK')"
 **核心分析脚本是 `references/analyzer.py`**，通过 `run.py` 分发器调用：
 
 ```bash
-python {skill_dir}/run.py analyze \
-    --input {input_xlsx} \
-    --output {output_dir} \
-    [--ddl-dir {ddl_dir}]
+python {skill_dir}/run.py analyzer --input {input_xlsx} --output {output_dir} [--ddl-dir {ddl_dir}]
 ```
 
-如果已安装 dws-run（opencode 平台），也可以用 `dws-run analyzer analyze ...`，效果一样。
+如果已安装 dws-run（opencode 平台），也可以用 `dws-run analyzer analyzer ...`，效果一样。
 
 DDL 目录自动检测：同级的 `04_ddl/` 有则传入，没有则跳过。
 
@@ -123,7 +120,7 @@ python {skill_dir}/run.py view_generator \
 
 ## 命令参数
 
-### analyze
+### analyzer
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
