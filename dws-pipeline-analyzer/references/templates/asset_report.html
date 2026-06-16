@@ -1243,11 +1243,12 @@ body {
       数据流向图
     </div>
     <div class="section-body">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
         <button onclick="lineageZoom(1.2)" style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);cursor:pointer;font-size:14px;">+</button>
         <button onclick="lineageZoom(0.8)" style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);cursor:pointer;font-size:14px;">-</button>
         <button onclick="lineageZoomReset()" style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);cursor:pointer;font-size:12px;">重置</button>
-        <span style="font-size:11px;color:var(--text-muted);">滚轮缩放 · 拖拽平移</span>
+        <button id="toggleSourcesBtn" onclick="toggleSourceTables()" style="padding:4px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);cursor:pointer;font-size:12px;">显示来源表</button>
+        <span style="font-size:11px;color:var(--text-muted);">滚轮缩放 · 拖拽平移 · 点击步骤高亮</span>
       </div>
       <div class="lineage-wrapper" id="lineageWrapper"></div>
       <div class="lineage-legend" id="lineageLegend"></div>
@@ -1601,11 +1602,14 @@ function renderLineage() {
   svg += '<path d="M 0 0 L 10 5 L 0 10 z" fill="#f97316"/></marker>';
   svg += '</defs>';
 
-  // Render edges
+  // Render edges (来源表隐藏时，不渲染涉及隐藏节点的边)
   edges.forEach(function(e) {
     var fromNode = nodeMap[e.from];
     var toNode = nodeMap[e.to];
     if (!fromNode || !toNode) return;
+    // 隐藏的来源表：如果开关关了就不渲染
+    if (fromNode.hidden && !lineageShowSources) return;
+    if (toNode.hidden && !lineageShowSources) return;
 
     var x1 = fromNode.x + fromNode.width;
     var y1 = fromNode.y + fromNode.height / 2;
@@ -1616,6 +1620,7 @@ function renderLineage() {
     var cp = Math.max(30, Math.abs(x2 - x1) * 0.4);
 
     svg += '<path class="edge-path' + (isSelfRef ? ' self-ref' : '') + '"';
+    svg += ' data-from="' + escapeHtml(e.from) + '" data-to="' + escapeHtml(e.to) + '"';
     svg += ' d="M ' + x1 + ' ' + y1 + ' C ' + (x1 + cp) + ' ' + y1 + ', ' + (x2 - cp) + ' ' + y2 + ', ' + x2 + ' ' + y2 + '"';
     svg += ' marker-end="url(#' + (isSelfRef ? 'lh-arrow-self' : 'lh-arrow') + ')"';
 
@@ -1641,13 +1646,13 @@ function renderLineage() {
     svg += '<text class="edge-label" x="' + cx + '" y="' + (cy + 24) + '" text-anchor="middle">self-ref</text>';
   });
 
-  // Render nodes
+  // Render nodes (隐藏的来源表：开关关闭时不渲染)
   nodes.forEach(function(n) {
+    if (n.hidden && !lineageShowSources) return;
     var nodeType = n.type || 'source';
-    svg += '<g class="lh-node" data-id="' + escapeHtml(n.id) + '" data-name="' + escapeHtml(n.name || n.label || '') + '" style="cursor:pointer;">';
+    svg += '<g class="lh-node" data-id="' + escapeHtml(n.id) + '" data-name="' + escapeHtml(n.name || n.label || '') + '" data-type="' + nodeType + '" style="cursor:pointer;">';
     svg += '<rect class="node-rect ' + nodeType + '" x="' + n.x + '" y="' + n.y + '" width="' + n.width + '" height="' + n.height + '"/>';
 
-    // foreignObject for text wrapping
     var pad = 6;
     svg += '<foreignObject x="' + (n.x + pad) + '" y="' + (n.y + 2) + '" width="' + Math.max(10, n.width - pad * 2) + '" height="' + Math.max(10, n.height - 4) + '">';
     svg += '<div xmlns="http://www.w3.org/1999/xhtml" class="node-content">';
@@ -1700,7 +1705,98 @@ function renderLineage() {
   // 初始化缩放和拖拽（用 setTimeout 确保 DOM 已渲染）
   setTimeout(function() {
     initLineageZoom();
+    initLineageHighlight();
   }, 0);
+}
+
+// ── 来源表显示/隐藏切换 ──
+var lineageShowSources = false;
+
+function toggleSourceTables() {
+  lineageShowSources = !lineageShowSources;
+  var btn = document.getElementById('toggleSourcesBtn');
+  btn.textContent = lineageShowSources ? '隐藏来源表' : '显示来源表';
+  renderLineageNodes();
+}
+
+function renderLineageNodes() {
+  // 重新渲染 lineage（保留缩放状态）
+  renderLineage();
+}
+
+// ── 步骤高亮交互 ──
+var highlightedStep = null;
+
+function initLineageHighlight() {
+  var wrapper = document.getElementById('lineageWrapper');
+  if (!wrapper) return;
+
+  // 点击节点
+  wrapper.addEventListener('click', function(e) {
+    var nodeEl = e.target.closest('.lh-node');
+    if (!nodeEl) {
+      // 点击空白处取消高亮
+      clearHighlight();
+      return;
+    }
+    var nodeId = nodeEl.getAttribute('data-id');
+    var nodeType = nodeEl.getAttribute('data-type');
+    if (nodeType === 'step') {
+      highlightStep(nodeId);
+    }
+  });
+}
+
+function highlightStep(nodeId) {
+  highlightedStep = nodeId;
+  var edges = REPORT_DATA.lineage.edges || [];
+  var nodes = REPORT_DATA.lineage.nodes || [];
+
+  // 找到该步骤的直接来源节点和去向节点
+  var related = new Set([nodeId]);
+  edges.forEach(function(e) {
+    if (e.to === nodeId) related.add(e.from);
+    if (e.from === nodeId) related.add(e.to);
+  });
+
+  // 应用样式
+  var allNodes = document.querySelectorAll('#lineageWrapper .lh-node');
+  var allEdges = document.querySelectorAll('#lineageWrapper .edge-path');
+
+  allNodes.forEach(function(g) {
+    var id = g.getAttribute('data-id');
+    if (related.has(id)) {
+      g.style.opacity = '1';
+      g.querySelector('.node-rect').style.strokeWidth = '2.5';
+    } else {
+      g.style.opacity = '0.2';
+    }
+  });
+
+  allEdges.forEach(function(path) {
+    var from = path.getAttribute('data-from');
+    var to = path.getAttribute('data-to');
+    if (related.has(from) && related.has(to)) {
+      path.style.opacity = '1';
+      path.style.strokeWidth = '2';
+    } else {
+      path.style.opacity = '0.1';
+    }
+  });
+}
+
+function clearHighlight() {
+  highlightedStep = null;
+  var allNodes = document.querySelectorAll('#lineageWrapper .lh-node');
+  var allEdges = document.querySelectorAll('#lineageWrapper .edge-path');
+  allNodes.forEach(function(g) {
+    g.style.opacity = '1';
+    g.querySelector('.node-rect').style.strokeWidth = '1';
+  });
+  allEdges.forEach(function(path) {
+    path.style.opacity = '1';
+    path.style.strokeWidth = '1';
+  });
 }
 
 // ── 数据流向图缩放/拖拽 ──
