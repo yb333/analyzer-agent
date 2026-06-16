@@ -2247,40 +2247,44 @@ function openDetail(fieldName, scenario) {
     html += '</div>';
   }
 
-  // 各步骤来源（平铺，不分组，倒序）
+  // 各步骤来源（纯字段链路，只显示这个字段的来源+加工方式）
   if (fieldSteps.length > 0) {
-    html += '<div class="detail-section"><h4>各步骤来源详情</h4>';
+    html += '<div class="detail-section"><h4>数据流链路</h4>';
 
-    fieldSteps.forEach(function(st) {
+    fieldSteps.forEach(function(st, idx) {
       var f = (REPORT_DATA.fields || []).find(function(f) {
-        return f.target_field === fieldName && f.producing_step === st.step_id;
+        return f.target_field === fieldName && f.producing_step === st.step_id && (!scenario || f.scenario === scenario);
       });
+      if (!f) return;
 
-      html += '<div style="margin-bottom:10px;padding:10px;border-left:3px solid var(--accent);background:var(--bg-secondary);border-radius:0 6px 6px 0;">';
-      html += '<div style="font-weight:600;font-size:13px;">' + escapeHtml(st.rule_name || st.step_id) + ' <span style="color:var(--text-muted);font-weight:400;">(' + escapeHtml(st.rule_code || '') + ')</span></div>';
-      html += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">目标表: ' + escapeHtml(st.target_table || '-') + ' · 写入: ' + escapeHtml(st.delete_mode_label || '-') + (st.delete_condition ? ' → ' + escapeHtml(st.delete_condition) : '') + '</div>';
-      if (st.purpose) html += '<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">' + escapeHtml(st.purpose) + '</div>';
+      var tt = f.transform_type || 'expression';
+      var ttLabel = {'direct':'直取','value':'赋值','aggregate':'聚合','pivot':'行转列',
+                     'window':'窗口','fallback':'兜底','case_when':'条件','expression':'加工'}[tt] || tt;
+      var ttColor = {'direct':'#22c55e','value':'#6b7280','aggregate':'#f97316','pivot':'#8b5cf6',
+                     'window':'#3b82f6','fallback':'#eab308','case_when':'#ec4899','expression':'#6366f1'}[tt] || '#6b7280';
 
-      // 来源表
-      var srcTables = st.source_tables || [];
-      if (srcTables.length > 0) {
-        html += '<div style="font-size:12px;margin-top:4px;">来源表: ' + srcTables.map(function(t) {
-          return '<code style="background:var(--bg-card);padding:1px 4px;border-radius:3px;">' + escapeHtml(t) + '</code>';
-        }).join(' ') + '</div>';
-      }
+      // 步骤名
+      html += '<div style="margin-bottom:2px;">';
+      html += '<div style="font-weight:600;font-size:13px;color:var(--accent);">' + escapeHtml(st.rule_name || st.step_id) + '</div>';
 
-      // 字段来源
-      if (f && f.sources && f.sources.length > 0) {
-        var tt = f.transform_type || 'expression';
-        var ttLabel = {'direct':'直取','value':'赋值','aggregate':'聚合','pivot':'行转列',
-                       'window':'窗口','fallback':'兜底','case_when':'条件','expression':'加工'}[tt] || tt;
-        html += '<div style="font-size:12px;margin-top:4px;color:var(--text-secondary);">';
+      // 来源表+字段（只显示这个字段的来源，不是全部来源表）
+      if (f.sources && f.sources.length > 0) {
         f.sources.forEach(function(src) {
-          html += '<div><code style="background:var(--bg-card);padding:1px 4px;border-radius:3px;">' + escapeHtml((src.alias || src.table || '') + '.' + (src.field || '?')) + '</code> → ' + escapeHtml(fieldName) + ' [' + ttLabel + ']</div>';
+          html += '<div style="font-size:12px;color:var(--text-secondary);margin-left:12px;">';
+          html += '← <code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.table || '') + '</code>';
+          html += '.<code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px;">' + escapeHtml(src.field || '?') + '</code>';
+          html += ' <span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;font-weight:600;color:white;background:' + ttColor + ';">' + ttLabel + '</span>';
+          html += '</div>';
         });
-        html += '</div>';
+      } else {
+        html += '<div style="font-size:12px;color:var(--text-muted);margin-left:12px;">← 无来源（' + ttLabel + '）</div>';
       }
       html += '</div>';
+
+      // 箭头（非最后一个步骤）
+      if (idx < fieldSteps.length - 1) {
+        html += '<div style="text-align:center;color:var(--text-muted);font-size:16px;margin:2px 0;">↑</div>';
+      }
     });
 
     html += '</div>';
