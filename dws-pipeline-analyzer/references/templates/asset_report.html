@@ -45,6 +45,8 @@
   /* lineage node colors */
   --node-source-fill: #dbeafe;
   --node-source-stroke: #3b82f6;
+  --node-primary-fill: #bfdbfe;
+  --node-primary-stroke: #2563eb;
   --node-intermediate-fill: #f1f5f9;
   --node-intermediate-stroke: #64748b;
   --node-cte-fill: #ffedd5;
@@ -335,7 +337,7 @@ body {
 }
 
 .lineage-svg .node-rect.source      { fill: var(--node-source-fill); stroke: var(--node-source-stroke); }
-.lineage-svg .node-rect.primary-table { stroke-width: 2.5; stroke: #3b82f6; }
+.lineage-svg .node-rect.primary-table { fill: var(--node-primary-fill); stroke: var(--node-primary-stroke); stroke-width: 2.5; }
 .lineage-svg .node-rect.intermediate { fill: var(--node-intermediate-fill); stroke: var(--node-intermediate-stroke); }
 .lineage-svg .node-rect.cte         { fill: var(--node-cte-fill); stroke: var(--node-cte-stroke); }
 .lineage-svg .node-rect.step        { fill: var(--node-step-fill); stroke: var(--node-step-stroke); }
