@@ -244,6 +244,10 @@ class ParsedSQL:
     ctes: list = field(default_factory=list)  # list[ParsedCTE]
     raw_sql: str = ""
     parse_error: str = ""
+    # 字段使用信息（关联/过滤/分组）
+    join_usage: list = field(default_factory=list)  # [{alias, field, join_type, on_condition, tables: [{alias, table}]}]
+    where_usage: list = field(default_factory=list)  # [{alias, field, condition}]
+    groupby_usage: list = field(default_factory=list)  # [{alias, field}]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -634,6 +638,11 @@ def _parse_select(tree, select_node, sqlglot_dialect: str, comment_alias_map: di
     # ── CTE 穿透传播 ──
     _apply_cte_penetration(result.select_columns, result.ctes, cte_alias_map)
 
+    # ── 字段使用信息（JOIN ON / WHERE / GROUP BY）──
+    result.join_usage, result.where_usage, result.groupby_usage = _extract_field_usage(
+        tree, select_node, result.source_tables, sqlglot_dialect
+    )
+
     return result
 
 
@@ -714,11 +723,11 @@ def _parse_set_operation(tree, sqlglot_dialect: str, comment_alias_map: dict, ra
     result.ctes = _extract_ctes(tree, sqlglot_dialect)
 
     # CTE 穿透传播
+    cte_alias_map = {}
     if result.select_columns and result.ctes:
-        # 找到第一个分支的 select_node 用于构建 alias_map
         if isinstance(first_branch, exp.Select):
             cte_alias_map = _build_cte_alias_map(first_branch, result.ctes)
-            _apply_cte_penetration(result.select_columns, result.ctes, cte_alias_map)
+    _apply_cte_penetration(result.select_columns, result.ctes, cte_alias_map)
 
     return result
 
@@ -1081,6 +1090,133 @@ def _extract_select_columns(select_node, comment_alias_map: dict | None = None, 
         ))
 
     return columns
+
+
+# ═══════════════════════════════════════════════════════════════
+# 字段使用信息提取（JOIN ON / WHERE / GROUP BY）
+# ═══════════════════════════════════════════════════════════════
+
+def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -> tuple:
+    """提取 JOIN ON / WHERE / GROUP BY 中的字段级使用信息。
+
+    Returns: (join_usage, where_usage, groupby_usage)
+    - join_usage: [{field, alias, join_type, on_condition, tables: [{alias, table}]}]
+    - where_usage: [{field, alias, condition}]
+    - groupby_usage: [{field, alias}]
+    """
+    join_usage = []
+    where_usage = []
+    groupby_usage = []
+
+    # ── 构建 alias → 物理表名 映射（含子查询）──
+    alias_map = {}  # {alias_lower: table_name}
+    for j in joins:
+        alias = (j.alias or "").lower()
+        tbl = j.source_table
+        if alias and tbl:
+            alias_map[alias] = tbl
+
+    # ── JOIN ON 字段使用 ──
+    joins_list = select_node.args.get("joins", [])
+    for join_node in joins_list:
+        on_node = join_node.args.get("on")
+        if not on_node:
+            continue
+
+        # JOIN 类型
+        join_kind = join_node.args.get("kind", "")
+        join_side = join_node.args.get("side", "")
+        if join_side:
+            jt = f"{join_side} JOIN".upper()
+        elif join_kind:
+            jt = f"{join_kind} JOIN".upper()
+        else:
+            jt = "INNER JOIN"
+
+        # JOIN 表别名 → 物理表名
+        join_expr = join_node.this
+        tables_info = []
+        if isinstance(join_expr, exp.Table):
+            j_tbl_name = ".".join(_clean_name(p.name) for p in join_expr.parts).lower()
+            j_alias = _clean_name(join_expr.alias).lower() if join_expr.alias else j_tbl_name.split(".")[-1]
+            tables_info.append({"alias": j_alias, "table": j_tbl_name})
+        elif isinstance(join_expr, exp.Subquery):
+            j_alias = _clean_name(join_expr.alias).lower() if join_expr.alias else "sub"
+            # 找子查询内部主表
+            inner_tables = _extract_subquery_tables(join_expr)
+            inner_names = [t[0] for t in inner_tables]
+            tables_info.append({"alias": j_alias, "table": f"(子查询: {', '.join(inner_names[:3])})"})
+
+        # FROM 主表也加入 tables_info
+        from_clause = select_node.args.get("from_")
+        if from_clause and isinstance(from_clause.this, exp.Table):
+            main_tbl = ".".join(_clean_name(p.name) for p in from_clause.this.parts).lower()
+            main_alias = _clean_name(from_clause.this.alias).lower() if from_clause.this.alias else main_tbl.split(".")[-1]
+            tables_info.insert(0, {"alias": main_alias, "table": main_tbl})
+        elif from_clause and isinstance(from_clause.this, exp.Subquery):
+            sub_alias = _clean_name(from_clause.this.alias).lower() if from_clause.this.alias else "t"
+            inner_tables = _extract_subquery_tables(from_clause.this)
+            inner_names = [t[0] for t in inner_tables]
+            tables_info.insert(0, {"alias": sub_alias, "table": f"(子查询: {', '.join(inner_names[:3])})"})
+
+        # 从 ON 条件提取字段
+        on_sql = on_node.sql(dialect=sqlglot_dialect)
+        for col in on_node.find_all(exp.Column):
+            col_name = _clean_name(col.name).lower()
+            col_alias = _clean_name(col.table).lower() if col.table else ""
+            if col_name:
+                join_usage.append({
+                    "field": col_name,
+                    "alias": col_alias,
+                    "join_type": jt,
+                    "on_condition": on_sql,
+                    "tables": tables_info,
+                })
+
+    # ── WHERE 字段使用 ──
+    where_node = select_node.args.get("where")
+    if where_node:
+        for col in where_node.find_all(exp.Column):
+            col_name = _clean_name(col.name).lower()
+            col_alias = _clean_name(col.table).lower() if col.table else ""
+            if col_name:
+                # 获取包含这个字段的条件表达式
+                where_usage.append({
+                    "field": col_name,
+                    "alias": col_alias,
+                    "condition": where_node.sql(dialect=sqlglot_dialect),
+                })
+
+    # ── GROUP BY 字段使用 ──
+    group_node = select_node.args.get("group")
+    if group_node:
+        for expr in group_node.expressions:
+            if isinstance(expr, exp.Column):
+                col_name = _clean_name(expr.name).lower()
+                col_alias = _clean_name(expr.table).lower() if expr.table else ""
+                if col_name:
+                    groupby_usage.append({
+                        "field": col_name,
+                        "alias": col_alias,
+                    })
+
+    # 去重（同字段同步骤可能多次出现）
+    def _dedup(items, key_func):
+        seen = set()
+        result = []
+        for item in items:
+            key = key_func(item)
+            if key not in seen:
+                seen.add(key)
+                result.append(item)
+        return result
+
+    join_usage = _dedup(join_usage, lambda x: f"{x['field']}.{x['alias']}.{x['join_type']}")
+    where_usage = _dedup(where_usage, lambda x: f"{x['field']}.{x['alias']}")
+    groupby_usage = _dedup(groupby_usage, lambda x: f"{x['field']}.{x['alias']}")
+
+    return join_usage, where_usage, groupby_usage
+
 
 
 def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
