@@ -2428,13 +2428,14 @@ function drawChainLinks(treeId, layerCount, fieldName) {
     var toDom = findDomByStep(dep.to);
     if (!fromDom || !toDom) continue;
 
-    var uRect = fromDom.getBoundingClientRect();
-    var lRect = toDom.getBoundingClientRect();
-    var x1 = uRect.left + uRect.width/2 - treeRect.left;
-    var y1 = uRect.bottom - treeRect.top;
-    var x2 = lRect.left + lRect.width/2 - treeRect.left;
-    var y2 = lRect.top - treeRect.top;
-    // 用正交折线（L形）确保不交叉，端点精确连接卡片
+    // dep.from 是上游(seq小,渲染在下面), dep.to 是下游(seq大,渲染在上面)
+    // 连线端点必须在两个卡片之间：下卡片顶部 → 上卡片底部
+    var lowerRect = fromDom.getBoundingClientRect();  // 下游在下面
+    var upperRect = toDom.getBoundingClientRect();    // 上游在上面
+    var x1 = lowerRect.left + lowerRect.width/2 - treeRect.left;
+    var y1 = lowerRect.top - treeRect.top;        // 下卡片顶部
+    var x2 = upperRect.left + upperRect.width/2 - treeRect.left;
+    var y2 = upperRect.bottom - treeRect.top;      // 上卡片底部
     var midY = (y1 + y2) / 2;
     paths += '<path d="M ' + x1 + ' ' + y1 + ' L ' + x1 + ' ' + midY + ' L ' + x2 + ' ' + midY + ' L ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.6" />';
   }
