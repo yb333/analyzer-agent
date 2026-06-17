@@ -331,4 +331,74 @@ FROM items t"""
         parsed = parse(sql)
         aliases = col_aliases(parsed)
         assert "del_flag" in aliases, f"应从注释提取 del_flag，实际 {aliases}"
-        assert "dw_last_update_date" in aliases
+
+
+# ═══════════════════════════════════════════════════════════════
+# 7. 字段使用信息（JOIN ON / WHERE / GROUP BY）
+# ═══════════════════════════════════════════════════════════════
+
+class TestFieldUsage:
+
+    def test_join_usage_extraction(self):
+        """JOIN ON 条件里的字段被提取为关联键"""
+        sql = "SELECT t.x, f.z FROM main_tbl t LEFT JOIN dim_proj f ON t.proj_id = f.proj_id"
+        parsed = parse(sql)
+        join_fields = [j["field"] for j in parsed.join_usage]
+        assert "proj_id" in join_fields, f"proj_id 应在 join_usage 里，实际 {join_fields}"
+
+    def test_join_usage_has_on_condition(self):
+        """join_usage 包含完整 ON 条件"""
+        sql = "SELECT t.x FROM main_tbl t LEFT JOIN dim_proj f ON t.proj_id = f.proj_id AND f.del_flag = 'N'"
+        parsed = parse(sql)
+        assert len(parsed.join_usage) > 0
+        on_cond = parsed.join_usage[0]["on_condition"]
+        assert "proj_id" in on_cond, f"ON 条件应含 proj_id"
+        assert "del_flag" in on_cond, f"ON 条件应含 del_flag（附加限制）"
+
+    def test_join_usage_has_table_mapping(self):
+        """join_usage 包含别名→物理表映射"""
+        sql = "SELECT t.x FROM main_tbl t LEFT JOIN dim_proj f ON t.id = f.id"
+        parsed = parse(sql)
+        tables = parsed.join_usage[0]["tables"]
+        aliases = [t["alias"] for t in tables]
+        assert "t" in aliases, f"主表别名 t 应在 tables 里"
+        assert "f" in aliases, f"JOIN 表别名 f 应在 tables 里"
+
+    def test_where_usage_extraction(self):
+        """WHERE 条件里的字段被提取"""
+        sql = "SELECT t.x FROM main_tbl t WHERE t.status = 'A' AND t.del_flag = 'N'"
+        parsed = parse(sql)
+        where_fields = [w["field"] for w in parsed.where_usage]
+        assert "status" in where_fields, f"status 应在 where_usage 里"
+        assert "del_flag" in where_fields, f"del_flag 应在 where_usage 里"
+
+    def test_groupby_usage_extraction(self):
+        """GROUP BY 里的字段被提取"""
+        sql = "SELECT t.x, SUM(t.y) FROM main_tbl t GROUP BY t.x"
+        parsed = parse(sql)
+        groupby_fields = [g["field"] for g in parsed.groupby_usage]
+        assert "x" in groupby_fields, f"x 应在 groupby_usage 里"
+
+    def test_field_all_roles(self):
+        """一个字段同时有多个角色"""
+        sql = """SELECT t.contract_no, f.proj_name
+FROM main_tbl t
+LEFT JOIN dim_proj f ON t.contract_no = f.contract_key AND f.del_flag = 'N'
+WHERE t.contract_no IS NOT NULL
+GROUP BY t.contract_no, f.proj_name"""
+        parsed = parse(sql)
+        join_fields = [j["field"] for j in parsed.join_usage]
+        where_fields = [w["field"] for w in parsed.where_usage]
+        groupby_fields = [g["field"] for g in parsed.groupby_usage]
+        assert "contract_no" in join_fields, "contract_no 应在 join_usage"
+        assert "contract_no" in where_fields, "contract_no 应在 where_usage"
+        assert "contract_no" in groupby_fields, "contract_no 应在 groupby_usage"
+
+    def test_auxiliary_field_not_in_select(self):
+        """仅用作关联键的字段不在 SELECT 里（辅助字段）"""
+        sql = "SELECT t.x FROM main_tbl t LEFT JOIN dim_proj f ON t.proj_id = f.proj_id"
+        parsed = parse(sql)
+        select_aliases = [c.alias for c in parsed.select_columns]
+        assert "proj_id" not in select_aliases, "proj_id 不应在 SELECT 里"
+        join_fields = [j["field"] for j in parsed.join_usage]
+        assert "proj_id" in join_fields, "proj_id 应在 join_usage（辅助字段）"

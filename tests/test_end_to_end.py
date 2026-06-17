@@ -226,3 +226,29 @@ class TestEndToEnd:
         # 依赖不应为空（大小写不应导致 target_writers 匹配失败）
         deps = knowledge["topology"]["data_dependencies"]
         assert len(deps) >= 1, f"应有数据依赖(step_1→step_2)，实际 {len(deps)}"
+
+    def test_field_usage_in_html(self, tmp_output):
+        """回归: HTML 详情面板含字段使用信息(关联/分组/过滤) + 辅助字段板块。"""
+        xlsx = self._make_xlsx("case_26_field_usage", tmp_output)
+        knowledge, results = run_full_analysis(xlsx, tmp_output)
+        html = (Path(tmp_output) / "asset_report.html").read_text()
+        import re, json
+        m = re.search(r'const REPORT_DATA = ({.*?});\s', html, re.DOTALL)
+        data = json.loads(m.group(1))
+        # field_usage_map 存在
+        assert "field_usage_map" in data, "field_usage_map 缺失"
+        usage = data["field_usage_map"]
+        # proj_id 应在 usage 里（关联键，不在 SELECT 里）
+        assert "proj_id" in usage, f"proj_id 应在 field_usage_map 里"
+        assert len(usage["proj_id"]["join"]) > 0, "proj_id 应有 join usage"
+        # contract_no 应在 usage 里（关联+过滤+分组）
+        if "contract_no" in usage:
+            cu = usage["contract_no"]
+            assert len(cu.get("where", [])) > 0 or len(cu.get("groupby", [])) > 0, \
+                "contract_no 应有 where 或 groupby usage"
+        # auxiliary_fields 存在且含 proj_id
+        aux = data.get("auxiliary_fields", [])
+        aux_names = [a["field"] for a in aux]
+        assert "proj_id" in aux_names, f"proj_id 应在 auxiliary_fields 里，实际 {aux_names}"
+        # HTML 含辅助字段板块
+        assert "auxFieldsTable" in html, "HTML 应含辅助字段表格"

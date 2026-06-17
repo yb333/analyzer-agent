@@ -51,6 +51,7 @@ def ensure_xlsx_generated():
         "case_21_scenario_with_common", "case_22_scenario_chain",
         "case_23_exchange_partition",
         "case_25_table_case_dedup",
+        "case_26_field_usage",
     ]
     for case_name in cases:
         xlsx_path = FIXTURES_DIR / case_name / "execution_tasks.xlsx"
