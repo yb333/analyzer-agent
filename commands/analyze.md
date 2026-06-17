@@ -83,7 +83,7 @@ python {skill_dir}/run.py view_generator \
 ## 关键规则
 
 1. **第一步必须执行分析脚本**，不能跳过直接用 AI 分析
-2. **Step 1b（AI 增强）不能跳过**，弱模型也要执行，即使只是复制 draft 加少量修改
+2. **Step 2（AI 增强）不能跳过**，弱模型也要执行，即使只是复制 draft 加少量修改
 3. **视图用 knowledge_final.json 生成**（不是 draft）
 4. **视图全部自动生成**，不询问用户选哪些
 5. **DDL 自动检测**，同级 04_ddl/ 有就读，没有就跳过

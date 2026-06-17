@@ -85,7 +85,7 @@ python {skill_dir}/run.py view_generator \
 
 `--ai-input` 是可选的（没有 AI 增强时跳过，用脚本兜底描述）。
 
-### Step 2: 报告结果
+### Step 4: 报告结果
 
 ```
 分析完成！
