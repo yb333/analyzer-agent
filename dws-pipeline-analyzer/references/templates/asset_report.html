@@ -2408,10 +2408,21 @@ function drawChainLinks(treeId, layerCount, fieldName) {
     return null;
   }
 
-  // 用 data_deps 画线
+  // 用 data_deps 画线（同场景或公共步骤才连）
+  function shouldConnect(scenario1, scenario2) {
+    if (!scenario1 || scenario1 === '公共步骤' || scenario1 === '默认') return true;
+    if (!scenario2 || scenario2 === '公共步骤' || scenario2 === '默认') return true;
+    return scenario1 === scenario2;
+  }
+
   for (var di = 0; di < deps.length; di++) {
     var dep = deps[di];
     if (!fieldStepIds[dep.from] || !fieldStepIds[dep.to]) continue;
+
+    // 场景过滤：跨场景不连线（避免X交叉）
+    var fromChain = fieldChain.chains.find(function(c) { return c.step_id === dep.from; });
+    var toChain = fieldChain.chains.find(function(c) { return c.step_id === dep.to; });
+    if (fromChain && toChain && !shouldConnect(fromChain.scenario || '', toChain.scenario || '')) continue;
 
     var fromDom = findDomByStep(dep.from);
     var toDom = findDomByStep(dep.to);
