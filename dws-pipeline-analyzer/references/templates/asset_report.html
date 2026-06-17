@@ -1285,9 +1285,6 @@ body {
         <div class="no-results" id="fieldNoResults" style="display:none;">未找到匹配的字段</div>
       </div>
     </div>
-        <div class="no-results" id="fieldNoResults" style="display:none;">未找到匹配的字段</div>
-      </div>
-    </div>
   </div>
 
   <!-- Section 7: Quality -->
@@ -1974,34 +1971,41 @@ function renderFieldMapping() {
   var schemaMap = {};
   (REPORT_DATA.schema_fields || []).forEach(function(sf) { schemaMap[sf.name.toLowerCase()] = sf; });
 
-  var html = '<thead><tr>' +
-    '<th style="width:20%">目标字段</th>' +
-    '<th style="width:12%">类型</th>' +
-    '<th style="width:22%">业务含义</th>' +
-    '<th style="width:22%">来源</th>' +
+   var html = '<thead><tr>' +
+    '<th style="width:18%">目标字段</th>' +
+    '<th style="width:10%">类型</th>' +
+    '<th style="width:20%">业务含义</th>' +
+    '<th style="width:28%">最初来源</th>' +
     '<th style="width:10%">加工类型</th>' +
-    '<th style="width:14%">最终步骤</th>' +
+    '<th style="width:14%">链路</th>' +
     '</tr></thead><tbody>';
 
   // 不分场景，直接平铺
   fields.forEach(function(f) {
     var sf = schemaMap[f.target_field.toLowerCase()] || {};
+    // 最初来源（穿透到 seq 最小的物理源表）
+    var originSources = f.origin_sources || f.sources || [];
     var srcText = '-';
-    if (f.sources && f.sources.length > 0) {
-      srcText = f.sources.map(function(s) {
-        return (s.table || '') + '.' + (s.field || '?');
+    if (originSources.length > 0) {
+      srcText = originSources.map(function(s) {
+        var tbl = (s.table || '').split('.').pop(); // 取短名
+        return tbl + '.' + (s.field || '?');
       }).join(', ');
     }
-    var st = (REPORT_DATA.steps || []).find(function(s) { return s.step_id === f.producing_step; });
-    var stepInfo = st ? (st.rule_name || st.step_id) : '-';
+    // 链路步骤数
+    var chainData = REPORT_DATA.field_chain_map || {};
+    var chain = chainData[f.target_field.toLowerCase()];
+    var chainSteps = chain ? chain.chains.length : 0;
+    var chainText = chainSteps > 0 ? chainSteps + ' 步' : '-';
 
-    html += '<tr data-field="' + escapeHtml(f.target_field) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\')" style="cursor:pointer;">';
-    html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span></td>';
+    html += '<tr data-field="' + escapeHtml(f.target_field) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\')" style="cursor:pointer;' + (f.is_final_field === false ? 'opacity:0.6;' : '') + '">';
+    var fieldBadge = f.is_final_field === false ? ' <span style="font-size:9px;padding:1px 5px;border-radius:4px;background:#fef9c3;color:#854d0e;vertical-align:middle;">中间过程</span>' : '';
+    html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span>' + fieldBadge + '</td>';
     html += '<td><span class="field-type">' + escapeHtml(sf.type || '-') + '</span></td>';
     html += '<td><span style="font-size:12px;color:var(--text-secondary);">' + escapeHtml(sf.meaning || '-') + '</span></td>';
     html += '<td><span class="source-info" style="font-size:12px;">' + escapeHtml(srcText) + '</span></td>';
     html += '<td>' + tagHtml(f.transform_type) + '</td>';
-    html += '<td style="font-size:12px;color:var(--text-muted);">' + escapeHtml(stepInfo) + '</td>';
+    html += '<td style="font-size:12px;color:var(--text-muted);">' + escapeHtml(chainText) + '</td>';
     html += '</tr>';
   });
 
@@ -2211,12 +2215,27 @@ function openDetail(fieldName, scenario) {
 
   var html = '';
 
-  // Basic info
-  html += '<div class="detail-section"><h4>基本信息</h4>';
-  html += '<div class="detail-meta-grid">';
-  html += '<div class="detail-meta-item"><span class="label">加工类型</span><span class="value">' + tagHtml(detail.transform_type) + '</span></div>';
-  html += '<div class="detail-meta-item"><span class="label">所属步骤</span><span class="value">' + escapeHtml(detail.producing_step || '-') + '</span></div>';
-  html += '</div></div>';
+  // 基本信息标签行（精简，不占大块空间）
+  var chainData0 = REPORT_DATA.field_chain_map || {};
+  var chain0 = chainData0[fieldName.toLowerCase()];
+  var chainCount0 = chain0 ? chain0.chains.length : 0;
+  var ttLabel0 = {'direct':'直取','value':'赋值','aggregate':'聚合','pivot':'行转列',
+                  'window':'窗口','fallback':'兜底','case_when':'条件','expression':'加工','unknown':'未知'};
+  var ttColor0 = {'direct':'#22c55e','value':'#6b7280','aggregate':'#f97316','pivot':'#8b5cf6',
+                  'window':'#3b82f6','fallback':'#eab308','case_when':'#ec4899','expression':'#6366f1','unknown':'#94a3b8'};
+  var tt0 = detail.transform_type || 'expression';
+  var ttC0 = ttColor0[tt0] || '#94a3b8';
+  var ttL0 = ttLabel0[tt0] || tt0;
+
+  html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">';
+  html += '<span style="padding:3px 10px;border-radius:8px;font-size:12px;font-weight:600;color:white;background:' + ttC0 + ';">' + ttL0 + '</span>';
+  if (chainCount0 > 0) {
+    html += '<span style="padding:3px 10px;border-radius:8px;font-size:12px;background:var(--bg-secondary);color:var(--text-secondary);">链路 ' + chainCount0 + ' 步</span>';
+  }
+  if (detail.is_final_field === false) {
+    html += '<span style="padding:3px 10px;border-radius:8px;font-size:12px;font-weight:600;color:#854d0e;background:#fef9c3;">中间过程字段</span>';
+  }
+  html += '</div>';
 
   // Meaning
   if (detail.meaning) {
@@ -2285,73 +2304,37 @@ function openDetail(fieldName, scenario) {
     });
     seqOrder.sort(function(a, b) { return b - a; });
 
-    // 渲染：每层一行，层间用连线
-    html += '<div style="display:flex;flex-direction:column;align-items:center;">';
+    // 用层级 ID 渲染节点，渲染后用 SVG 画连线
+    var treeId = 'chainTree_' + fieldName.replace(/\W/g, '_');
+    html += '<div id="' + treeId + '" style="position:relative;padding:12px 0;">';
 
     seqOrder.forEach(function(seq, seqIdx) {
       var group = seqGroups[seq];
-      var isLast = seqIdx === seqOrder.length - 1;
+      var layerId = treeId + '_L' + seqIdx;
 
-      // 当前层节点（多场景水平排列，单场景居中）
       if (group.length > 1) {
-        html += '<div style="display:flex;gap:40px;justify-content:center;position:relative;">';
-        group.forEach(function(c) {
-    html += '<div style="display:flex;flex-direction:column;align-items:center;overflow-x:auto;padding:8px 0;">';
-          // 向上连接线
-          if (seqIdx > 0) {
-            html += '<div style="width:2px;height:16px;background:var(--border);"></div>';
-          }
+        html += '<div id="' + layerId + '" style="display:flex;gap:48px;justify-content:center;margin-bottom:8px;">';
+        group.forEach(function(c, ci) {
+          html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="' + ci + '" style="display:flex;flex-direction:column;align-items:center;">';
           html += renderChainNode(c);
           html += '</div>';
         });
         html += '</div>';
       } else {
-        html += '<div style="display:flex;flex-direction:column;align-items:center;">';
-        if (seqIdx > 0) {
-          html += '<div style="width:2px;height:16px;background:var(--border);"></div>';
-        }
+        html += '<div id="' + layerId + '" style="display:flex;justify-content:center;margin-bottom:8px;">';
+        html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="0" style="display:flex;flex-direction:column;align-items:center;">';
         html += renderChainNode(group[0]);
         html += '</div>';
-      }
-
-      // 层间连线
-      if (!isLast) {
-        var nextGroup = seqGroups[seqOrder[seqIdx + 1]];
-        if (nextGroup && nextGroup.length > 1) {
-          // 下一层有多个分支：画分叉
-          // 从当前层底部中心向下，再水平展开到每个分支上方
-          html += '<div style="display:flex;flex-direction:column;align-items:center;width:100%;">';
-          // 竖线
-          html += '<div style="width:2px;height:12px;background:var(--border);"></div>';
-          // 横线
-          var branchCount = nextGroup.length;
-          if (branchCount === 2) {
-            html += '<div style="width:60%;height:2px;background:var(--border);position:relative;">';
-            html += '<div style="position:absolute;left:0;top:0;width:2px;height:12px;background:var(--border);"></div>';
-            html += '<div style="position:absolute;right:0;top:0;width:2px;height:12px;background:var(--border);"></div>';
-            html += '<div style="position:absolute;left:50%;top:-12px;width:2px;height:12px;background:var(--border);transform:translateX(-50%);"></div>';
-            html += '</div>';
-          } else {
-            // 3+分支：简单横线+竖线
-            var w = Math.max(40, branchCount * 30);
-            html += '<div style="width:' + w + 'px;height:2px;background:var(--border);position:relative;">';
-            for (var bi = 0; bi < branchCount; bi++) {
-              var left = (bi / (branchCount - 1)) * 100;
-              html += '<div style="position:absolute;left:' + left + '%;top:0;width:2px;height:12px;background:var(--border);transform:translateX(-50%);"></div>';
-            }
-            html += '<div style="position:absolute;left:50%;top:-12px;width:2px;height:12px;background:var(--border);"></div>';
-            html += '</div>';
-          }
-          html += '</div>';
-        } else {
-          // 下一层单分支：简单竖线
-          html += '<div style="width:2px;height:24px;background:var(--border);"></div>';
-        }
+        html += '</div>';
       }
     });
 
-    html += '</div>';
-    html += '</div>';
+    // SVG 连线放在 tree container 里面（absolute 定位相对于 treeId 的 position:relative）
+    html += '<svg id="' + treeId + '_svg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:0;"></svg>';
+    html += '</div>'; // tree container 闭合
+
+    // 渲染后画连线
+    setTimeout(function() { drawChainLinks(treeId, seqOrder.length); }, 0);
   }
 
   document.getElementById('detailBody').innerHTML = html;
@@ -2362,6 +2345,73 @@ function openDetail(fieldName, scenario) {
 function closeDetail() {
   document.getElementById('detailPanel').classList.remove('open');
   document.getElementById('detailOverlay').classList.remove('open');
+}
+
+// ── 链路树 SVG 连线 ──
+function drawChainLinks(treeId, layerCount) {
+  var tree = document.getElementById(treeId);
+  var svg = document.getElementById(treeId + '_svg');
+  if (!tree || !svg) return;
+
+  var treeRect = tree.getBoundingClientRect();
+  svg.setAttribute('width', treeRect.width);
+  svg.setAttribute('height', treeRect.height);
+
+  var lineColor = getComputedStyle(document.documentElement).getPropertyValue('--text-muted') || '#94a3b8';
+  var paths = '';
+
+  for (var li = 0; li < layerCount - 1; li++) {
+    var upperLayer = document.getElementById(treeId + '_L' + li);
+    var lowerLayer = document.getElementById(treeId + '_L' + (li + 1));
+    if (!upperLayer || !lowerLayer) continue;
+
+    // 上层所有节点（底部中心）
+    var upperNodes = upperLayer.querySelectorAll('.chain-node-wrapper');
+    var lowerNodes = lowerLayer.querySelectorAll('.chain-node-wrapper');
+
+    if (upperNodes.length === 1 && lowerNodes.length === 1) {
+      // 单对单：简单贝塞尔
+      var u = upperNodes[0].getBoundingClientRect();
+      var l = lowerNodes[0].getBoundingClientRect();
+      var x1 = u.left + u.width/2 - treeRect.left;
+      var y1 = u.bottom - treeRect.top;
+      var x2 = l.left + l.width/2 - treeRect.left;
+      var y2 = l.top - treeRect.top;
+      var cy = (y1 + y2) / 2;
+      paths += '<path d="M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + cy + ', ' + x2 + ' ' + cy + ', ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="2" fill="none" />';
+
+    } else if (upperNodes.length >= 1 && lowerNodes.length > 1) {
+      // 单对多：分叉（从上层每个节点的底部中心连到下层各节点的顶部中心）
+      for (var ui = 0; ui < upperNodes.length; ui++) {
+        var uRect = upperNodes[ui].getBoundingClientRect();
+        var ux = uRect.left + uRect.width/2 - treeRect.left;
+        var uy = uRect.bottom - treeRect.top;
+
+        for (var li2 = 0; li2 < lowerNodes.length; li2++) {
+          var lRect = lowerNodes[li2].getBoundingClientRect();
+          var lx = lRect.left + lRect.width/2 - treeRect.left;
+          var ly = lRect.top - treeRect.top;
+          var cy2 = (uy + ly) / 2;
+          paths += '<path d="M ' + ux + ' ' + uy + ' C ' + ux + ' ' + cy2 + ', ' + lx + ' ' + cy2 + ', ' + lx + ' ' + ly + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.7" />';
+        }
+      }
+
+    } else if (upperNodes.length > 1 && lowerNodes.length === 1) {
+      // 多对单：汇聚
+      var lNode = lowerNodes[0].getBoundingClientRect();
+      var lx = lNode.left + lNode.width/2 - treeRect.left;
+      var ly = lNode.top - treeRect.top;
+      for (var ui2 = 0; ui2 < upperNodes.length; ui2++) {
+        var uRect2 = upperNodes[ui2].getBoundingClientRect();
+        var ux2 = uRect2.left + uRect2.width/2 - treeRect.left;
+        var uy2 = uRect2.bottom - treeRect.top;
+        var cy3 = (uy2 + ly) / 2;
+        paths += '<path d="M ' + ux2 + ' ' + uy2 + ' C ' + ux2 + ' ' + cy3 + ', ' + lx + ' ' + cy3 + ', ' + lx + ' ' + ly + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.7" />';
+      }
+    }
+  }
+
+  svg.innerHTML = '<g>' + paths + '</g>';
 }
 
 // ================================================================

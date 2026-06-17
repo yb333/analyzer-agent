@@ -181,11 +181,13 @@ def build_report_data(knowledge):
     target_types = meta.get("target_field_types", {})
     patterns = meta.get("patterns", [])
 
-    # ── summary ──
+    # ── summary ──（取最大 exec_sequence 步骤的目标表作为最终目标表）
     target_table = ""
     if steps_list:
-        ts = steps_list[0].get("target_schema", "")
-        tt = steps_list[0].get("target_table", "")
+        _max_seq = max(s.get("exec_sequence", 0) for s in steps_list)
+        _max_step = next((s for s in steps_list if s.get("exec_sequence", 0) == _max_seq), steps_list[0])
+        ts = _max_step.get("target_schema", "")
+        tt = _max_step.get("target_table", "")
         target_table = _schema_table(ts, tt)
 
     cm = quality.get("complexity_metrics", {})
@@ -349,9 +351,9 @@ def build_report_data(knowledge):
         step_id = f.get("producing_step", "")
         sources = _resolve_sources(f, f.get("producing_step", ""))
         raw_sql = ""
-        lineage = f.get("lineage", [])
-        if lineage:
-            raw_sql = lineage[0].get("raw_sql", "")
+        field_lineage = f.get("lineage", [])
+        if field_lineage:
+            raw_sql = field_lineage[0].get("raw_sql", "")
 
         if fname_lower not in field_chain_map:
             field_chain_map[fname_lower] = {"target_field": fname, "chains": []}
@@ -390,8 +392,27 @@ def build_report_data(knowledge):
             if chain_priority.get(cc_tt, 0) > chain_priority.get(best_tt, 0):
                 best_tt = cc_tt
 
+        # 取最初来源（seq 最小步骤的 sources，穿透到物理源表）
+        origin_sources = []
+        if chain_for_field:
+            min_seq = min(c.get("exec_sequence", 0) for c in chain_for_field)
+            origin_chains = [c for c in chain_for_field if c.get("exec_sequence", 0) == min_seq]
+            seen_origin = set()
+            for oc in origin_chains:
+                for s in oc.get("sources", []):
+                    key = f"{s.get('table','')}.{s.get('field','')}"
+                    if key not in seen_origin and s.get("table"):
+                        seen_origin.add(key)
+                        origin_sources.append(s)
+
+        # 判断是否在最终目标表中
+        _max_seq_step = next((s for s in steps_list if s.get("exec_sequence", 0) == max(s.get("exec_sequence", 0) for s in steps_list)), None) if steps_list else None
+        _final_target = (_max_seq_step.get("target_table", "") if _max_seq_step else "").lower()
+        _producing_target = si.get("target_table", "").lower()
+        is_final_field = _final_target and _final_target in _producing_target
+
         if fname_lower in seen_fields_lower:
-            continue  # 已有，跳过（最终步骤优先）
+            continue
         seen_fields_lower[fname_lower] = len(fields_out)
         fields_out.append({
             "target_field": fname,
@@ -399,6 +420,8 @@ def build_report_data(knowledge):
             "target_table": target_table,
             "scenario": scenario,
             "transform_type": best_tt,
+            "origin_sources": origin_sources,
+            "is_final_field": is_final_field,
             "in_target_fields": f.get("in_target_fields", False),
             "excel_source_field": f.get("excel_source_field", ""),
             "sources": sources,
@@ -421,9 +444,9 @@ def build_report_data(knowledge):
             }
         # 取 raw_sql（加工表达式）
         raw_sql = ""
-        lineage = f.get("lineage", [])
-        if lineage:
-            raw_sql = lineage[0].get("raw_sql", "")
+        field_lineage = f.get("lineage", [])
+        if field_lineage:
+            raw_sql = field_lineage[0].get("raw_sql", "")
 
         field_chain_map[fname_lower]["chains"].append({
             "step_id": step_id,
@@ -1149,7 +1172,11 @@ def generate_mapping(knowledge, output_dir):
     ws1.append(headers1)
 
     target_schema = steps_list[0].get("target_schema", "") if steps_list else ""
-    target_table = steps_list[0].get("target_table", "") if steps_list else ""
+    target_table = ""
+    if steps_list:
+        _max_seq = max(s.get("exec_sequence", 0) for s in steps_list)
+        _max_steps = [s for s in steps_list if s.get("exec_sequence", 0) == _max_seq]
+        target_table = _max_steps[0].get("target_table", "") if _max_steps else ""
     target_cn = bl.get("summary", "").split("，")[0] if bl.get("summary") else target_table
 
     # 收集所有物理源表（含 CTE 内部物理表），排除 CTE 名和目标表自身
@@ -1401,7 +1428,11 @@ def generate_tech_design(knowledge, output_dir):
     self_refs = topo.get("self_references", [])
 
     target_schema = steps_list[0].get("target_schema", "") if steps_list else ""
-    target_table = steps_list[0].get("target_table", "") if steps_list else ""
+    target_table = ""
+    if steps_list:
+        _max_seq = max(s.get("exec_sequence", 0) for s in steps_list)
+        _max_steps = [s for s in steps_list if s.get("exec_sequence", 0) == _max_seq]
+        target_table = _max_steps[0].get("target_table", "") if _max_steps else ""
     target_full = _schema_table(target_schema, target_table)
 
     lines = []

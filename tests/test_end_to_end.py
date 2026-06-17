@@ -124,3 +124,58 @@ class TestEndToEnd:
         assert results["techspec"] == True
         md = (Path(tmp_output) / "tech_design.md").read_text()
         assert len(md) > 500
+
+    def test_lineage_is_dict_not_list(self, tmp_output):
+        """回归: REPORT_DATA.lineage 必须是 dict（布局对象），不是 list（字段 lineage）。
+        防止变量名覆盖导致数据流图不渲染。"""
+        xlsx = self._make_xlsx("case_02_cte_basic", tmp_output)
+        knowledge, results = run_full_analysis(xlsx, tmp_output)
+        html = (Path(tmp_output) / "asset_report.html").read_text()
+        import re, json
+        m = re.search(r'const REPORT_DATA = ({.*?});\s', html, re.DOTALL)
+        assert m, "REPORT_DATA 未找到"
+        data = json.loads(m.group(1))
+        assert "lineage" in data, "lineage 缺失"
+        assert isinstance(data["lineage"], dict), \
+            f"lineage 应为 dict（布局对象），实际是 {type(data['lineage']).__name__}"
+        assert "nodes" in data["lineage"], "lineage 缺少 nodes"
+        assert len(data["lineage"]["nodes"]) > 0, "lineage nodes 为空"
+
+    def test_target_table_is_max_sequence(self, tmp_output):
+        """回归: target_table 取最大 exec_sequence 的步骤，不是 steps[0]。"""
+        xlsx = self._make_xlsx("case_19_multi_scenario_2", tmp_output)
+        knowledge, results = run_full_analysis(xlsx, tmp_output)
+        html = (Path(tmp_output) / "asset_report.html").read_text()
+        import re, json
+        m = re.search(r'const REPORT_DATA = ({.*?});\s', html, re.DOTALL)
+        data = json.loads(m.group(1))
+        target = data["summary"]["target_table"]
+        # case_19 的 max seq=2 是 step_5，目标表是 dwl_inv_summary_f
+        assert "summary" in target.lower(), \
+            f"目标表应取 max seq 步骤(dwl_inv_summary_f)，实际取到 {target}"
+
+    def test_html_js_syntax_valid(self, tmp_output):
+        """回归: 生成的 HTML 里 JS 括号必须匹配，防止语法错误导致页面空白。"""
+        xlsx = self._make_xlsx("case_19_multi_scenario_2", tmp_output)
+        knowledge, results = run_full_analysis(xlsx, tmp_output)
+        html = (Path(tmp_output) / "asset_report.html").read_text()
+        import re
+        scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
+        for i, s in enumerate(scripts):
+            if not s.strip():
+                continue
+            opens = s.count('{')
+            closes = s.count('}')
+            assert opens == closes, \
+                f"script {i}: JS 大括号不匹配 ({opens} {{ vs {closes} }})，页面会空白"
+
+    def test_html_div_tags_balanced(self, tmp_output):
+        """回归: 生成的 HTML 的 div 开闭标签必须平衡（静态模板层级）。"""
+        template = Path(__file__).resolve().parent.parent / "dws-pipeline-analyzer" / "references" / "templates" / "asset_report.html"
+        html = template.read_text(encoding="utf-8")
+        # 只检查静态 HTML 部分（script 标签前）
+        static = html.split("<script>")[0]
+        opens = static.count("<div")
+        closes = static.count("</div>")
+        assert opens == closes, \
+            f"静态 HTML div 标签不平衡 ({opens} 开 vs {closes} 闭)，会导致布局层级错误"
