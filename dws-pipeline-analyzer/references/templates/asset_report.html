@@ -2348,7 +2348,7 @@ function openDetail(fieldName, scenario) {
     html += '</div>'; // tree container 闭合
 
     // 渲染后画连线
-    setTimeout(function() { drawChainLinks(treeId, seqOrder.length); }, 0);
+    setTimeout(function() { drawChainLinks(treeId, seqOrder.length, fieldName); }, 0);
   }
 
   document.getElementById('detailBody').innerHTML = html;
@@ -2362,7 +2362,7 @@ function closeDetail() {
 }
 
 // ── 链路树 SVG 连线（用 data_deps 过滤，只连有数据依赖的步骤）──
-function drawChainLinks(treeId, layerCount) {
+function drawChainLinks(treeId, layerCount, fieldName) {
   var tree = document.getElementById(treeId);
   var svg = document.getElementById(treeId + '_svg');
   if (!tree || !svg) return;
@@ -2374,68 +2374,57 @@ function drawChainLinks(treeId, layerCount) {
   var lineColor = getComputedStyle(document.documentElement).getPropertyValue('--text-muted') || '#94a3b8';
   var paths = '';
 
-  // 获取数据依赖（步骤间的真实数据流）
-  var deps = REPORT_DATA.data_deps || [];
-
-  // 从 field_chain_map 获取该字段的步骤列表和排序
+  // 直接用 fieldName 获取 chain 数据
   var chainMap = REPORT_DATA.field_chain_map || {};
-  var fieldChain = null;
-  for (var fk in chainMap) {
-    var safeKey = fk.replace(/\W/g, '_');
-    if (treeId.indexOf(safeKey) >= 0) {
-      fieldChain = chainMap[fk];
-      break;
-    }
-  }
+  var fieldChain = chainMap[fieldName.toLowerCase()];
   if (!fieldChain) return;
 
-  // 构建该字段的步骤列表（按 seqOrder 渲染顺序）
-  var fieldSteps = fieldChain.chains;
+  var deps = REPORT_DATA.data_deps || [];
+  var fieldStepIds = {};
+  fieldChain.chains.forEach(function(c) { fieldStepIds[c.step_id] = true; });
+
+  // 用 chain 数据的 seqOrder 构建步骤 → DOM 节点映射
+  var chains = fieldChain.chains;
   var seqGroups = {};
   var seqOrder = [];
-  fieldSteps.forEach(function(c) {
+  chains.forEach(function(c) {
     var seq = c.exec_sequence || 0;
     if (!seqGroups[seq]) { seqGroups[seq] = []; seqOrder.push(seq); }
     seqGroups[seq].push(c);
   });
   seqOrder.sort(function(a, b) { return b - a; });
 
-  // 该字段涉及的所有 step_id 集合
-  var fieldStepIds = {};
-  fieldSteps.forEach(function(c) { fieldStepIds[c.step_id] = true; });
+  // 步骤 → DOM 节点查找
+  function findDomByStep(stepId) {
+    for (var si = 0; si < seqOrder.length; si++) {
+      var group = seqGroups[seqOrder[si]];
+      var layer = document.getElementById(treeId + '_L' + si);
+      if (!layer) continue;
+      var nodes = layer.querySelectorAll('.chain-node-wrapper');
+      for (var gi = 0; gi < group.length && gi < nodes.length; gi++) {
+        if (group[gi].step_id === stepId) return nodes[gi];
+      }
+    }
+    return null;
+  }
 
-  // 用 data_deps 决定哪些步骤间需要连线
-  // 每个依赖 from→to，如果两个字段都在该字段的链路中，就画线
+  // 用 data_deps 画线
   for (var di = 0; di < deps.length; di++) {
     var dep = deps[di];
     if (!fieldStepIds[dep.from] || !fieldStepIds[dep.to]) continue;
 
-    // 用 seqOrder 的索引找到 DOM 层和分支
-    var fromDom = null, toDom = null;
-    for (var si = 0; si < seqOrder.length; si++) {
-      var group = seqGroups[seqOrder[si]];
-      for (var gi = 0; gi < group.length; gi++) {
-        if (group[gi].step_id === dep.from) {
-          fromDom = document.getElementById(treeId + '_L' + si);
-          fromDom = fromDom ? fromDom.querySelectorAll('.chain-node-wrapper')[gi] : null;
-        }
-        if (group[gi].step_id === dep.to) {
-          toDom = document.getElementById(treeId + '_L' + si);
-          toDom = toDom ? toDom.querySelectorAll('.chain-node-wrapper')[gi] : null;
-        }
-      }
-    }
+    var fromDom = findDomByStep(dep.from);
+    var toDom = findDomByStep(dep.to);
+    if (!fromDom || !toDom) continue;
 
-    if (fromDom && toDom) {
-      var uRect = fromDom.getBoundingClientRect();
-      var lRect = toDom.getBoundingClientRect();
-      var x1 = uRect.left + uRect.width/2 - treeRect.left;
-      var y1 = uRect.bottom - treeRect.top;
-      var x2 = lRect.left + lRect.width/2 - treeRect.left;
-      var y2 = lRect.top - treeRect.top;
-      var cy = (y1 + y2) / 2;
-      paths += '<path d="M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + cy + ', ' + x2 + ' ' + cy + ', ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.7" />';
-    }
+    var uRect = fromDom.getBoundingClientRect();
+    var lRect = toDom.getBoundingClientRect();
+    var x1 = uRect.left + uRect.width/2 - treeRect.left;
+    var y1 = uRect.bottom - treeRect.top;
+    var x2 = lRect.left + lRect.width/2 - treeRect.left;
+    var y2 = lRect.top - treeRect.top;
+    var cy = (y1 + y2) / 2;
+    paths += '<path d="M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + cy + ', ' + x2 + ' ' + cy + ', ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.7" />';
   }
 
   svg.innerHTML = '<g>' + paths + '</g>';
