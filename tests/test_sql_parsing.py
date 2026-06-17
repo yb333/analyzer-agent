@@ -261,11 +261,14 @@ DISTRIBUTE BY HASH(t.id)"""
         assert not parsed.parse_error
 
     def test_placeholder_replacement(self):
-        """${P_CYCLE_ID} 占位符不报错"""
+        """${P_CYCLE_ID} 占位符不报错，且保留变量名"""
         sql = """SELECT t.id, '${P_CYCLE_ID}' AS cycle_id FROM my_table t"""
         parsed = parse(sql)
         assert not parsed.parse_error
         assert col_types(parsed)["cycle_id"] == "value"
+        # 表达式应保留原始变量名
+        expr = parsed.select_columns[1].expression
+        assert "P_CYCLE_ID" in expr, f"表达式应保留 P_CYCLE_ID，实际 {expr}"
 
 
 # ═══════════════════════════════════════════════════════════════

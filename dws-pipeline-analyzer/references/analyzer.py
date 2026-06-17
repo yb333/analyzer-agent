@@ -312,14 +312,20 @@ def _strip_dws_clauses(sql: str) -> str:
 
 
 def _replace_placeholders(sql: str) -> str:
-    """替换平台变量占位符为合法 SQL 值
+    """替换平台变量占位符为合法 SQL 值（保留原始变量名）
 
     支持两种语法:
-    1. ${XXX}        → NULL
-    2. #var = value# → NULL（成对的 # 包裹）
+    1. ${XXX}        → '${XXX}'（字符串字面量，保留变量名）
+    2. #var = value# → '#var = value#'（字符串字面量）
+
+    处理 ${XXX} 已在引号内的情况（'${XXX}' → '${XXX}'，不双层引号）
     """
-    sql = _PARAM_PLACEHOLDER.sub("NULL", sql)
-    sql = _PLATFORM_VAR_PATTERN.sub("NULL", sql)
+    # 先去掉 '${...}' 的外层引号，避免双层引号
+    sql = re.sub(r"'\$\{([^}]+)\}'", r"${\1}", sql)
+    sql = re.sub(r"'#[^#]*#'", lambda m: m.group(0)[1:-1], sql)  # '#...#' 去引号
+    # 再统一加引号
+    sql = _PARAM_PLACEHOLDER.sub(lambda m: "'" + m.group(0) + "'", sql)
+    sql = _PLATFORM_VAR_PATTERN.sub(lambda m: "'" + m.group(0) + "'", sql)
     return sql
 
 
