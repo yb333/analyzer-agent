@@ -573,7 +573,7 @@ def _parse_select(tree, select_node, sqlglot_dialect: str, comment_alias_map: di
     result.source_tables = _extract_joins(tree, select_node)
 
     # ── 提取 SELECT 列 ──
-    result.select_columns = _extract_select_columns(select_node, comment_alias_map)
+    result.select_columns = _extract_select_columns(select_node, comment_alias_map, result.source_tables)
 
     # ── WHERE ──
     where_node = select_node.args.get("where")
@@ -788,7 +788,6 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
     # 不使用 find_all(exp.Join) 以避免递归进入 CTE 内部
     joins_list = select_node.args.get("joins", [])
     for join_node in joins_list:
-        # 用 join_node.this 直接取 JOIN 表（不用 find，避免取到 ON 条件里的表）
         join_expr = join_node.this
         table = join_expr if isinstance(join_expr, exp.Table) else (join_expr.find(exp.Table) if join_expr else None)
         if not table:
@@ -905,10 +904,22 @@ def _resolve_select_alias(proj, proj_sql: str, position: int, comment_alias_map:
     return f"_col_{position}"
 
 
-def _extract_select_columns(select_node, comment_alias_map: dict | None = None) -> list[ParsedColumn]:
-    """提取 SELECT 投影列"""
+def _extract_select_columns(select_node, comment_alias_map: dict | None = None, joins: list = None) -> list[ParsedColumn]:
+    """提取 SELECT 投影列
+
+    joins: _extract_joins 的返回值，用于回填无表前缀列的来源表别名
+    """
     columns = []
     sqlglot_dialect = "postgres"
+
+    # 构建别名回填表：如果只有一张表（或一个 FROM 主表），无前缀的列回填为该表
+    fallback_alias = ""
+    fallback_table = ""
+    if joins:
+        from_joins = [j for j in joins if j.join_type == "FROM"]
+        if len(from_joins) == 1:
+            fallback_alias = from_joins[0].alias or from_joins[0].source_table.split(".")[-1]
+            fallback_table = from_joins[0].source_table
 
     for i, proj in enumerate(select_node.expressions):
         proj_sql = proj.sql(dialect=sqlglot_dialect)
@@ -918,25 +929,28 @@ def _extract_select_columns(select_node, comment_alias_map: dict | None = None) 
 
         # 提取源字段引用
         source_fields = []
-        source_tables = []
+        source_tables_list = []
         seen = set()
         for col in proj.walk():
             if isinstance(col, exp.Column):
                 col_name = _clean_name(col.name)
                 tbl_alias = _clean_name(col.table) if col.table else ""
+                # 无表前缀时回填（只适用于单表 FROM）
+                if not tbl_alias and fallback_alias:
+                    tbl_alias = fallback_alias
                 key = f"{tbl_alias}.{col_name}"
                 if key not in seen:
                     seen.add(key)
                     source_fields.append({"alias": tbl_alias, "field": col_name})
-                    if tbl_alias and tbl_alias not in source_tables:
-                        source_tables.append(tbl_alias)
+                    if tbl_alias and tbl_alias not in source_tables_list:
+                        source_tables_list.append(tbl_alias)
 
         columns.append(ParsedColumn(
             position=i,
             alias=alias,
             expression=proj_sql,
             transform_type=classify_transform(proj, proj_sql),
-            source_tables=source_tables,
+            source_tables=source_tables_list,
             source_fields=source_fields,
         ))
 
@@ -1563,9 +1577,8 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
         # 交换分区步骤：依赖写入临时表的步骤
         if s.get("is_exchange") and s.get("exchange_temp_table"):
             temp_table_upper = s["exchange_temp_table"].upper()
-            # 也可能带 schema（全部大写匹配）
-            temp_schema = (s.get("target_schema") or "").upper()
-            temp_full = temp_schema + "." + temp_table_upper if temp_schema else temp_table_upper
+            # 也可能带 schema
+            temp_full = s.get("target_schema", "") + "." + temp_table_upper if s.get("target_schema") else temp_table_upper
             for tbl_key in [temp_table_upper, temp_full]:
                 if tbl_key in target_writers:
                     for writer_step in target_writers[tbl_key]:
@@ -2154,18 +2167,16 @@ def build_data_flow(
     for i, rule in enumerate(rules):
         step_id = f"step_{i + 1}"
         rc = rule.rule_code
-        # 分区交换：真正目标表是 exchange_source_table，target_table 是临时表
-        real_target = rule.exchange_source_table if (rule.rule_type == 9 and rule.exchange_source_table) else rule.target_table
-        target_full = _normalize_table_name(rule.target_schema, real_target)
+        target_full = _normalize_table_name(rule.target_schema, rule.target_table)
 
         # 目标表
         if target_full not in seen_tables:
             seen_tables.add(target_full)
             all_tables.append({
                 "schema": rule.target_schema,
-                "name": real_target,
+                "name": rule.target_table,
                 "role": "target",
-                "layer": _infer_layer(rule.target_schema, real_target),
+                "layer": _infer_layer(rule.target_schema, rule.target_table),
             })
 
         parsed = parsed_map.get(rc)
@@ -2207,9 +2218,7 @@ def build_data_flow(
     for i, rule in enumerate(rules):
         step_id = f"step_{i + 1}"
         rc = rule.rule_code
-        # 分区交换：真正目标表
-        real_target = rule.exchange_source_table if (rule.rule_type == 9 and rule.exchange_source_table) else rule.target_table
-        target_full = _normalize_table_name(rule.target_schema, real_target)
+        target_full = _normalize_table_name(rule.target_schema, rule.target_table)
         parsed = parsed_map.get(rc)
         if not parsed:
             continue

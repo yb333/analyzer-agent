@@ -339,8 +339,34 @@ def build_report_data(knowledge):
             "exec_sequence": s.get("exec_sequence", 0),
         }
 
-    # ── fields (全局去重，不按场景分组；保留全部步骤链路供详情面板) ──
-    # 同字段名只显示一行，取最终步骤（最大 exec_sequence）的版本
+    # ── field_chain_map (字段 → 完整链路树，供详情面板用) ──
+    # 提前构建（fields_out 需要用它计算最重加工类型）
+    field_chain_map = {}
+    for f in fields_list:
+        fname = f.get("target_field", "")
+        fname_lower = fname.lower()
+        si = step_info_map.get(f.get("producing_step", ""), {})
+        step_id = f.get("producing_step", "")
+        sources = _resolve_sources(f, f.get("producing_step", ""))
+        raw_sql = ""
+        lineage = f.get("lineage", [])
+        if lineage:
+            raw_sql = lineage[0].get("raw_sql", "")
+
+        if fname_lower not in field_chain_map:
+            field_chain_map[fname_lower] = {"target_field": fname, "chains": []}
+        field_chain_map[fname_lower]["chains"].append({
+            "step_id": step_id,
+            "rule_name": si.get("rule_name", step_id),
+            "scenario": si.get("scenario_name", ""),
+            "exec_sequence": si.get("exec_sequence", 0),
+            "target_table": si.get("target_table", ""),
+            "transform_type": f.get("transform_type", "expression"),
+            "sources": sources,
+            "raw_sql": raw_sql,
+        })
+
+    # ── fields (全局去重，不按场景分组；取链路中最重加工类型) ──
     fields_out = []
     seen_fields_lower = {}  # {field_lower: idx}
 
@@ -355,6 +381,15 @@ def build_report_data(knowledge):
         target_table = si.get("target_table", "")
         sources = _resolve_sources(f, f.get("producing_step", ""))
 
+        # 取链路中最重的加工类型
+        chain_for_field = field_chain_map.get(fname_lower, {}).get("chains", [])
+        chain_priority = {"unknown": -1, "value": 0, "direct": 1, "expression": 2, "fallback": 3, "case_when": 4, "aggregate": 5, "pivot": 6, "window": 7}
+        best_tt = f.get("transform_type", "expression")
+        for cc in chain_for_field:
+            cc_tt = cc.get("transform_type", "expression")
+            if chain_priority.get(cc_tt, 0) > chain_priority.get(best_tt, 0):
+                best_tt = cc_tt
+
         if fname_lower in seen_fields_lower:
             continue  # 已有，跳过（最终步骤优先）
         seen_fields_lower[fname_lower] = len(fields_out)
@@ -363,7 +398,7 @@ def build_report_data(knowledge):
             "producing_step": f.get("producing_step", ""),
             "target_table": target_table,
             "scenario": scenario,
-            "transform_type": f.get("transform_type", "expression"),
+            "transform_type": best_tt,
             "in_target_fields": f.get("in_target_fields", False),
             "excel_source_field": f.get("excel_source_field", ""),
             "sources": sources,

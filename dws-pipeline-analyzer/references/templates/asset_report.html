@@ -2252,7 +2252,7 @@ function openDetail(fieldName, scenario) {
       var s = '';
       s += '<div style="padding:8px 12px;background:var(--bg-secondary);border:1px solid ' + ttColor + ';border-radius:6px;min-width:200px;max-width:280px;">';
       s += '<div style="font-weight:600;font-size:12px;margin-bottom:4px;">' + scTag + escapeHtml(c.rule_name || c.step_id) + '</div>';
-      // 加工表达式
+      // 加工表达式（非直取都显示）
       var rawSql = c.raw_sql || '';
       if (rawSql && tt !== 'direct') {
         s += '<div style="font-size:10px;font-family:monospace;color:var(--text-primary);background:var(--bg-card);padding:3px 6px;border-radius:4px;margin-bottom:4px;white-space:pre-wrap;word-break:break-all;line-height:1.4;">' + escapeHtml(rawSql) + '</div>';
@@ -2296,7 +2296,7 @@ function openDetail(fieldName, scenario) {
       if (group.length > 1) {
         html += '<div style="display:flex;gap:40px;justify-content:center;position:relative;">';
         group.forEach(function(c) {
-          html += '<div style="display:flex;flex-direction:column;align-items:center;">';
+    html += '<div style="display:flex;flex-direction:column;align-items:center;overflow-x:auto;padding:8px 0;">';
           // 向上连接线
           if (seqIdx > 0) {
             html += '<div style="width:2px;height:16px;background:var(--border);"></div>';
