@@ -543,8 +543,9 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
         result.parse_error = "空 SQL"
         return result
 
-    # sqlglot 解析
-    sqlglot_dialect = "oracle" if dialect == "oracle" else "postgres"
+    # sqlglot 解析（统一用 oracle 方言，DWS 兼容 Oracle 语法，
+    # 保持 NVL/DECODE/SUBSTR 等函数原样，不被转换为 COALESCE/CASE）
+    sqlglot_dialect = "oracle"
     try:
         tree = sqlglot.parse_one(clean, dialect=sqlglot_dialect)
     except sqlglot.ParseError as e:
@@ -747,7 +748,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
     避免把 CTE 内部的 JOIN 表误归入主查询的 source_tables。
     """
     joins = []
-    sqlglot_dialect = "postgres"
+    sqlglot_dialect = "oracle"
 
     # 收集 CTE 名称（用于排除 CTE 别名）
     cte_names = set()
@@ -910,7 +911,7 @@ def _extract_select_columns(select_node, comment_alias_map: dict | None = None, 
     joins: _extract_joins 的返回值，用于回填无表前缀列的来源表别名
     """
     columns = []
-    sqlglot_dialect = "postgres"
+    sqlglot_dialect = "oracle"
 
     # 构建别名回填表：如果只有一张表（或一个 FROM 主表），无前缀的列回填为该表
     fallback_alias = ""
@@ -1502,7 +1503,7 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
             try:
                 clean = _strip_dws_clauses(parsed.raw_sql)
                 clean = _replace_placeholders(clean)
-                tree = sqlglot.parse_one(clean, dialect="postgres")
+                tree = sqlglot.parse_one(clean, dialect="oracle")
                 if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
                     # 集合操作：收集所有分支的表
                     branches = []
