@@ -1584,8 +1584,9 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
         # 交换分区步骤：依赖写入临时表的步骤
         if s.get("is_exchange") and s.get("exchange_temp_table"):
             temp_table_upper = s["exchange_temp_table"].upper()
-            # 也可能带 schema
-            temp_full = s.get("target_schema", "") + "." + temp_table_upper if s.get("target_schema") else temp_table_upper
+            # 带 schema（全部大写匹配 target_writers 的 key）
+            temp_schema_upper = (s.get("target_schema") or "").upper()
+            temp_full = temp_schema_upper + "." + temp_table_upper if temp_schema_upper else temp_table_upper
             for tbl_key in [temp_table_upper, temp_full]:
                 if tbl_key in target_writers:
                     for writer_step in target_writers[tbl_key]:
