@@ -28,10 +28,17 @@ import re
 # ── 工具函数 ──────────────────────────────────────────────
 
 def _clean(s):
-    """清洗字符串，None 转 空字符串"""
+    """清洗字符串"""
     if s is None:
         return ""
     return str(s).strip()
+
+
+def _norm(name: str) -> str:
+    """表名归一化（统一小写）。所有表名比较都必须走这个函数。"""
+    if not name:
+        return ""
+    return name.strip().lower()
 
 
 def _merge_ai_markdown(knowledge: dict, ai_text: str) -> None:
@@ -702,11 +709,11 @@ def _build_lineage_layout(topo, df, bl=None):
     data_flow_steps = df.get("steps", [])
     bl = bl or {}
 
-    # ── 1. 分类节点 ──
-    all_target_tables = {}  # {table_full(UPPER): step_id}
+    # ── 1. 分类节点（统一用 _norm_table 做大小写归一化）──
+    all_target_tables = {}  # {norm_table: step_id}
     for s in steps_list:
         tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
-        all_target_tables[tf.upper()] = s["step_id"]
+        all_target_tables[_norm(tf)] = s["step_id"]
 
     final_targets = set()
     if steps_list:
@@ -714,7 +721,7 @@ def _build_lineage_layout(topo, df, bl=None):
         for s in steps_list:
             if s.get("exec_sequence", 0) == max_seq:
                 tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
-                final_targets.add(tf)
+                final_targets.add(_norm(tf))
 
     # CTE 名
     cte_names = set()
@@ -738,13 +745,13 @@ def _build_lineage_layout(topo, df, bl=None):
         sid = s["step_id"]
         primary = set()
         for src in s.get("source_tables_from_sql", []):
-            su = src.upper()
+            su = _norm(src)
             source_ref_count[su] = source_ref_count.get(su, 0) + 1
         # 从 data_flow 获取 JOIN 类型，识别主表
         df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
         for j in df_step.get("joins", []):
             jt = (j.get("join_type") or "").upper()
-            tbl = (j.get("source_table") or "").upper()
+            tbl = _norm(j.get("source_table") or "")
             if jt == "FROM":
                 # FROM 表始终是主表
                 primary.add(tbl)
@@ -755,7 +762,7 @@ def _build_lineage_layout(topo, df, bl=None):
     # CTE 内部表也算
     for cte_name, phys_list in cte_source_map.items():
         for p in phys_list:
-            pu = p.upper()
+            pu = _norm(p)
             source_ref_count[pu] = source_ref_count.get(pu, 0) + 1
 
     # ── 2. 构建节点 ──
@@ -794,25 +801,25 @@ def _build_lineage_layout(topo, df, bl=None):
         if tname in cte_names:
             continue
 
-        if tname in final_targets:
+        if _norm(tname) in final_targets:
             node_type = "target"
             cn = bl.get("summary", "").split("，")[0] if bl.get("summary") else ""
             label = tname if not cn else f"{tname} ({cn})"
             hidden = False
-        elif tname.upper() in all_target_tables:
+        elif _norm(tname) in all_target_tables:
             node_type = "intermediate"
             label = tname
             hidden = False
         else:
             node_type = "source"
-            ref_count = source_ref_count.get(tname.upper(), 1)
+            ref_count = source_ref_count.get(_norm(tname), 1)
             label = f"{tname} (×{ref_count})" if ref_count > 1 else tname
             hidden = True  # 来源表默认隐藏
 
         # 判断是否是某个步骤的主表
         is_primary = False
         for sid, primary_set in step_primary_tables.items():
-            if tname.upper() in primary_set:
+            if _norm(tname) in primary_set:
                 is_primary = True
                 break
 
@@ -888,7 +895,7 @@ def _build_lineage_layout(topo, df, bl=None):
             node_col[nid] = max_seq + 1
         elif ninfo["type"] == "intermediate":
             # 找产出它的步骤
-            producer_step = all_target_tables.get(nid.upper())
+            producer_step = all_target_tables.get(_norm(nid))
             if producer_step:
                 node_col[nid] = step_seq_map.get(producer_step, 0) + 0.5
             else:

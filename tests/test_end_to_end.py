@@ -227,6 +227,30 @@ class TestEndToEnd:
         deps = knowledge["topology"]["data_dependencies"]
         assert len(deps) >= 1, f"应有数据依赖(step_1→step_2)，实际 {len(deps)}"
 
+    def test_table_case_node_classification(self, tmp_output):
+        """回归: 表名大小写不一致时，数据流图节点类型分类正确。
+        中间表不能因大小写不匹配被误归类为 source。"""
+        xlsx = self._make_xlsx("case_25_table_case_dedup", tmp_output)
+        knowledge, results = run_full_analysis(xlsx, tmp_output)
+        html = (Path(tmp_output) / "asset_report.html").read_text()
+        import re, json
+        m = re.search(r'const REPORT_DATA = ({.*?});\s', html, re.DOTALL)
+        data = json.loads(m.group(1))
+        lineage = data.get("lineage", {})
+        nodes = lineage.get("nodes", [])
+        # dwb_temp_f 应该是 intermediate（被 step_1 写入，被 step_2 读取）
+        temp_nodes = [n for n in nodes if "temp_f" in n.get("name", "").lower()]
+        assert len(temp_nodes) > 0, "dwb_temp_f 应出现在节点里"
+        for n in temp_nodes:
+            assert n["type"] in ("intermediate", "target"), \
+                f"dwb_temp_f 应为 intermediate 或 target，实际是 {n['type']}"
+        # 最后一层应该是 target
+        max_layer = max(n["layer"] for n in nodes)
+        last_nodes = [n for n in nodes if n["layer"] == max_layer]
+        for n in last_nodes:
+            assert n["type"] == "target", \
+                f"最后一层应为目标表，实际有 {n['type']}: {n['name']}"
+
     def test_field_usage_in_html(self, tmp_output):
         """回归: HTML 详情面板含字段使用信息(关联/分组/过滤) + 辅助字段板块。"""
         xlsx = self._make_xlsx("case_26_field_usage", tmp_output)
