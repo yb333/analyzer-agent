@@ -1833,7 +1833,12 @@ def generate_step_description(rule: RawRule, parsed, scenarios: list[dict], all_
 
     # 写入模式
     dm = (rule.delete_mode or "").strip()
-    write_mode = DELETE_MODE_MAP.get(dm, f"delete_mode={dm}")
+    if rule.rule_type == 2:
+        write_mode = "DELETE"
+    elif rule.rule_type == 9:
+        write_mode = "EXCHANGE PARTITION"
+    else:
+        write_mode = DELETE_MODE_MAP.get(dm, f"delete_mode={dm}")
     dc = (rule.delete_condition or "").strip()
 
     # 目标表
@@ -2108,6 +2113,34 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
                         "to": reader,
                         "reason": f"step {reader} 读取 {table}，该表由 {', '.join(writers)} 写入",
                         "confidence": "inferred",
+                    })
+
+    # ── 删数步骤 → 后续写入步骤的隐式依赖 ──
+    # 删数步骤(type=2)和写入步骤(type=1)同目标表时，建立依赖
+    for s_del in steps:
+        if s_del.get("rule_type") != 2:
+            continue
+        del_target = s_del["target_table_full"]
+        del_seq = s_del["exec_sequence"]
+        for s_write in steps:
+            if s_write.get("rule_type") not in SELECT_RULE_TYPES:
+                continue
+            if s_write["step_id"] == s_del["step_id"]:
+                continue
+            write_target = s_write["target_table_full"]
+            # 同目标表 + 写入在删数之后
+            if _table_match(del_target, write_target) and s_write["exec_sequence"] > del_seq:
+                # 检查是否已有依赖
+                already = any(
+                    d["from"] == s_del["step_id"] and d["to"] == s_write["step_id"]
+                    for d in data_dependencies
+                )
+                if not already:
+                    data_dependencies.append({
+                        "from": s_del["step_id"],
+                        "to": s_write["step_id"],
+                        "type": "delete_before_write",
+                        "intermediate_table": del_target,
                     })
 
     # ── 同目标表写入分组 ──

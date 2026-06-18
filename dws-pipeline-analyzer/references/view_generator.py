@@ -797,6 +797,7 @@ def _build_lineage_layout(topo, df, bl=None):
                 "rule_code": s.get("rule_code", ""),
                 "exec_sequence": seq,
                 "scenario_name": scenario_name,
+                "rule_type": s.get("rule_type", 1),
             },
         }
 
