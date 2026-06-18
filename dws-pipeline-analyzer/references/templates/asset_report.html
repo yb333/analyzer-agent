@@ -2436,7 +2436,7 @@ function openDetail(fieldName, scenario) {
 
           // 桥接路径（从 join_paths 查找该别名的关联链）
           var joinPaths = c.join_paths || {};
-          var pathInfo = joinPaths[srcAlias];
+          var pathInfo = joinPaths[srcAlias] || joinPaths[srcAlias.toLowerCase()];
           if (pathInfo && pathInfo.path && pathInfo.path.length > 0) {
             s += '<details style="margin-top:4px;margin-left:16px;">';
             s += '<summary style="cursor:pointer;font-size:12px;color:var(--text-muted);">关联路径 (' + pathInfo.path.length + '层桥接)</summary>';
@@ -2625,14 +2625,25 @@ function drawChainLinks(treeId, layerCount, fieldName) {
   var svg = document.getElementById(treeId + '_svg');
   if (!tree || !svg) return;
 
-  var treeRect = tree.getBoundingClientRect();
-  svg.setAttribute('width', treeRect.width);
-  svg.setAttribute('height', treeRect.height);
+  // 用 offsetTop/offsetLeft 计算坐标（不受滚动影响）
+  function getOffset(el, relativeTo) {
+    var x = 0, y = 0;
+    var node = el;
+    while (node && node !== relativeTo) {
+      x += node.offsetLeft || 0;
+      y += node.offsetTop || 0;
+      node = node.offsetParent;
+    }
+    return {x: x, y: y, w: el.offsetWidth, h: el.offsetHeight};
+  }
+
+  var treeOffset = {x: 0, y: 0, w: tree.offsetWidth, h: tree.offsetHeight};
+  svg.setAttribute('width', treeOffset.w);
+  svg.setAttribute('height', treeOffset.h);
 
   var lineColor = getComputedStyle(document.documentElement).getPropertyValue('--text-muted') || '#94a3b8';
   var paths = '';
 
-  // 直接用 fieldName 获取 chain 数据
   var chainMap = REPORT_DATA.field_chain_map || {};
   var fieldChain = chainMap[fieldName.toLowerCase()];
   if (!fieldChain) return;
@@ -2641,7 +2652,12 @@ function drawChainLinks(treeId, layerCount, fieldName) {
   var fieldStepIds = {};
   fieldChain.chains.forEach(function(c) { fieldStepIds[c.step_id] = true; });
 
-  // 用 chain 数据的 seqOrder 构建步骤 → DOM 节点映射
+  function shouldConnect(sc1, sc2) {
+    if (!sc1 || sc1 === '公共步骤' || sc1 === '默认') return true;
+    if (!sc2 || sc2 === '公共步骤' || sc2 === '默认') return true;
+    return sc1 === sc2;
+  }
+
   var chains = fieldChain.chains;
   var seqGroups = {};
   var seqOrder = [];
@@ -2652,7 +2668,6 @@ function drawChainLinks(treeId, layerCount, fieldName) {
   });
   seqOrder.sort(function(a, b) { return b - a; });
 
-  // 步骤 → DOM 节点查找
   function findDomByStep(stepId) {
     for (var si = 0; si < seqOrder.length; si++) {
       var group = seqGroups[seqOrder[si]];
@@ -2666,37 +2681,27 @@ function drawChainLinks(treeId, layerCount, fieldName) {
     return null;
   }
 
-  // 用 data_deps 画线（精确反映数据流，同场景或公共步骤才连）
-  function shouldConnect(sc1, sc2) {
-    if (!sc1 || sc1 === '公共步骤' || sc1 === '默认') return true;
-    if (!sc2 || sc2 === '公共步骤' || sc2 === '默认') return true;
-    return sc1 === sc2;
-  }
-
   for (var di = 0; di < deps.length; di++) {
     var dep = deps[di];
     if (!fieldStepIds[dep.from] || !fieldStepIds[dep.to]) continue;
 
-    // 场景过滤：跨场景不连线
     var fromChain = fieldChain.chains.find(function(c) { return c.step_id === dep.from; });
     var toChain = fieldChain.chains.find(function(c) { return c.step_id === dep.to; });
     if (fromChain && toChain && !shouldConnect(fromChain.scenario || '', toChain.scenario || '')) continue;
 
-    // dep.from 是上游(seq小,渲染在下面), dep.to 是下游(seq大,渲染在上面)
-    // 端点在两个卡片之间：下卡片顶部 → 上卡片底部
     var fromDom = findDomByStep(dep.from);
     var toDom = findDomByStep(dep.to);
     if (!fromDom || !toDom) continue;
-    var fromRect = fromDom.getBoundingClientRect();
-    var toRect = toDom.getBoundingClientRect();
-    var x1 = fromRect.left + fromRect.width/2 - treeRect.left;
-    var y1 = fromRect.top - treeRect.top;         // 下卡片顶部
-    var x2 = toRect.left + toRect.width/2 - treeRect.left;
-    var y2 = toRect.bottom - treeRect.top;          // 上卡片底部
-    // 正交折线 + 箭头（从下卡片顶部指向上卡片底部，方向↑）
+
+    // 用 offsetTop/offsetLeft 计算坐标（不受滚动影响）
+    var fromOff = getOffset(fromDom, tree);
+    var toOff = getOffset(toDom, tree);
+    var x1 = fromOff.x + fromOff.w / 2;
+    var y1 = fromOff.y;           // 下卡片顶部
+    var x2 = toOff.x + toOff.w / 2;
+    var y2 = toOff.y + toOff.h;   // 上卡片底部
     var midY = (y1 + y2) / 2;
     paths += '<path d="M ' + x1 + ' ' + y1 + ' L ' + x1 + ' ' + midY + ' L ' + x2 + ' ' + midY + ' L ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.6" />';
-    // 箭头（在 y2 端点处，指向上方）
     paths += '<polygon points="' + (x2-5) + ',' + (y2+2) + ' ' + (x2+5) + ',' + (y2+2) + ' ' + x2 + ',' + (y2-5) + '" fill="' + lineColor + '" opacity="0.6" />';
   }
 

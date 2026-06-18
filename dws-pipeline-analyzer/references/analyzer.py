@@ -945,7 +945,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         if not table:
             continue
         table_name = ".".join(_clean_name(p.name) for p in table.parts).lower()
-        alias = _clean_name(table.alias) if table.alias else ""
+        alias = _clean_name(table.alias).lower() if table.alias else ""
 
         # 过滤 CTE 引用（CTE 名作为表名出现在 JOIN 中）
         short_name = table_name.split(".")[-1] if "." in table_name else table_name
@@ -1086,7 +1086,7 @@ def _extract_select_columns(select_node, comment_alias_map: dict | None = None, 
         for col in proj.walk():
             if isinstance(col, exp.Column):
                 col_name = _clean_name(col.name)
-                tbl_alias = _clean_name(col.table) if col.table else ""
+                tbl_alias = _clean_name(col.table).lower() if col.table else ""
                 # 无表前缀时回填（只适用于单表 FROM）
                 if not tbl_alias and fallback_alias:
                     tbl_alias = fallback_alias
@@ -1416,19 +1416,19 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
             cte_from = cte_select.args.get("from_")
             if cte_from and isinstance(cte_from.this, exp.Table):
                 tname = ".".join(_clean_name(p.name) for p in cte_from.this.parts).lower()
-                talias = _clean_name(cte_from.this.alias) if cte_from.this.alias else ""
+                talias = _clean_name(cte_from.this.alias).lower() if cte_from.this.alias else ""
                 cte_tables.append({"name": tname, "alias": talias, "join_type": "FROM"})
             for extra in cte_from.expressions if cte_from else []:
                 if isinstance(extra, exp.Table):
                     tname = ".".join(_clean_name(p.name) for p in extra.parts).lower()
-                    talias = _clean_name(extra.alias) if extra.alias else ""
+                    talias = _clean_name(extra.alias).lower() if extra.alias else ""
                     cte_tables.append({"name": tname, "alias": talias, "join_type": "FROM"})
             # JOIN（不递归进入 CTE 内的嵌套子查询）
             for cte_join in cte_select.args.get("joins", []):
                 t = cte_join.find(exp.Table)
                 if t:
                     tname = ".".join(_clean_name(p.name) for p in t.parts).lower()
-                    talias = _clean_name(t.alias) if t.alias else ""
+                    talias = _clean_name(t.alias).lower() if t.alias else ""
                     # JOIN 类型
                     jk = cte_join.args.get("kind", "")
                     js = cte_join.args.get("side", "")
@@ -1443,7 +1443,7 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
             # fallback: find_all（覆盖非标准结构）
             for table in cte_query.find_all(exp.Table):
                 tname = ".".join(_clean_name(p.name) for p in table.parts)
-                talias = _clean_name(table.alias) if table.alias else ""
+                talias = _clean_name(table.alias).lower() if table.alias else ""
                 cte_tables.append({"name": tname, "alias": talias})
 
         # CTE 输出字段（含 transform_type 和 source_fields）
@@ -1465,7 +1465,7 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
                 for col in proj.walk():
                     if isinstance(col, exp.Column):
                         col_name = _clean_name(col.name)
-                        tbl_alias = _clean_name(col.table) if col.table else ""
+                        tbl_alias = _clean_name(col.table).lower() if col.table else ""
                         key = f"{tbl_alias}.{col_name}"
                         if key not in seen:
                             seen.add(key)
