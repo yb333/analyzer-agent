@@ -276,3 +276,29 @@ class TestEndToEnd:
         assert "proj_id" in aux_names, f"proj_id 应在 auxiliary_fields 里，实际 {aux_names}"
         # HTML 含辅助字段板块
         assert "auxFieldsTable" in html, "HTML 应含辅助字段表格"
+
+    def test_subquery_filtered_from_tables(self, tmp_output):
+        """回归: data_flow.tables 不含子查询假名和子查询内部表。"""
+        from analyzer import parse_single_sql, build_data_flow
+        sql = """SELECT t.x, f.z FROM (
+    SELECT a.x FROM tbl_a a LEFT JOIN tbl_b b ON a.id = b.id
+) t LEFT JOIN dim_tbl f ON t.y = f.y"""
+        class FR:
+            rule_code = "SQ"
+            rule_type = 1
+            exec_sequence = 0
+            target_schema = "dws"
+            target_table = "sq_f"
+            delete_mode = "1"
+            delete_condition = ""
+            query_sql = sql
+            exchange_source_table = ""
+            rule_name = "sq_test"
+        rules = [FR()]
+        parsed_map = {"SQ": parse_single_sql(sql, "dws")}
+        df = build_data_flow(rules, parsed_map)
+        names = [t["name"] for t in df["tables"]]
+        assert "(subquery:t)" not in names, f"子查询假名不应在 tables: {names}"
+        assert "tbl_a" not in names, f"子查询内部表 tbl_a 不应在 tables: {names}"
+        assert "tbl_b" not in names, f"子查询内部表 tbl_b 不应在 tables: {names}"
+        assert "dim_tbl" in names, f"外部JOIN表 dim_tbl 应在 tables: {names}"

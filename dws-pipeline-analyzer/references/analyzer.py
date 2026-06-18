@@ -1757,6 +1757,9 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
             # 过滤子查询假名（不是物理表）
             if j.source_table.startswith("(subquery:"):
                 continue
+            # 过滤子查询内部表（FROM_SUBQUERY / JOIN_SUBQUERY_INNER）
+            if "SUBQUERY" in j.join_type.upper() and j.join_type != "FROM":
+                continue
             if j.source_table not in sql_source_tables:
                 sql_source_tables.append(j.source_table)
             # 全树扫描（在循环外初始化，循环内只追加）
@@ -2506,8 +2509,14 @@ def build_data_flow(
         if not parsed:
             continue
 
-        # 源表（主查询）
+        # 源表（主查询，过滤子查询假名和子查询内部表）
         for j in parsed.source_tables:
+            # 过滤子查询假名（不是物理表）
+            if j.source_table.startswith("(subquery:"):
+                continue
+            # 过滤子查询内部表（FROM_SUBQUERY / JOIN_SUBQUERY_INNER）
+            if "SUBQUERY" in j.join_type.upper() and j.join_type != "FROM":
+                continue
             if _norm_table(j.source_table) not in seen_tables:
                 seen_tables.add(_norm_table(j.source_table))
                 parts = j.source_table.split(".")
