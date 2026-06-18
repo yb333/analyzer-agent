@@ -40,7 +40,7 @@
   --severity-critical: #ef4444;
   --severity-medium: #f97316;
   --severity-info: #3b82f6;
-  --panel-width: 60vw;
+  --panel-width: 70vw;
   --transition: 0.2s ease;
   /* lineage node colors */
   --node-source-fill: #dbeafe;
@@ -1232,7 +1232,6 @@ body {
   body { background: white; }
   .detail-panel, .detail-overlay { display: none !important; }
   .step-body { max-height: none !important; }
-  .collapsible-body { max-height: none !important; }
   .section-card { break-inside: avoid; }
   .lineage-wrapper { overflow: visible; }
 }
@@ -1304,8 +1303,9 @@ body {
         <button class="collapsible-toggle open" id="writeFieldsToggle" style="width:100%;justify-content:flex-start;margin:8px 0 4px;">
           <span class="toggle-arrow">&#9660;</span>
           <span style="font-weight:600;font-size:13px;color:var(--text-secondary);">写入目标表的字段</span>
+          <span class="section-count" id="writeFieldsCount"></span>
         </button>
-        <div class="collapsible-body open" id="writeFieldsBody" style="max-height:none;">
+        <div class="collapsible-body open" id="writeFieldsBody">
         <div style="overflow:auto;max-height:400px;">
           <table class="field-table" id="fieldMappingTable"></table>
         </div>
@@ -1315,8 +1315,9 @@ body {
         <button class="collapsible-toggle open" id="auxFieldsToggle" style="width:100%;justify-content:flex-start;margin:16px 0 4px;">
           <span class="toggle-arrow">&#9660;</span>
           <span style="font-weight:600;font-size:13px;color:var(--text-secondary);">辅助字段（仅关联/过滤使用，不写入目标表）</span>
+          <span class="section-count" id="auxFieldsCount"></span>
         </button>
-        <div class="collapsible-body open" id="auxFieldsBody" style="max-height:none;">
+        <div class="collapsible-body open" id="auxFieldsBody">
         <div style="overflow:auto;max-height:300px;">
           <table class="field-table" id="auxFieldsTable"></table>
         </div>
@@ -2000,43 +2001,68 @@ function toggleStepCard(header) {
 // ================================================================
 function renderFieldMapping() {
   var fields = REPORT_DATA.fields || [];
-  document.getElementById('fieldMappingCount').textContent = '(' + fields.length + ' 字段)';
+  var auxFields = REPORT_DATA.auxiliary_fields || [];
+
+  // 标题分类统计
+  document.getElementById('fieldMappingCount').textContent = '(' + fields.length + ' 写入 + ' + auxFields.length + ' 辅助)';
+  document.getElementById('writeFieldsCount').textContent = '(' + fields.length + ')';
+  document.getElementById('auxFieldsCount').textContent = '(' + auxFields.length + ')';
 
   if (fields.length === 0) {
     document.getElementById('fieldMappingTable').innerHTML = '';
     return;
   }
 
-  // schema_fields 查找表
+  var usageMap = REPORT_DATA.field_usage_map || {};
   var schemaMap = {};
   (REPORT_DATA.schema_fields || []).forEach(function(sf) { schemaMap[sf.name.toLowerCase()] = sf; });
 
-   var html = '<thead><tr>' +
-    '<th style="width:18%">目标字段</th>' +
-    '<th style="width:10%">类型</th>' +
-    '<th style="width:20%">业务含义</th>' +
-    '<th style="width:28%">最初来源</th>' +
-    '<th style="width:10%">加工类型</th>' +
-    '<th style="width:14%">链路</th>' +
+  var html = '<thead><tr>' +
+    '<th style="width:16%">目标字段</th>' +
+    '<th style="width:9%">类型</th>' +
+    '<th style="width:18%">业务含义</th>' +
+    '<th style="width:24%">最初来源</th>' +
+    '<th style="width:15%">角色</th>' +
+    '<th style="width:10%">链路</th>' +
+    '<th style="width:8%">步骤</th>' +
     '</tr></thead><tbody>';
 
-  // 不分场景，直接平铺
   fields.forEach(function(f) {
     var sf = schemaMap[f.target_field.toLowerCase()] || {};
-    // 最初来源（穿透到 seq 最小的物理源表）
     var originSources = f.origin_sources || f.sources || [];
     var srcText = '-';
     if (originSources.length > 0) {
       srcText = originSources.map(function(s) {
-        var tbl = (s.table || '').split('.').pop(); // 取短名
+        var tbl = (s.table || '').split('.').pop();
         return tbl + '.' + (s.field || '?');
       }).join(', ');
     }
-    // 链路步骤数
-    var chainData = REPORT_DATA.field_chain_map || {};
-    var chain = chainData[f.target_field.toLowerCase()];
-    var chainSteps = chain ? chain.chains.length : 0;
-    var chainText = chainSteps > 0 ? chainSteps + ' 步' : '-';
+
+    // 角色标签（加工类型 + 关联/过滤/分组）
+    var ttLabel = {'direct':'直取','value':'赋值','aggregate':'聚合','pivot':'行转列',
+                   'window':'窗口','fallback':'兜底','case_when':'条件','expression':'加工','unknown':'未知'};
+    var ttColor = {'direct':'#22c55e','value':'#6b7280','aggregate':'#f97316','pivot':'#8b5cf6',
+                   'window':'#3b82f6','fallback':'#eab308','case_when':'#ec4899','expression':'#6366f1','unknown':'#94a3b8'};
+    var tt = f.transform_type || 'expression';
+    var roleHtml = '<span style="display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:600;color:white;background:' + (ttColor[tt]||'#94a3b8') + ';">' + (ttLabel[tt]||tt) + '</span>';
+
+    // 加上使用角色标签
+    var fu = usageMap[f.target_field.toLowerCase()];
+    if (fu) {
+      if (fu.join && fu.join.length > 0) {
+        roleHtml += ' <span style="display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600;color:white;background:#f97316;">关联</span>';
+      }
+      if (fu.groupby && fu.groupby.length > 0) {
+        roleHtml += ' <span style="display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600;color:white;background:#8b5cf6;">分组</span>';
+      }
+      if (fu.where && fu.where.length > 0) {
+        roleHtml += ' <span style="display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600;color:white;background:#3b82f6;">过滤</span>';
+      }
+    }
+
+    // 步骤编码
+    var st = (REPORT_DATA.steps || []).find(function(s) { return s.step_id === f.producing_step; });
+    var stepCode = st ? (st.rule_code || st.step_id) : '-';
 
     html += '<tr data-field="' + escapeHtml(f.target_field) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\')" style="cursor:pointer;' + (f.is_final_field === false ? 'opacity:0.6;' : '') + '">';
     var fieldBadge = f.is_final_field === false ? ' <span style="font-size:9px;padding:1px 5px;border-radius:4px;background:#fef9c3;color:#854d0e;vertical-align:middle;">中间过程</span>' : '';
@@ -2044,8 +2070,12 @@ function renderFieldMapping() {
     html += '<td><span class="field-type">' + escapeHtml(sf.type || '-') + '</span></td>';
     html += '<td><span style="font-size:12px;color:var(--text-secondary);">' + escapeHtml(sf.meaning || '-') + '</span></td>';
     html += '<td><span class="source-info" style="font-size:12px;">' + escapeHtml(srcText) + '</span></td>';
-    html += '<td>' + tagHtml(f.transform_type) + '</td>';
-    html += '<td style="font-size:12px;color:var(--text-muted);">' + escapeHtml(chainText) + '</td>';
+    html += '<td>' + roleHtml + '</td>';
+    var chainData = REPORT_DATA.field_chain_map || {};
+    var chain = chainData[f.target_field.toLowerCase()];
+    var chainSteps = chain ? chain.chains.length : 0;
+    html += '<td style="font-size:12px;color:var(--text-muted);">' + (chainSteps > 0 ? chainSteps + ' 步' : '-') + '</td>';
+    html += '<td style="font-size:11px;color:var(--text-muted);">' + escapeHtml(stepCode) + '</td>';
     html += '</tr>';
   });
 
@@ -2078,7 +2108,7 @@ function renderFieldMapping() {
           var c = r === '关联键' ? '#f97316' : (r === '过滤' ? '#3b82f6' : '#8b5cf6');
           return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;color:white;background:' + c + ';margin-right:4px;">' + r + '</span>';
         }).join('');
-        auxHtml += '<tr data-field="' + escapeHtml(af.field) + '" onclick="openDetail(\'' + escapeHtml(af.field) + '\')" style="cursor:pointer;">';
+        auxHtml += '<tr data-field="' + escapeHtml(af.field) + '">';
         auxHtml += '<td><span class="field-name">' + escapeHtml(af.field) + '</span></td>';
         auxHtml += '<td style="font-size:12px;">' + escapeHtml(steps.join(', ')) + '</td>';
         auxHtml += '<td>' + roleTags + '</td>';
@@ -2417,7 +2447,7 @@ function openDetail(fieldName, scenario) {
       var layerId = treeId + '_L' + seqIdx;
 
       if (group.length > 1) {
-        html += '<div id="' + layerId + '" style="display:flex;gap:48px;justify-content:center;margin-bottom:8px;">';
+        html += '<div id="' + layerId + '" style="display:flex;gap:48px;justify-content:center;margin-bottom:20px;">';
         group.forEach(function(c, ci) {
           var cScenario = c.scenario || '';
           html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="' + ci + '" data-scenario="' + escapeHtml(cScenario) + '" style="display:flex;flex-direction:column;align-items:center;">';
@@ -2426,7 +2456,7 @@ function openDetail(fieldName, scenario) {
         });
         html += '</div>';
       } else {
-        html += '<div id="' + layerId + '" style="display:flex;justify-content:center;margin-bottom:8px;">';
+        html += '<div id="' + layerId + '" style="display:flex;justify-content:center;margin-bottom:20px;">';
         var c0 = group[0];
         var c0Scenario = c0.scenario || '';
         html += '<div class="chain-node-wrapper" data-layer="' + seqIdx + '" data-branch="0" data-scenario="' + escapeHtml(c0Scenario) + '" style="display:flex;flex-direction:column;align-items:center;">';
@@ -2573,8 +2603,11 @@ function drawChainLinks(treeId, layerCount, fieldName) {
     var y1 = fromRect.top - treeRect.top;         // 下卡片顶部
     var x2 = toRect.left + toRect.width/2 - treeRect.left;
     var y2 = toRect.bottom - treeRect.top;          // 上卡片底部
+    // 正交折线 + 箭头（从下卡片顶部指向上卡片底部，方向↑）
     var midY = (y1 + y2) / 2;
     paths += '<path d="M ' + x1 + ' ' + y1 + ' L ' + x1 + ' ' + midY + ' L ' + x2 + ' ' + midY + ' L ' + x2 + ' ' + y2 + '" stroke="' + lineColor + '" stroke-width="1.5" fill="none" opacity="0.6" />';
+    // 箭头（在 y2 端点处，指向上方）
+    paths += '<polygon points="' + (x2-5) + ',' + (y2+2) + ' ' + (x2+5) + ',' + (y2+2) + ' ' + x2 + ',' + (y2-5) + '" fill="' + lineColor + '" opacity="0.6" />';
   }
 
   svg.innerHTML = '<g>' + paths + '</g>';
