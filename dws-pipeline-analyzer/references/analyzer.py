@@ -221,8 +221,11 @@ class ParsedJoin:
     """SQL JOIN 信息"""
     source_table: str = ""
     alias: str = ""
-    join_type: str = ""  # FROM / LEFT / INNER / FULL / CROSS
+    join_type: str = ""  # FROM / LEFT / INNER / FULL / CROSS / FROM_SUBQUERY / JOIN_SUBQUERY_INNER
     join_condition: str = ""
+    subquery_sql: str = ""  # 子查询的完整 SQL（仅子查询类型）
+    subquery_tables: list = field(default_factory=list)
+    subquery_role: str = ""  # 主表(FROM) 或 从表(JOIN)
 
 
 @dataclass
@@ -245,9 +248,10 @@ class ParsedSQL:
     raw_sql: str = ""
     parse_error: str = ""
     # 字段使用信息（关联/过滤/分组）
-    join_usage: list = field(default_factory=list)  # [{alias, field, join_type, on_condition, tables: [{alias, table}]}]
-    where_usage: list = field(default_factory=list)  # [{alias, field, condition}]
-    groupby_usage: list = field(default_factory=list)  # [{alias, field}]
+    join_usage: list = field(default_factory=list)
+    where_usage: list = field(default_factory=list)
+    groupby_usage: list = field(default_factory=list)
+    join_paths: dict = field(default_factory=dict)  # {alias: {table, is_primary, path, subquery_*}}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -643,6 +647,9 @@ def _parse_select(tree, select_node, sqlglot_dialect: str, comment_alias_map: di
         tree, select_node, result.source_tables, sqlglot_dialect
     )
 
+    # ── JOIN 桥接链（每个表到主表的完整关联路径）──
+    result.join_paths = _build_join_paths(result.source_tables)
+
     return result
 
 
@@ -869,15 +876,20 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         elif isinstance(main_expr, exp.Subquery):
             # FROM 子查询：记录子查询别名 + 递归提取内部表
             sub_alias = _clean_name(main_expr.alias).lower() if main_expr.alias else ""
+            sub_sql = main_expr.sql(dialect="oracle")
+            sub_tables = _extract_subquery_tables(main_expr)
             # 子查询别名作为虚拟 FROM 表（让字段来源能匹配）
             joins.append(ParsedJoin(
                 source_table=f"(subquery:{sub_alias})",
                 alias=sub_alias or "sub",
                 join_type="FROM",
                 join_condition="",
+                subquery_sql=sub_sql,
+                subquery_tables=sub_tables,
+                subquery_role="主表",
             ))
             # 递归提取子查询内部的物理表
-            for inner_table_name, inner_alias in _extract_subquery_tables(main_expr):
+            for inner_table_name, inner_alias in sub_tables:
                 joins.append(ParsedJoin(
                     source_table=inner_table_name,
                     alias=inner_alias,
@@ -908,13 +920,18 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
             sub_alias = _clean_name(join_expr.alias).lower() if join_expr.alias else ""
             on_node = join_node.args.get("on")
             join_condition = on_node.sql(dialect="oracle") if on_node else ""
+            sub_sql2 = join_expr.sql(dialect="oracle")
+            sub_tables2 = _extract_subquery_tables(join_expr)
             joins.append(ParsedJoin(
                 source_table=f"(subquery:{sub_alias})",
                 alias=sub_alias or "sub",
                 join_type="JOIN_SUBQUERY",
                 join_condition=join_condition,
+                subquery_sql=sub_sql2,
+                subquery_tables=sub_tables2,
+                subquery_role="从表",
             ))
-            for inner_table_name, inner_alias in _extract_subquery_tables(join_expr):
+            for inner_table_name, inner_alias in sub_tables2:
                 joins.append(ParsedJoin(
                     source_table=inner_table_name,
                     alias=inner_alias,
@@ -1216,6 +1233,151 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
     groupby_usage = _dedup(groupby_usage, lambda x: f"{x['field']}.{x['alias']}")
 
     return join_usage, where_usage, groupby_usage
+
+
+def _build_join_paths(joins: list) -> dict:
+    """构建每个 JOIN 表到主表的桥接链。
+
+    输入: _extract_joins 返回的 ParsedJoin 列表
+    输出: {alias: {table, role, join_type, on_condition, subquery_sql, subquery_tables, subquery_role, is_primary, path: [{from_alias, to_alias, from_table, to_table, join_type, on_condition}]}}
+
+    path 是从主表到该表的完整桥接路径（每一步的 ON 条件）。
+    """
+    result = {}
+
+    # 找主表（FROM）
+    main_alias = ""
+    main_table = ""
+    for j in joins:
+        if j.join_type == "FROM" and not j.source_table.startswith("(subquery:"):
+            main_alias = j.alias
+            main_table = j.source_table
+            break
+
+    if not main_alias:
+        # 可能主表是子查询
+        for j in joins:
+            if j.join_type == "FROM":
+                main_alias = j.alias
+                main_table = j.source_table
+                break
+
+    # 构建邻接表: {join_alias: {table, on_condition, join_type, subquery info}}
+    join_info = {}
+    for j in joins:
+        if j.join_type in ("FROM",) or "SUBQUERY_INNER" in j.join_type:
+            continue
+        if "SUBQUERY" in j.join_type:
+            # 子查询 JOIN
+            alias = j.alias
+            join_info[alias] = {
+                "table": j.source_table,
+                "join_type": j.join_type,
+                "on_condition": j.join_condition,
+                "subquery_sql": j.subquery_sql,
+                "subquery_tables": j.subquery_tables,
+                "subquery_role": j.subquery_role,
+            }
+        elif j.join_type != "FROM":
+            # 普通 JOIN
+            alias = j.alias
+            join_info[alias] = {
+                "table": j.source_table,
+                "join_type": j.join_type,
+                "on_condition": j.join_condition,
+            }
+
+    # 构建 ON 条件里的别名依赖关系
+    # ON t.id = a.id → a 依赖 t
+    # ON a.bid = b.bid → b 依赖 a
+    alias_deps = {}  # {join_alias: [depended_aliases]}
+    import re as _re
+    for alias, info in join_info.items():
+        on_cond = info.get("on_condition", "")
+        if not on_cond:
+            continue
+        # 从 ON 条件提取所有别名引用（alias.field 模式）
+        refs = set()
+        for m in _re.finditer(r'(\w+)\.\w+', on_cond):
+            ref = m.group(1).lower()
+            if ref != alias.lower():
+                refs.add(ref)
+        alias_deps[alias] = refs
+
+    # 构建每个 JOIN 表到主表的路径
+    def find_path(target_alias, visited=None):
+        """从 target_alias 反向追溯到主表"""
+        if visited is None:
+            visited = set()
+        if target_alias in visited:
+            return []
+        visited.add(target_alias)
+
+        if target_alias.lower() == main_alias.lower():
+            return []
+
+        deps = alias_deps.get(target_alias, [])
+        # 找到依赖的别名（优先找主表别名）
+        path = []
+        for dep in deps:
+            if dep.lower() == main_alias.lower():
+                # 直接关联主表
+                break
+            # 递归找 dep 的路径
+            dep_path = find_path(dep, visited.copy())
+            if dep_path is not None:
+                path = dep_path
+                break
+
+        # 当前这一步的信息
+        info = join_info.get(target_alias, {})
+        step = {
+            "to_alias": target_alias,
+            "to_table": info.get("table", ""),
+            "join_type": info.get("join_type", ""),
+            "on_condition": info.get("on_condition", ""),
+            "subquery_sql": info.get("subquery_sql", ""),
+            "subquery_tables": info.get("subquery_tables", []),
+            "subquery_role": info.get("subquery_role", ""),
+        }
+        result_path = path + [step] if path is not None else [step]
+        return result_path
+
+    # 主表信息
+    main_info = {"table": main_table, "is_primary": True, "path": []}
+    # 查主表是否有子查询信息
+    for j in joins:
+        if j.join_type == "FROM" and j.subquery_sql:
+            main_info["subquery_sql"] = j.subquery_sql
+            main_info["subquery_tables"] = j.subquery_tables
+            main_info["subquery_role"] = j.subquery_role
+    result[main_alias] = main_info
+
+    # 每个 JOIN 表的路径
+    for alias in join_info:
+        path = find_path(alias)
+        info = join_info[alias]
+        result[alias] = {
+            "table": info.get("table", ""),
+            "is_primary": False,
+            "join_type": info.get("join_type", ""),
+            "subquery_sql": info.get("subquery_sql", ""),
+            "subquery_tables": info.get("subquery_tables", []),
+            "subquery_role": info.get("subquery_role", ""),
+            "path": path,
+        }
+
+    # 子查询内部表也加入（无路径）
+    for j in joins:
+        if "SUBQUERY_INNER" in j.join_type:
+            result[j.alias] = {
+                "table": j.source_table,
+                "is_primary": False,
+                "join_type": j.join_type,
+                "path": [],
+            }
+
+    return result
 
 
 
