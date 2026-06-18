@@ -2304,8 +2304,12 @@ def analyze_quality(
 
         # ── 反模式检测 ──
 
-        # 1. JOIN 缺少 ON 条件
+        # 1. JOIN 缺少 ON 条件（排除子查询假名和子查询内部表）
         for j in parsed.source_tables:
+            if j.source_table.startswith("(subquery:"):
+                continue
+            if "SUBQUERY" in j.join_type.upper():
+                continue  # 子查询内部表/子查询假名没有ON条件是正常的
             if j.join_type not in ("FROM",) and not j.join_condition:
                 issue_id += 1
                 issues.append({
@@ -2464,6 +2468,7 @@ def analyze_quality(
     return {
         "complexity_metrics": complexity_metrics,
         "issues": issues,
+        "ai_insights": [],  # AI 增强时补充
         "issue_statistics": {
             "critical": severity_count.get("critical", 0),
             "medium": severity_count.get("medium", 0),

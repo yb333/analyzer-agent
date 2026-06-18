@@ -2531,7 +2531,25 @@ function openDetail(fieldName, scenario) {
       usage.where.forEach(function(w) {
         var scTag = w.scenario && w.scenario !== '默认' ? ' <span style="font-size:10px;color:var(--text-muted);">[' + escapeHtml(w.scenario) + ']</span>' : '';
         html += '<div style="font-size:14px;margin-bottom:4px;">' + escapeHtml(w.step_name) + codeTag(w.step_name) + scTag + '</div>';
-        html += '<div style="font-size:13px;font-family:monospace;color:var(--text-primary);background:var(--bg-secondary);padding:5px 8px;border-radius:4px;margin-bottom:8px;">' + escapeHtml(w.condition) + '</div>';
+        // 高亮 WHERE 条件里的字段名
+        var condHtml = escapeHtml(w.condition);
+        var fnLower = fieldName.toLowerCase();
+        var condLower = w.condition.toLowerCase();
+        var idx = condLower.indexOf(fnLower);
+        while (idx >= 0) {
+          var before = condHtml.substring(0, idx);
+          var match = condHtml.substring(idx, idx + fieldName.length);
+          var after = condHtml.substring(idx + fieldName.length);
+          condHtml = before + '<mark style="background:#fef08a;color:#854d0e;padding:1px 3px;border-radius:3px;font-weight:600;">' + match + '</mark>' + after;
+          // 找下一个（在 after 里，偏移量调整）
+          var afterLower = after.toLowerCase();
+          var nextIdx = afterLower.indexOf(fnLower);
+          if (nextIdx < 0) break;
+          idx = idx + fieldName.length + nextIdx;
+          // 防止死循环
+          if (idx >= condHtml.length) break;
+        }
+        html += '<div style="font-size:13px;font-family:monospace;color:var(--text-primary);background:var(--bg-secondary);padding:5px 8px;border-radius:4px;margin-bottom:8px;">' + condHtml + '</div>';
       });
       html += '</div>';
     }
