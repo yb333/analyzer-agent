@@ -53,7 +53,7 @@ def run_full_analysis(xlsx_path, output_dir):
     knowledge = {"meta": {"source_type": "execution_tasks.xlsx", "analysis_time": datetime.now().isoformat(), "dialect": dialect, "total_rules": len(rules), "target_table": rules[0].target_table or "", "patterns": patterns, "target_field_types": {}, "target_field_comments": {}}, "topology": topology, "data_flow": data_flow, "field_mappings": field_mappings, "quality": quality, "business_logic": {"summary": "", "step_descriptions": auto_step_desc, "key_transforms": []}, "source": build_source(rules, raw["target_fields"], raw["group_variables"], parsed_map)}
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "knowledge_final.json").write_text(json.dumps(knowledge, ensure_ascii=False, indent=2))
+    (out / "knowledge_draft.json").write_text(json.dumps(knowledge, ensure_ascii=False, indent=2))
     results = {}
     results["mapping"] = generate_mapping(knowledge, str(out))
     results["asset"] = generate_asset_report(knowledge, str(out))
@@ -305,3 +305,85 @@ class TestEndToEnd:
         assert "tbl_a" not in names, f"子查询内部表 tbl_a 不应在 tables: {names}"
         assert "tbl_b" not in names, f"子查询内部表 tbl_b 不应在 tables: {names}"
         assert "dim_tbl" in names, f"外部JOIN表 dim_tbl 应在 tables: {names}"
+
+    # ── 输出目录命名（任务B）──────────────────────────────────
+    # 输出目录应以「规则组英文名称」命名，而非固定 output。
+    # --output 给基础目录，脚本在其下按规则组英文名建子目录。
+
+    def test_read_excel_extracts_rule_group_en(self, tmp_output):
+        """read_excel 应读出规则组英文名称"""
+        from case_02_cte_basic import rules
+        xlsx = self._make_xlsx("case_02_cte_basic", tmp_output)
+        raw = read_excel(xlsx)
+        # _build_xlsx 默认 rule_group_en="TEST"，应被读出
+        assert raw.get("rule_group_en"), f"应读出 rule_group_en，实际 {raw.get('rule_group_en')}"
+
+    def test_custom_rule_group_en_used_as_output_dirname(self, tmp_output):
+        """自定义规则组英文名称应能被读出"""
+        import openpyxl
+        from _build_xlsx import build_xlsx
+        from case_01_minimal import rules as minimal_rules
+        xlsx = str(Path(tmp_output) / "custom_group.xlsx")
+        # 注入自定义 rule_group_en
+        custom_rules = [{**r, "rule_group_en": "DW_SALES_ORDER_F"} for r in minimal_rules]
+        build_xlsx(xlsx, rules=custom_rules)
+        raw = read_excel(xlsx)
+        assert raw["rule_group_en"] == "DW_SALES_ORDER_F", \
+            f"应读出自定义规则组英文名，实际 {raw['rule_group_en']}"
+
+    def test_main_flow_creates_subdir_by_rule_group_en(self, tmp_output):
+        """完整 analyzer 流程（run.py analyzer）应在基础目录下按规则组英文名建子目录"""
+        import subprocess
+        from case_01_minimal import rules as minimal_rules
+        from _build_xlsx import build_xlsx
+
+        xlsx = str(Path(tmp_output) / "input.xlsx")
+        custom_rules = [{**r, "rule_group_en": "DWL_TEST_PIPELINE"} for r in minimal_rules]
+        build_xlsx(xlsx, rules=custom_rules)
+
+        base_out = str(Path(tmp_output) / "results")
+        run_py = str(ANALYZER_REF.parent / "run.py")
+        r = subprocess.run(
+            [sys.executable, run_py, "analyzer", "--input", xlsx, "--output", base_out],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0, f"analyzer 失败: {r.stderr}"
+        # 产物应在 base_out/DWL_TEST_PIPELINE/ 下
+        expected_dir = Path(base_out) / "DWL_TEST_PIPELINE"
+        assert expected_dir.exists(), f"应按规则组英文名建子目录 {expected_dir}"
+        assert (expected_dir / "knowledge_draft.json").exists(), \
+            "knowledge_draft.json 应在规则组英文名子目录下"
+        assert (expected_dir / "knowledge_summary.md").exists()
+
+    def test_main_flow_falls_back_when_no_rule_group_en(self, tmp_output):
+        """规则组英文名缺失时，应回退到规则组编码，再回退到 output"""
+        import subprocess
+        from _build_xlsx import build_xlsx
+        from case_01_minimal import rules as minimal_rules
+        import openpyxl
+
+        xlsx = str(Path(tmp_output) / "no_group_en.xlsx")
+        build_xlsx(xlsx, rules=minimal_rules)
+        # 清空规则组英文名称列
+        wb = openpyxl.load_workbook(xlsx)
+        ws = wb["RULE"]
+        headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        if "规则组英文名称" in headers:
+            col_idx = headers.index("规则组英文名称") + 1
+            for row in ws.iter_rows(min_row=2):
+                row[col_idx - 1].value = None
+        wb.save(xlsx)
+        wb.close()
+
+        base_out = str(Path(tmp_output) / "results_fallback")
+        run_py = str(ANALYZER_REF.parent / "run.py")
+        r = subprocess.run(
+            [sys.executable, run_py, "analyzer", "--input", xlsx, "--output", base_out],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0, f"analyzer 失败: {r.stderr}"
+        # case_01 的 rule_group_code 是 GR001
+        fallback_dir = Path(base_out) / "GR001"
+        assert fallback_dir.exists(), \
+            f"规则组英文名缺失应回退到规则组编码，实际 results 下: {list(Path(base_out).iterdir())}"
+

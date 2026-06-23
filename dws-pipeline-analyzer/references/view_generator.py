@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 dws-pipeline-analyzer view_generator — 视图生成器
-从 knowledge_final.json 生成多种输出视图。
+从 knowledge_draft.json 生成多种输出视图（AI 增强结果通过 --ai-input 注入）。
 
 Usage:
-    dws-run analyzer view_generator \
-        --input knowledge_final.json \
+    python run.py view_generator \
+        --input knowledge_draft.json \
         --output docs/output/{target_table}/ \
+        [--ai-input knowledge_ai.md] \
         [--views mapping,asset,techspec]
 
 支持的视图:
@@ -425,11 +426,11 @@ def build_report_data(knowledge):
                         seen_origin.add(key)
                         origin_sources.append(s)
 
-        # 判断是否在最终目标表中
+        # 判断是否在最终目标表中（精确匹配，非子串包含）
         _max_seq_step = next((s for s in steps_list if s.get("exec_sequence", 0) == max(s.get("exec_sequence", 0) for s in steps_list)), None) if steps_list else None
-        _final_target = (_max_seq_step.get("target_table", "") if _max_seq_step else "").lower()
-        _producing_target = si.get("target_table", "").lower()
-        is_final_field = _final_target and _final_target in _producing_target
+        _final_target = _norm(_max_seq_step.get("target_table", "")) if _max_seq_step else ""
+        _producing_target = _norm(si.get("target_table", ""))
+        is_final_field = bool(_final_target) and _final_target == _producing_target
 
         if fname_lower in seen_fields_lower:
             continue
@@ -718,7 +719,7 @@ def _build_lineage_layout(topo, df, bl=None):
     data_flow_steps = df.get("steps", [])
     bl = bl or {}
 
-    # ── 1. 分类节点（统一用 _norm_table 做大小写归一化）──
+    # ── 1. 分类节点（统一用 _norm 做大小写归一化）──
     all_target_tables = {}  # {norm_table: step_id}
     for s in steps_list:
         tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
@@ -801,13 +802,13 @@ def _build_lineage_layout(topo, df, bl=None):
             },
         }
 
-    # 表节点
+    # 表节点（去重按 _norm 归一化，避免大小写不同的同名表重复出现）
     seen_tables = set()
     for t in tables:
         tname = _schema_table(t.get("schema", ""), t.get("name", ""))
-        if not tname or tname in seen_tables:
+        if not tname or _norm(tname) in seen_tables:
             continue
-        seen_tables.add(tname)
+        seen_tables.add(_norm(tname))
         if tname in cte_names:
             continue
 
@@ -839,9 +840,9 @@ def _build_lineage_layout(topo, df, bl=None):
     # CTE 内部物理表
     for cte_name, phys_list in cte_source_map.items():
         for p in phys_list:
-            if p not in seen_tables and p not in cte_names:
-                seen_tables.add(p)
-                ref_count = source_ref_count.get(p.upper(), 1)
+            if _norm(p) not in seen_tables and p not in cte_names:
+                seen_tables.add(_norm(p))
+                ref_count = source_ref_count.get(_norm(p), 1)
                 label = f"{p} (×{ref_count})" if ref_count > 1 else p
                 nodes[p] = {"type": "source", "label": label, "hidden": True, "step_data": None,
                             "is_primary": False}
@@ -975,7 +976,7 @@ def _build_lineage_layout(topo, df, bl=None):
                 "layer": visible_cols.index(col) if col in visible_cols else 0,
                 "hidden": ninfo.get("hidden", False),
                 "step_data": ninfo.get("step_data"),
-                "source_ref_count": source_ref_count.get(name.upper(), 1) if ninfo.get("type") == "source" else 0,
+                "source_ref_count": source_ref_count.get(_norm(name), 1) if ninfo.get("type") == "source" else 0,
                 "is_primary": ninfo.get("is_primary", False),
             }
 
@@ -998,7 +999,7 @@ def _build_lineage_layout(topo, df, bl=None):
                 "layer": -1,
                 "hidden": True,
                 "step_data": None,
-                "source_ref_count": source_ref_count.get(nid.upper(), 1),
+                "source_ref_count": source_ref_count.get(_norm(nid), 1),
                 "is_primary": ninfo.get("is_primary", False),
             }
 
@@ -1039,148 +1040,6 @@ def _build_lineage_layout(topo, df, bl=None):
             {"sequence": g.get("sequence", 0), "steps": g.get("parallel_steps", [])}
             for g in topo.get("schedule_plan", [])
         ],
-    }
-
-
-def _build_lineage(topo, df, bl=None):
-    """构建血缘图的节点和边"""
-    tables = df.get("tables", [])
-    steps_list = topo.get("steps", [])
-    data_deps = topo.get("data_dependencies", [])
-    self_refs = topo.get("self_references", [])
-    sched_plan = topo.get("schedule_plan", [])
-    bl = bl or {}
-
-    nodes = []
-    edges = []
-    node_ids = set()
-
-    # Target node — show full schema.table
-    target_full = ""
-    if steps_list:
-        ts = steps_list[0].get("target_schema", "")
-        tt = steps_list[0].get("target_table", "")
-        target_full = _schema_table(ts, tt)
-        cn_name = bl.get("summary", "").split("，")[0] if bl.get("summary") else ""
-        nodes.append({
-            "id": "target",
-            "name": target_full if ts else tt,
-            "schema": ts,
-            "role": "target",
-            "layer": _layer_from_schema(ts, tt),
-            "label_extra": cn_name,
-        })
-        node_ids.add("target")
-
-    # Source nodes — show full schema.table or CTE name
-    seen_sources = set()
-    for s in steps_list:
-        for src in s.get("source_tables_from_sql", []):
-            if src in seen_sources:
-                continue
-            seen_sources.add(src)
-            sch, tbl = _split_schema_table(src)
-            # Don't add target table as source (self-ref handled separately)
-            if _schema_table(sch, tbl) == target_full:
-                continue
-            nid = f"src_{len(nodes)}"
-            display_name = src if sch else tbl  # CTE has no schema, show short name
-            nodes.append({
-                "id": nid,
-                "name": display_name,
-                "schema": sch,
-                "role": "source",
-                "layer": _layer_from_schema(sch, tbl),
-            })
-            node_ids.add(nid)
-
-    # 建立 source_table -> node_id 映射
-    # key 用原始 source_tables_from_sql 的值（与 steps 中的引用一致）
-    src_to_node = {}
-    for raw_src in seen_sources:
-        sch, tbl = _split_schema_table(raw_src)
-        if _schema_table(sch, tbl) == target_full:
-            continue
-        # 找到对应的 node
-        for n in nodes:
-            if n["role"] != "source":
-                continue
-            n_sch = n.get("schema", "")
-            n_tbl_raw = n.get("name", "")
-            # 匹配：schema.table 或 裸名
-            if raw_src == n_tbl_raw or (n_sch and f"{n_sch}.{n_tbl_raw}" == raw_src) or (n_sch and n_tbl_raw == raw_src):
-                src_to_node[raw_src] = n["id"]
-                break
-
-    # Step nodes + edges
-    for i, s in enumerate(steps_list):
-        sid = f"step_{i}"
-        rc = s.get("rule_code", "")
-        # Find AI purpose for this step
-        ai_step = next(
-            (d for d in bl.get("step_descriptions", []) if d.get("step_id") == s["step_id"]),
-            {}
-        )
-        purpose = ai_step.get("purpose", "")
-        step_label = f"{rc}"
-        if purpose:
-            step_label += f": {purpose}"
-
-        nodes.append({
-            "id": sid,
-            "name": step_label,
-            "schema": "",
-            "role": "step",
-            "layer": "",
-        })
-
-        # edges: source → step
-        for src in s.get("source_tables_from_sql", []):
-            sch, tbl = _split_schema_table(src)
-            full = _schema_table(sch, tbl)
-            if full == target_full:
-                # self-reference: target → step (用虚线)
-                edges.append({"from": "target", "to": sid, "label": s["step_id"]})
-            else:
-                nid = src_to_node.get(src)
-                if nid:
-                    edges.append({"from": nid, "to": sid, "label": ""})
-
-        # edges: step → target (只有写入非视图的步骤才连 target)
-        # 视图步骤(step_2)写入的是 _i 表，不直接写入目标 _f 表
-        step_target = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
-        if step_target == target_full:
-            edges.append({"from": sid, "to": "target", "label": s["step_id"]})
-        else:
-            # 非主目标的写入步骤：创建一个对应的 target 节点
-            alt_target_id = None
-            for n in nodes:
-                if n["role"] == "target" and n.get("name") == step_target:
-                    alt_target_id = n["id"]
-                    break
-            if not alt_target_id:
-                alt_id = f"tgt_{len(nodes)}"
-                ts, tt = _split_schema_table(step_target)
-                nodes.append({
-                    "id": alt_id,
-                    "name": step_target,
-                    "schema": ts,
-                    "role": "target",
-                    "layer": _layer_from_schema(ts, tt),
-                })
-                alt_target_id = alt_id
-            edges.append({"from": sid, "to": alt_target_id, "label": s["step_id"]})
-
-    # Self-reference node ids
-    self_ref_ids = []
-    for sr in self_refs:
-        self_ref_ids.append("target")  # self-ref always on target
-
-    return {
-        "nodes": nodes,
-        "edges": edges,
-        "self_references": self_ref_ids,
-        "schedule_groups": [{"sequence": g.get("sequence", 0), "steps": g.get("parallel_steps", [])} for g in sched_plan],
     }
 
 
@@ -1267,11 +1126,11 @@ def generate_mapping(knowledge, output_dir):
                 "source_tables": src_tables,
             }
 
-    # ── 构建 target table 列表（用于过滤）──
+    # ── 构建 target table 列表（用于过滤，归一化避免大小写漏匹配）──
     target_tables_set = set()
     for s in steps_list:
         tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
-        target_tables_set.add(tf)
+        target_tables_set.add(_norm(tf))
 
     wb = Workbook()
 
@@ -1293,15 +1152,19 @@ def generate_mapping(knowledge, output_dir):
     ]
     ws1.append(headers1)
 
-    target_schema = steps_list[0].get("target_schema", "") if steps_list else ""
+    # 目标表 schema/table 都从 exec_sequence 最大的步骤取（统一口径）
+    target_schema = ""
     target_table = ""
     if steps_list:
         _max_seq = max(s.get("exec_sequence", 0) for s in steps_list)
         _max_steps = [s for s in steps_list if s.get("exec_sequence", 0) == _max_seq]
-        target_table = _max_steps[0].get("target_table", "") if _max_steps else ""
+        if _max_steps:
+            target_schema = _max_steps[0].get("target_schema", "")
+            target_table = _max_steps[0].get("target_table", "")
     target_cn = bl.get("summary", "").split("，")[0] if bl.get("summary") else target_table
 
     # 收集所有物理源表（含 CTE 内部物理表），排除 CTE 名和目标表自身
+    # seen_sources 存归一化名用于去重
     seen_sources = set()
     entity_rows = []
     for s in steps_list:
@@ -1313,12 +1176,12 @@ def generate_mapping(knowledge, output_dir):
         # 主查询 JOIN（物理表）
         for j in joins:
             src_full = j.get("source_table", "")
-            if src_full in seen_sources or src_full in target_tables_set:
+            if _norm(src_full) in seen_sources or _norm(src_full) in target_tables_set:
                 continue
             # 排除 CTE 名（无 schema 的短名）
             if src_full.upper() in cte_names_upper:
                 continue
-            seen_sources.add(src_full)
+            seen_sources.add(_norm(src_full))
             sch, tbl = _split_schema_table(src_full)
             join_type = j.get("join_type", "")
             join_cond = j.get("join_condition", "")
@@ -1336,12 +1199,12 @@ def generate_mapping(knowledge, output_dir):
         for cte in ctes:
             for st in cte.get("source_tables", []):
                 tname = st.get("name", "")
-                if not tname or tname in seen_sources or tname in target_tables_set:
+                if not tname or _norm(tname) in seen_sources or _norm(tname) in target_tables_set:
                     continue
                 # 排除 CTE 名引用（嵌套 CTE）
                 if tname.upper() in cte_names_upper:
                     continue
-                seen_sources.add(tname)
+                seen_sources.add(_norm(tname))
                 sch, tbl = _split_schema_table(tname)
                 talias = st.get("alias", "")
                 jt = st.get("join_type", "FROM")
@@ -1549,12 +1412,15 @@ def generate_tech_design(knowledge, output_dir):
     sched_plan = topo.get("schedule_plan", [])
     self_refs = topo.get("self_references", [])
 
-    target_schema = steps_list[0].get("target_schema", "") if steps_list else ""
+    # 目标表 schema/table 都从 exec_sequence 最大的步骤取（统一口径）
+    target_schema = ""
     target_table = ""
     if steps_list:
         _max_seq = max(s.get("exec_sequence", 0) for s in steps_list)
         _max_steps = [s for s in steps_list if s.get("exec_sequence", 0) == _max_seq]
-        target_table = _max_steps[0].get("target_table", "") if _max_steps else ""
+        if _max_steps:
+            target_schema = _max_steps[0].get("target_schema", "")
+            target_table = _max_steps[0].get("target_table", "")
     target_full = _schema_table(target_schema, target_table)
 
     lines = []
@@ -1629,24 +1495,24 @@ def generate_tech_design(knowledge, output_dir):
     target_tables_set = set()
     for s in steps_list:
         tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
-        target_tables_set.add(tf)
+        target_tables_set.add(_norm(tf))
 
-    # 收集所有物理源表（含 CTE 内部表）
+    # 收集所有物理源表（含 CTE 内部表），seen_src 存归一化名用于去重
     all_phys_sources = []
     seen_src = set()
     for s in data_flow_steps:
         # 主查询 JOIN
         for j in s.get("joins", []):
             src_tbl = j.get("source_table", "")
-            if src_tbl and src_tbl.upper() not in cte_names_upper and src_tbl not in target_tables_set and src_tbl not in seen_src:
-                seen_src.add(src_tbl)
+            if src_tbl and src_tbl.upper() not in cte_names_upper and _norm(src_tbl) not in target_tables_set and _norm(src_tbl) not in seen_src:
+                seen_src.add(_norm(src_tbl))
                 all_phys_sources.append(src_tbl)
         # CTE 内部物理表
         for cte in s.get("ctes", []):
             for st in cte.get("source_tables", []):
                 tname = st.get("name", "")
-                if tname and tname.upper() not in cte_names_upper and tname not in target_tables_set and tname not in seen_src:
-                    seen_src.add(tname)
+                if tname and tname.upper() not in cte_names_upper and _norm(tname) not in target_tables_set and _norm(tname) not in seen_src:
+                    seen_src.add(_norm(tname))
                     all_phys_sources.append(tname)
 
     # 画物理源表 → 目标表
@@ -1760,9 +1626,9 @@ def generate_tech_design(knowledge, output_dir):
         # 主查询 JOIN
         for j in s.get("joins", []):
             src = j.get("source_table", "")
-            if src in seen_dep or src.upper() in cte_names_upper:
+            if _norm(src) in seen_dep or src.upper() in cte_names_upper:
                 continue
-            seen_dep.add(src)
+            seen_dep.add(_norm(src))
             jt = j.get("join_type", "")
             lines.append(f"| {src} | {j.get('alias', '-')} | {_format_join(jt, src)} | - | 待配置 |")
         # CTE 内部物理表
@@ -1770,9 +1636,9 @@ def generate_tech_design(knowledge, output_dir):
             cte_name = cte.get("name", "")
             for st in cte.get("source_tables", []):
                 tname = st.get("name", "")
-                if tname in seen_dep or tname.upper() in cte_names_upper:
+                if _norm(tname) in seen_dep or tname.upper() in cte_names_upper:
                     continue
-                seen_dep.add(tname)
+                seen_dep.add(_norm(tname))
                 jt = st.get("join_type", "FROM")
                 lines.append(f"| {tname} | {st.get('alias', '-')} | {_format_join(jt, tname)} | {cte_name} | 待配置 |")
     lines.append("")
@@ -1811,8 +1677,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  dws-run analyzer view_generator --input knowledge_final.json --output docs/output/table/
-  dws-run analyzer view_generator --input knowledge_final.json --output docs/output/table/ --views mapping,asset
+  python run.py view_generator --input knowledge_draft.json --output docs/output/table/
+  python run.py view_generator --input knowledge_draft.json --output docs/output/table/ --views mapping,asset
         """,
     )
     parser.add_argument("--input", required=True, help="knowledge_draft.json 路径")

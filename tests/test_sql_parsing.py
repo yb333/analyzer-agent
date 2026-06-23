@@ -402,3 +402,63 @@ GROUP BY t.contract_no, f.proj_name"""
         assert "proj_id" not in select_aliases, "proj_id 不应在 SELECT 里"
         join_fields = [j["field"] for j in parsed.join_usage]
         assert "proj_id" in join_fields, "proj_id 应在 join_usage（辅助字段）"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 8. 解析健壮性 —— 异常 SQL 不应让整个分析崩溃
+# ═══════════════════════════════════════════════════════════════
+
+class TestSqlParsingRobustness:
+    """parse_single_sql 必须兜底所有异常，绝不向上抛。
+
+    生产环境的制品包 SQL 质量不可控，一条格式异常的 SQL 若逃逸异常，
+    会让 analyzer.py 主循环中断，整个制品包分析失败。
+    正确行为：返回带 parse_error 的 ParsedSQL，让该规则标记为解析失败，
+    其余规则继续分析。
+    """
+
+    def test_garbage_sql_does_not_raise(self):
+        """完全无法解析的垃圾文本：记录错误，不抛异常"""
+        parsed = parse("这不是SQL (((((( ")
+        # 不抛异常即通过；必须记录了 parse_error
+        assert parsed.parse_error is not None, "垃圾 SQL 应记录 parse_error"
+        # 但 select_columns 应为空（无任何有效解析结果）
+        assert len(parsed.select_columns) == 0
+
+    def test_incomplete_sql_does_not_raise(self):
+        """不完整的 SQL（只有半个语句）：不抛异常"""
+        parsed = parse("SELECT FROM WHERE")
+        assert parsed.parse_error is not None
+        assert len(parsed.select_columns) == 0
+
+    def test_deeply_nested_expression_does_not_raise(self):
+        """深度嵌套表达式：可能触发 RecursionError，必须兜底，不抛异常"""
+        # 构造深度嵌套的 CASE WHEN / 算术表达式
+        inner = "1"
+        for _ in range(60):
+            inner = f"CASE WHEN 1=1 THEN {inner} ELSE 0 END"
+        sql = f"SELECT {inner} AS deep_col FROM t"
+        # 关键断言：调用本身不抛（无论是否解析成功）
+        parsed = parse(sql)
+        # 不抛异常即通过
+
+    def test_oversized_chained_expression_does_not_raise(self):
+        """超长链式表达式：同样可能触发递归，必须兜底"""
+        # 构造超长链式 OR/AND 表达式
+        conditions = " OR ".join([f"a.col{i} = 1" for i in range(200)])
+        sql = f"SELECT * FROM a WHERE {conditions}"
+        parsed = parse(sql)
+        # 不抛异常即通过
+
+    def test_null_byte_sql_does_not_raise(self):
+        """含空字节等特殊字符的 SQL：不抛异常"""
+        sql = "SELECT t.id\x00 FROM t"
+        parsed = parse(sql)
+        # 不抛异常即通过（可能成功也可能 parse_error）
+
+    def test_parse_error_result_has_raw_sql(self):
+        """解析失败时，ParsedSQL 应保留原始 SQL 便于排查"""
+        raw = "INVALID GARBAGE"
+        parsed = parse(raw)
+        assert parsed.parse_error is not None
+        assert parsed.raw_sql == raw, "失败时应保留原始 SQL"

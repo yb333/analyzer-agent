@@ -383,3 +383,78 @@ class TestTier5MultiScenario:
         descs = r["topology"]["scenarios"]
         # step_2 应标注为分区交换类型
         assert exchange_step.get("rule_type") == 9
+
+
+# ═══════════════════════════════════════════════════════════════
+# Tier 6: Excel 读取健壮性
+# ═══════════════════════════════════════════════════════════════
+
+class TestExcelReadRobustness:
+    """read_excel 必须对空 sheet / 缺失标题行优雅降级，不抛异常。
+
+    生产环境用户导出的 xlsx 格式不可控（空 sheet、标题行缺失、
+    被误清空的 sheet 都可能出现）。read_excel 用 next(ws.iter_rows(...))
+    读取标题行——当前 read_only=False 模式下空 sheet 会返回全 None 行，
+    不抛 StopIteration；但这是脆弱契约：一旦有人改成 read_only=True，
+    空 sheet 就会抛 StopIteration 让整个分析崩溃。
+
+    这组测试锁定"空 sheet 优雅降级"的行为契约，作为防御性回归。
+    """
+
+    @staticmethod
+    def _make_xlsx(path, sheet_def):
+        """生成 xlsx。sheet_def: dict[sheet_name, rows]；空 rows = 完全空 sheet。"""
+        from openpyxl import Workbook
+        wb = Workbook()
+        wb.remove(wb.active)  # 移除默认 sheet
+        for sheet_name, rows in sheet_def.items():
+            ws = wb.create_sheet(sheet_name)
+            for row in rows:
+                ws.append(row)
+        wb.save(str(path))
+        wb.close()
+        return str(path)
+
+    @staticmethod
+    def _clear_sheet(path, sheet_name):
+        """清空指定 sheet 的所有行（含标题行）。"""
+        import openpyxl
+        wb = openpyxl.load_workbook(path)
+        if sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            ws.delete_rows(1, ws.max_row or 1)
+        wb.save(path)
+        wb.close()
+
+    def test_empty_rule_sheet_does_not_crash(self, tmp_path):
+        """RULE sheet 存在但完全空（无标题行）：优雅降级返回空 rules"""
+        xlsx = self._make_xlsx(tmp_path / "empty_rule.xlsx", {"RULE": []})
+        # 关键：调用不抛异常
+        raw = read_excel(xlsx)
+        assert raw["rules"] == [], "空 RULE sheet 应返回空 rules"
+
+    def test_empty_target_fields_sheet(self, tmp_path):
+        """TargetFields sheet 空但 RULE 正常：不应抛异常"""
+        from _build_xlsx import build_xlsx
+        from case_01_minimal import rules as minimal_rules
+        xlsx = str(tmp_path / "tf_empty.xlsx")
+        build_xlsx(xlsx, rules=minimal_rules)
+        self._clear_sheet(xlsx, "TargetFields")
+        # 不抛异常
+        raw = read_excel(xlsx)
+        assert len(raw["rules"]) >= 1, "RULE 应正常解析"
+        assert raw["target_fields"] == {} or all(
+            not v for v in raw["target_fields"].values()
+        ), "空 TargetFields 应无字段"
+
+    def test_empty_group_variables_sheet(self, tmp_path):
+        """GroupVariables sheet 空但 RULE 正常：不应抛异常"""
+        from _build_xlsx import build_xlsx
+        from case_01_minimal import rules as minimal_rules
+        xlsx = str(tmp_path / "gv_empty.xlsx")
+        build_xlsx(xlsx, rules=minimal_rules)
+        self._clear_sheet(xlsx, "GroupVariables")
+        # 不抛异常
+        raw = read_excel(xlsx)
+        assert len(raw["rules"]) >= 1, "RULE 应正常解析"
+        assert raw["group_variables"] == {}, "空 GV 应返回空 dict"

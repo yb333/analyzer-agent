@@ -75,6 +75,7 @@ RULE_COLUMNS_MAP = {
     "data_source": "数据源",
     "business_owner": "业务责任人",
     "rule_group_code": "规则组编码",
+    "rule_group_en": "规则组英文名称",
     "rule_type": "规则类型",
     "rule_name": "规则中文名称",
     "exchange_source_table": "交换分区来源表",
@@ -276,7 +277,6 @@ def _find_col(col_idx: dict, name: str) -> int | None:
     if name in col_idx:
         return col_idx[name]
     # 模糊匹配：去空格、全角括号转半角
-    import unicodedata
     def normalize(s):
         # 全角括号 → 半角
         s = s.replace("（", "(").replace("）", ")")
@@ -404,6 +404,7 @@ def read_excel(excel_path: str) -> dict:
         "group_variables": {},
         "variables": [],
         "rule_group_code": "",
+        "rule_group_en": "",
     }
 
     # ── RULE sheet ──
@@ -479,6 +480,11 @@ def read_excel(excel_path: str) -> dict:
 
         if rule.rule_group_code and not result["rule_group_code"]:
             result["rule_group_code"] = rule.rule_group_code
+
+        # 规则组英文名称（取第一个非空值，作为输出目录名）
+        rule_group_en = _get_val(row, ci.get("rule_group_en"))
+        if rule_group_en and not result["rule_group_en"]:
+            result["rule_group_en"] = str(rule_group_en).strip()
 
     # ── TargetFields sheet ──
     if "TargetFields" in wb.sheetnames:
@@ -586,24 +592,37 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
     # sqlglot 解析（统一用 oracle 方言，DWS 兼容 Oracle 语法，
     # 保持 NVL/DECODE/SUBSTR 等函数原样，不被转换为 COALESCE/CASE）
     sqlglot_dialect = "oracle"
+    # 整个解析流程统一兜底：制品包 SQL 质量不可控，深度嵌套可能触发
+    # RecursionError，异常 AST 可能触发 AttributeError 等。任何异常都
+    # 不应让 analyzer 主循环中断（一条坏 SQL 不该拖垮整个制品包分析），
+    # 一律降级为带 parse_error 的 ParsedSQL，让该规则标记失败后继续。
     try:
         tree = sqlglot.parse_one(clean, dialect=sqlglot_dialect)
-    except sqlglot.ParseError as e:
-        result.parse_error = str(e)
+    except Exception as e:
+        result.parse_error = f"{type(e).__name__}: {e}"
         print(f"  [SQL解析错误] {e}", file=sys.stderr)
         return result
 
-    # ── 检测 UNION/INTERSECT/EXCEPT（SetOperation）──
-    if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
-        return _parse_set_operation(tree, sqlglot_dialect, comment_alias_map, sql)
+    try:
+        # ── 检测 UNION/INTERSECT/EXCEPT（SetOperation）──
+        if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
+            return _parse_set_operation(tree, sqlglot_dialect, comment_alias_map, sql)
 
-    # ── 普通 SELECT / WITH...SELECT ──
-    select_node = tree.find(exp.Select)
-    if not select_node:
-        result.parse_error = "未找到 SELECT 节点"
+        # ── 普通 SELECT / WITH...SELECT ──
+        select_node = tree.find(exp.Select)
+        if not select_node:
+            result.parse_error = "未找到 SELECT 节点"
+            return result
+
+        return _parse_select(tree, select_node, sqlglot_dialect, comment_alias_map, sql)
+    except RecursionError:
+        result.parse_error = "RecursionError: SQL 嵌套层级过深"
+        print(f"  [SQL解析错误] 嵌套层级过深，已跳过", file=sys.stderr)
         return result
-
-    return _parse_select(tree, select_node, sqlglot_dialect, comment_alias_map, sql)
+    except Exception as e:
+        result.parse_error = f"{type(e).__name__}: {e}"
+        print(f"  [SQL解析错误] {e}", file=sys.stderr)
+        return result
 
 
 def _parse_select(tree, select_node, sqlglot_dialect: str, comment_alias_map: dict, raw_sql: str) -> ParsedSQL:
@@ -1291,14 +1310,13 @@ def _build_join_paths(joins: list) -> dict:
     # ON t.id = a.id → a 依赖 t
     # ON a.bid = b.bid → b 依赖 a
     alias_deps = {}  # {join_alias: [depended_aliases]}
-    import re as _re
     for alias, info in join_info.items():
         on_cond = info.get("on_condition", "")
         if not on_cond:
             continue
         # 从 ON 条件提取所有别名引用（alias.field 模式）
         refs = set()
-        for m in _re.finditer(r'(\w+)\.\w+', on_cond):
+        for m in re.finditer(r'(\w+)\.\w+', on_cond):
             ref = m.group(1).lower()
             if ref != alias.lower():
                 refs.add(ref)
@@ -1930,6 +1948,8 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
             if _norm_table(j.source_table) not in [_norm_table(t) for t in sql_source_tables]:
                 sql_source_tables.append(j.source_table)
             # 全树扫描（在循环外初始化，循环内只追加）
+            # 用 _norm_table 归一化的 seen 集合去重，避免同一表大小写不同被当成两张表
+            _all_sql_seen = {_norm_table(t) for t in all_sql_tables}
             try:
                 clean = _strip_dws_clauses(parsed.raw_sql)
                 clean = _replace_placeholders(clean)
@@ -1941,20 +1961,23 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
                     for branch in branches:
                         for table in branch.find_all(exp.Table):
                             tname = ".".join(_clean_name(p.name) for p in table.parts)
-                            if tname and tname not in all_sql_tables:
+                            if tname and _norm_table(tname) not in _all_sql_seen:
                                 all_sql_tables.append(tname)
+                                _all_sql_seen.add(_norm_table(tname))
                 else:
                     select_node = tree.find(exp.Select)
                     if select_node:
                         for table in select_node.find_all(exp.Table):
                             tname = ".".join(_clean_name(p.name) for p in table.parts)
-                            if tname and tname not in all_sql_tables:
+                            if tname and _norm_table(tname) not in _all_sql_seen:
                                 all_sql_tables.append(tname)
+                                _all_sql_seen.add(_norm_table(tname))
                     else:
                         for table in tree.find_all(exp.Table):
                             tname = ".".join(_clean_name(p.name) for p in table.parts)
-                            if tname and tname not in all_sql_tables:
+                            if tname and _norm_table(tname) not in _all_sql_seen:
                                 all_sql_tables.append(tname)
+                                _all_sql_seen.add(_norm_table(tname))
             except Exception:
                 all_sql_tables = sql_source_tables  # fallback
 
@@ -2153,7 +2176,7 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
             if len(writer_seqs) == 1:
                 pattern = "parallel"
             elif self_references and any(
-                sr["table"] == table for sr in self_references
+                _table_match(sr["table"], table) for sr in self_references
             ):
                 pattern = "parallel_then_serial_with_self_ref"
             else:
@@ -2164,7 +2187,7 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
                 "writers": writers,
                 "write_pattern": pattern,
                 "has_self_reference": any(
-                    sr["table"] == table for sr in self_references
+                    _table_match(sr["table"], table) for sr in self_references
                 ),
             })
 
@@ -3003,8 +3026,6 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
         if "create table" not in content_lower:
             continue
 
-        import re
-
         # ── 1. 提取字段名+类型（正则，支持 NVARCHAR 等 DWS 方言）──
         ct_match = re.search(
             r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[^\(]*\((.*)\)',
@@ -3191,7 +3212,6 @@ def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings,
                 cte_names = [c.name for c in parsed.ctes]
                 lines.append(f"- CTE: {', '.join(cte_names)}")
             # 加工类型分布
-            from collections import Counter
             tt_dist = Counter(c.transform_type for c in parsed.select_columns)
             tt_str = ", ".join(f"{k}={v}" for k, v in tt_dist.most_common())
             lines.append(f"- 字段加工: {len(parsed.select_columns)} 列 ({tt_str})")
@@ -3245,30 +3265,38 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--input", required=True, help="execution_tasks.xlsx 文件路径")
-    parser.add_argument("--output", required=True, help="输出目录")
+    parser.add_argument("--output", required=True, help="输出基础目录（脚本会在此目录下按规则组英文名称建子目录）")
     parser.add_argument("--dialect", default="", help="SQL 方言 (oracle/dws/auto)，默认自动检测")
     parser.add_argument("--ddl-dir", default="", help="DDL 文件目录（可选，用于补充字段类型）")
     args = parser.parse_args()
 
     input_path = Path(args.input)
-    # 直接用用户指定的 output 目录，不自动加子目录
-    output_dir = Path(args.output)
+    base_output_dir = Path(args.output)
 
     if not input_path.exists():
         print(f"错误: 文件不存在: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     print(f"═══ dws-pipeline-analyzer ═══")
     print(f"输入: {input_path}")
-    print(f"输出: {output_dir}")
+    print(f"输出基础目录: {base_output_dir}")
     print()
 
     # ── Step 1: 读取 Excel ──
     print("Step 1: 读取制品包 Excel...")
     raw = read_excel(str(input_path))
     rules = raw["rules"]
+
+    # 确定输出目录：基础目录 / 规则组英文名称（兜底用规则组编码或 output）
+    group_en = (raw.get("rule_group_en") or "").strip()
+    if not group_en:
+        group_en = (raw.get("rule_group_code") or "").strip() or "output"
+    # 清理目录名（去掉非法字符）
+    safe_group_en = re.sub(r'[<>:"/\\|?*\s]', "_", group_en)
+    output_dir = base_output_dir / safe_group_en
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"输出目录: {output_dir}")
+    print()
 
     if not rules:
         # 详细诊断
@@ -3277,7 +3305,6 @@ def main():
         print("诊断信息:", file=sys.stderr)
 
         # 检查 RULE sheet 是否存在
-        import openpyxl
         wb_diag = openpyxl.load_workbook(str(input_path), read_only=False, data_only=True)
         if "RULE" not in wb_diag.sheetnames:
             print(f"  - Excel 中没有 'RULE' sheet，实际 sheet: {wb_diag.sheetnames}", file=sys.stderr)

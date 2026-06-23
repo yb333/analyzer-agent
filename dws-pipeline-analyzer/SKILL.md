@@ -43,15 +43,19 @@ python -c "import openpyxl, sqlglot; print('OK')"
 
 ## 工作流程
 
+> **路径约定**：`--output` 指定**基础目录**（工作目录或 `docs/` 等）。脚本会自动在其下按
+> **规则组英文名称**（取自 Excel「规则组英文名称」列，缺失则回退规则组编码）建子目录。
+> 下文 `{output_dir}` 代指该自动创建的子目录，从 Step 1 输出日志读取真实路径。
+
 ### Step 1: 执行分析脚本
 
 ```bash
-python {skill_dir}/run.py analyzer --input {input_xlsx} --output {output_dir} [--ddl-dir {ddl_dir}]
+python {skill_dir}/run.py analyzer --input {input_xlsx} --output {base_dir} [--ddl-dir {ddl_dir}]
 ```
 
 DDL 目录自动检测：同级的 `04_ddl/` 有则传入，没有则跳过。
 
-产出：`knowledge_draft.json` + `knowledge_summary.md`
+产出：`{output_dir}/knowledge_draft.json` + `{output_dir}/knowledge_summary.md`
 
 ### Step 2: AI 补充业务理解
 
@@ -134,8 +138,9 @@ python {skill_dir}/run.py view_generator \
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `--input` | 是 | knowledge_final.json 路径 |
+| `--input` | 是 | knowledge_draft.json 路径 |
 | `--output` | 是 | 输出目录 |
+| `--ai-input` | 否 | knowledge_ai.md 路径（AI 增强结果，可选） |
 | `--views` | 否 | mapping/asset/techspec，默认 all |
 
 ## 禁止事项

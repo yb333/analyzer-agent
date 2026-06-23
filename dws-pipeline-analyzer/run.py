@@ -6,7 +6,7 @@ Usage:
 
 Examples:
     python run.py analyzer --input execution_tasks.xlsx --output output/
-    python run.py view_generator --input knowledge_final.json --output output/
+    python run.py view_generator --input knowledge_draft.json --output output/
 """
 
 import sys
