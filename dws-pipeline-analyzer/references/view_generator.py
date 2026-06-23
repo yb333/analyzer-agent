@@ -275,6 +275,7 @@ def build_report_data(knowledge):
             "where_usage": df_step.get("where_usage", []),
             "groupby_usage": df_step.get("groupby_usage", []),
             "join_paths": df_step.get("join_paths", {}),
+            "union_branches": df_step.get("union_branches", []),
             "ctes": [
                 {
                     "name": c.get("name", ""),
@@ -307,9 +308,43 @@ def build_report_data(knowledge):
     cte_index = _build_cte_index(data_flow_steps)
     cte_names_upper = set(cte_index.keys())
 
+    # ── 构建 union_branches 索引（step_id → {字段(LOWER): [物理来源]}）──
+    # UNION 步骤的字段来源用分支的物理穿透来源（替代假名层）
+    union_branch_sources = {}  # {step_id: {field_lower: [{"table","field","branch"}]}}
+    for ds in data_flow_steps:
+        sid = ds.get("step_id", "")
+        branches = ds.get("union_branches", [])
+        if not branches:
+            continue
+        fmap = {}
+        for b in branches:
+            bidx = b.get("branch_index", 0)
+            for col in b.get("columns", []):
+                col_name = (col.get("alias", "") or "").lower()
+                if not col_name:
+                    continue
+                for ps in col.get("physical_sources", []):
+                    fmap.setdefault(col_name, []).append({
+                        "table": ps.get("table", ""),
+                        "field": ps.get("field", ""),
+                        "branch": bidx,
+                    })
+        union_branch_sources[sid] = fmap
+
     # ── fields (按场景分组，同场景内按目标表+字段名去重) ──
     def _resolve_sources(field_data, step_id):
-        """构建字段来源列表，把别名翻译成物理表名，CTE 穿透到物理源表"""
+        """构建字段来源列表，把别名翻译成物理表名，CTE 穿透到物理源表。
+
+        UNION 步骤优先用 union_branches 的物理穿透来源（含分支归属）。
+        """
+        # 优先：UNION 分支物理来源（已穿透子查询到物理表，含 branch 归属）
+        ub = union_branch_sources.get(step_id)
+        if ub:
+            fname = (field_data.get("target_field", "") or "").lower()
+            if fname in ub:
+                return [{"table": s["table"], "alias": "", "field": s["field"],
+                         "branch": s["branch"]} for s in ub[fname]]
+
         amap = alias_table_map.get(step_id, {})
         sources = []
         for l in field_data.get("lineage", []):
@@ -1163,8 +1198,8 @@ def generate_mapping(knowledge, output_dir):
             target_table = _max_steps[0].get("target_table", "")
     target_cn = bl.get("summary", "").split("，")[0] if bl.get("summary") else target_table
 
-    # 收集所有物理源表（含 CTE 内部物理表），排除 CTE 名和目标表自身
-    # seen_sources 存归一化名用于去重
+    # 收集所有物理源表（含 CTE/子查询内部物理表），排除假名、CTE 名和目标表自身
+    # seen_sources 存归一化名用于去重；UNION 步骤的源表带分支归属
     seen_sources = set()
     entity_rows = []
     for s in steps_list:
@@ -1172,36 +1207,72 @@ def generate_mapping(knowledge, output_dir):
         df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
         joins = df_step.get("joins", [])
         ctes = df_step.get("ctes", [])
+        ub_list = df_step.get("union_branches", [])
+        has_union = len(ub_list) > 1
 
-        # 主查询 JOIN（物理表）
-        for j in joins:
-            src_full = j.get("source_table", "")
-            if _norm(src_full) in seen_sources or _norm(src_full) in target_tables_set:
-                continue
-            # 排除 CTE 名（无 schema 的短名）
-            if src_full.upper() in cte_names_upper:
-                continue
-            seen_sources.add(_norm(src_full))
-            sch, tbl = _split_schema_table(src_full)
-            join_type = j.get("join_type", "")
-            join_cond = j.get("join_condition", "")
-            if join_type == "FROM":
-                relation = "主表"
-            else:
-                relation = f"{join_type} ON {join_cond}" if join_cond else join_type
-            entity_rows.append([
-                sch, tbl, j.get("alias", ""), "",
-                target_schema, target_cn, target_table,
-                relation, "", "", "", "",
-            ])
+        def _join_type_label(jt, join_cond):
+            """把 join_type 翻译成友好关联描述"""
+            if jt == "FROM":
+                return "主表"
+            if jt == "FROM_SUBQUERY_MAIN":
+                return "子查询内部主表"
+            if jt == "FROM_SUBQUERY":
+                return "子查询内部从表"
+            if jt == "JOIN_SUBQUERY_INNER":
+                return "JOIN子查询内部从表"
+            if jt == "JOIN_SUBQUERY":
+                return "JOIN子查询"
+            return f"{jt} ON {join_cond}" if join_cond else jt
 
-        # CTE 内部物理表
+        if has_union:
+            # UNION 步骤：按分支收集源表（带分支归属）
+            for b in ub_list:
+                bidx = b.get("branch_index", 0)
+                for j in b.get("source_tables", []):
+                    src_full = j.get("source_table", "")
+                    if not src_full or src_full.startswith("(subquery:"):
+                        continue
+                    if _norm(src_full) in target_tables_set:
+                        continue
+                    if src_full.upper() in cte_names_upper:
+                        continue
+                    # 同表在不同分支都显示（用 分支+表 做去重 key）
+                    dedup_key = (bidx, _norm(src_full))
+                    if dedup_key in seen_sources:
+                        continue
+                    seen_sources.add(dedup_key)
+                    sch, tbl = _split_schema_table(src_full)
+                    relation = _join_type_label(j.get("join_type", ""), j.get("join_condition", ""))
+                    entity_rows.append([
+                        sch, tbl, j.get("alias", ""), "",
+                        target_schema, target_cn, target_table,
+                        relation, "", "", f"分支{bidx}", "",
+                    ])
+        else:
+            # 非 UNION：主查询 JOIN（物理表），过滤子查询假名
+            for j in joins:
+                src_full = j.get("source_table", "")
+                if not src_full or src_full.startswith("(subquery:"):
+                    continue
+                if _norm(src_full) in seen_sources or _norm(src_full) in target_tables_set:
+                    continue
+                if src_full.upper() in cte_names_upper:
+                    continue
+                seen_sources.add(_norm(src_full))
+                sch, tbl = _split_schema_table(src_full)
+                relation = _join_type_label(j.get("join_type", ""), j.get("join_condition", ""))
+                entity_rows.append([
+                    sch, tbl, j.get("alias", ""), "",
+                    target_schema, target_cn, target_table,
+                    relation, "", "", "", "",
+                ])
+
+        # CTE 内部物理表（UNION 和非 UNION 都可能有 CTE）
         for cte in ctes:
             for st in cte.get("source_tables", []):
                 tname = st.get("name", "")
                 if not tname or _norm(tname) in seen_sources or _norm(tname) in target_tables_set:
                     continue
-                # 排除 CTE 名引用（嵌套 CTE）
                 if tname.upper() in cte_names_upper:
                     continue
                 seen_sources.add(_norm(tname))

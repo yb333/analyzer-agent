@@ -2680,6 +2680,9 @@ def analyze_quality(
         cte_names_in_step = {c.name.upper() for c in parsed.ctes}
         unresolved_tables = []
         for j in parsed.source_tables:
+            # 过滤子查询假名（不是物理表，不该进 schema 检查）
+            if j.source_table.startswith("(subquery:"):
+                continue
             has_schema = "." in j.source_table
             is_cte = j.source_table.split(".")[-1].upper() in cte_names_in_step
             if not has_schema and not is_cte:

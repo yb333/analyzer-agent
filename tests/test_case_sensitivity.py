@@ -232,12 +232,19 @@ SELECT b.x FROM ods.tab1 b"""},
         import openpyxl
         wb = openpyxl.load_workbook(Path(out) / "mapping.xlsx", read_only=True)
         ws = wb["实体级mapping"]
-        # 收集所有源表物理表名
-        src_tables = []
+        # 收集源表物理表名 + 分支归属（UNION 场景同表在不同分支各显示一次是正确的）
+        rows_data = []
         for row in ws.iter_rows(min_row=2, values_only=True):
             if row and row[1]:  # 源表物理表名列
-                src_tables.append(str(row[1]).strip().lower())
+                tbl = str(row[1]).strip().lower()
+                branch = str(row[10] or "").strip() if len(row) > 10 else ""  # 执行路径列=分支
+                rows_data.append((branch, tbl))
         wb.close()
-        # 归一化后不应有重复
-        assert len(src_tables) == len(set(src_tables)), \
-            f"实体级 mapping 物理源表有大小写重复: {src_tables}"
+        # 同一分支内归一化后不应有重复（跨分支允许同表重复，因为分支是不同场景）
+        from collections import defaultdict
+        by_branch = defaultdict(list)
+        for br, tbl in rows_data:
+            by_branch[br].append(tbl)
+        for br, tables in by_branch.items():
+            assert len(tables) == len(set(tables)), \
+                f"分支'{br}'内物理源表有大小写重复: {tables}"

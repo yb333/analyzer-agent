@@ -2040,8 +2040,13 @@ function renderFieldMapping() {
     if (originSources.length > 0) {
       srcText = originSources.map(function(s) {
         var tbl = (s.table || '').split('.').pop();
-        return tbl + '.' + (s.field || '?');
-      }).join(', ');
+        var base = tbl + '.' + (s.field || '?');
+        // UNION 分支来源标注分支号（纯文本，单元格会 escapeHtml）
+        if (s.branch) {
+          return '[分支' + s.branch + '] ' + base;
+        }
+        return base;
+      }).join(' / ');
     }
 
     // 角色标签（加工类型 + 关联/过滤/分组）
@@ -2434,6 +2439,10 @@ function openDetail(fieldName, scenario) {
           var isSubquery = srcTable.startsWith('(subquery:') || srcTable.startsWith('(子查询');
 
           s += '<div style="font-size:13px;color:var(--text-secondary);line-height:1.7;">';
+          // UNION 分支标记
+          if (src.branch) {
+            s += '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600;color:white;background:#6366f1;margin-right:4px;">分支' + src.branch + '</span>';
+          }
           s += '← <code style="color:var(--accent);font-size:13px;">' + escapeHtml(src.field || '?') + '</code>';
           if (isSubquery) {
             s += ' from <span style="color:#8b5cf6;">📦子查询</span>';
