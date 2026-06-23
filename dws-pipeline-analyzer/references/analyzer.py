@@ -808,13 +808,14 @@ def _build_cte_alias_map(select_node, ctes: list) -> dict[str, str]:
     return alias_map
 
 
-def _extract_subquery_tables(subquery_node, depth=0) -> list[tuple[str, str]]:
-    """递归提取子查询内部的所有物理表。
+def _extract_subquery_tables(subquery_node, depth=0) -> list[tuple[str, str, str]]:
+    """递归提取子查询内部的所有物理表，并标记内部主从角色。
 
     支持嵌套子查询（子查询内部的子查询）。
     最大递归深度 10 层。
 
-    Returns: [(table_name, alias), ...]
+    Returns: [(table_name, alias, inner_role), ...]
+        inner_role: "main"（内部 FROM 主表）或 "secondary"（内部 JOIN 从表）
     """
     if depth > 10:
         return []
@@ -824,34 +825,36 @@ def _extract_subquery_tables(subquery_node, depth=0) -> list[tuple[str, str]]:
     if not inner_select:
         return tables
 
-    # 内部 FROM 表
+    # 内部 FROM 表（主表）
     inner_from = inner_select.args.get("from_")
     if inner_from:
         inner_main = inner_from.this
         if isinstance(inner_main, exp.Table):
             tname = ".".join(_clean_name(p.name) for p in inner_main.parts)
             alias = _clean_name(inner_main.alias).lower() if inner_main.alias else ""
-            tables.append((tname, alias or tname.split(".")[-1]))
+            tables.append((tname, alias or tname.split(".")[-1], "main"))
         elif isinstance(inner_main, exp.Subquery):
-            # 嵌套子查询：递归
-            tables.extend(_extract_subquery_tables(inner_main, depth + 1))
+            # 嵌套子查询：递归（嵌套层的主表在更深处，但相对本层也是主表）
+            for tn, al, _ in _extract_subquery_tables(inner_main, depth + 1):
+                tables.append((tn, al, "main"))
 
-        # 内部逗号 JOIN
+        # 内部逗号 JOIN（从表）
         for extra in inner_from.expressions:
             if isinstance(extra, exp.Table):
                 tname = ".".join(_clean_name(p.name) for p in extra.parts)
                 alias = _clean_name(extra.alias).lower() if extra.alias else ""
-                tables.append((tname, alias or tname.split(".")[-1]))
+                tables.append((tname, alias or tname.split(".")[-1], "secondary"))
 
-    # 内部 JOIN 表
+    # 内部 JOIN 表（从表）
     for join_node in inner_select.args.get("joins", []):
         jt = join_node.this
         if isinstance(jt, exp.Table):
             tname = ".".join(_clean_name(p.name) for p in jt.parts)
             alias = _clean_name(jt.alias).lower() if jt.alias else ""
-            tables.append((tname, alias or tname.split(".")[-1]))
+            tables.append((tname, alias or tname.split(".")[-1], "secondary"))
         elif isinstance(jt, exp.Subquery):
-            tables.extend(_extract_subquery_tables(jt, depth + 1))
+            for tn, al, _ in _extract_subquery_tables(jt, depth + 1):
+                tables.append((tn, al, "secondary"))
 
     return tables
 
@@ -908,11 +911,12 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
                 subquery_role="主表",
             ))
             # 递归提取子查询内部的物理表
-            for inner_table_name, inner_alias in sub_tables:
+            # 透传规则：子查询是主表 → 内部主表也是主表(FROM_SUBQUERY_MAIN)，内部从表是从表(FROM_SUBQUERY)
+            for inner_table_name, inner_alias, inner_role in sub_tables:
                 joins.append(ParsedJoin(
                     source_table=inner_table_name,
                     alias=inner_alias,
-                    join_type="FROM_SUBQUERY",
+                    join_type="FROM_SUBQUERY_MAIN" if inner_role == "main" else "FROM_SUBQUERY",
                     join_condition="",
                 ))
 
@@ -950,7 +954,8 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
                 subquery_tables=sub_tables2,
                 subquery_role="从表",
             ))
-            for inner_table_name, inner_alias in sub_tables2:
+            # 透传规则：子查询是从表 → 内部所有表都是从表(JOIN_SUBQUERY_INNER)
+            for inner_table_name, inner_alias, _inner_role in sub_tables2:
                 joins.append(ParsedJoin(
                     source_table=inner_table_name,
                     alias=inner_alias,
@@ -1934,16 +1939,13 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
 
         target_full = _normalize_table_name(rule.target_schema, rule.target_table)
 
-        # SQL 中解析出的源表（主查询的 FROM/JOIN，不含 CTE/子查询内部）
+        # SQL 中解析出的源表（主查询 FROM/JOIN + 子查询内部物理表；只过滤子查询假名）
         parsed = parsed_map.get(rule.rule_code)
         sql_source_tables = []
         all_sql_tables = []  # 全树扫描所有表（含子查询），用于自引用检测
         for j in parsed.source_tables:
-            # 过滤子查询假名（不是物理表）
+            # 过滤子查询假名（不是物理表）；子查询内部的物理表是真实源表，保留
             if j.source_table.startswith("(subquery:"):
-                continue
-            # 过滤子查询内部表（FROM_SUBQUERY / JOIN_SUBQUERY_INNER）
-            if "SUBQUERY" in j.join_type.upper() and j.join_type != "FROM":
                 continue
             if _norm_table(j.source_table) not in [_norm_table(t) for t in sql_source_tables]:
                 sql_source_tables.append(j.source_table)
@@ -2732,13 +2734,10 @@ def build_data_flow(
         if not parsed:
             continue
 
-        # 源表（主查询，过滤子查询假名和子查询内部表）
+        # 源表（主查询 + 子查询内部物理表；只过滤子查询假名）
         for j in parsed.source_tables:
-            # 过滤子查询假名（不是物理表）
+            # 过滤子查询假名（不是物理表）；子查询内部的物理表(FROM_SUBQUERY* / JOIN_SUBQUERY_INNER)是真实源表，保留
             if j.source_table.startswith("(subquery:"):
-                continue
-            # 过滤子查询内部表（FROM_SUBQUERY / JOIN_SUBQUERY_INNER）
-            if "SUBQUERY" in j.join_type.upper() and j.join_type != "FROM":
                 continue
             if _norm_table(j.source_table) not in seen_tables:
                 seen_tables.add(_norm_table(j.source_table))

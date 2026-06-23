@@ -281,7 +281,11 @@ class TestEndToEnd:
         assert "auxFieldsTable" in html, "HTML 应含辅助字段表格"
 
     def test_subquery_filtered_from_tables(self, tmp_output):
-        """回归: data_flow.tables 不含子查询假名和子查询内部表。"""
+        """回归: data_flow.tables 过滤子查询假名，但保留内部物理表（真实数据血缘）。
+
+        子查询是 SQL 写法技巧，底层物理表才是真实数据来源，应显示在 tables 里。
+        只有 (subquery:xxx) 假名（不是物理表）需要过滤。
+        """
         from analyzer import parse_single_sql, build_data_flow
         sql = """SELECT t.x, f.z FROM (
     SELECT a.x FROM tbl_a a LEFT JOIN tbl_b b ON a.id = b.id
@@ -302,8 +306,9 @@ class TestEndToEnd:
         df = build_data_flow(rules, parsed_map)
         names = [t["name"] for t in df["tables"]]
         assert "(subquery:t)" not in names, f"子查询假名不应在 tables: {names}"
-        assert "tbl_a" not in names, f"子查询内部表 tbl_a 不应在 tables: {names}"
-        assert "tbl_b" not in names, f"子查询内部表 tbl_b 不应在 tables: {names}"
+        # 子查询内部物理表是真实数据来源，应显示（主从透传：tbl_a 是内部主表，tbl_b 是内部从表）
+        assert "tbl_a" in names, f"子查询内部主表 tbl_a 应在 tables: {names}"
+        assert "tbl_b" in names, f"子查询内部从表 tbl_b 应在 tables: {names}"
         assert "dim_tbl" in names, f"外部JOIN表 dim_tbl 应在 tables: {names}"
 
     # ── 输出目录命名（任务B）──────────────────────────────────
