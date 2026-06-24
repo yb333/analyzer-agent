@@ -222,3 +222,57 @@ class TestUnionBranchesStructure:
         order_id = next(c for c in b1["columns"] if c["alias"] == "order_id")
         assert order_id["physical_sources"], "序列化后 physical_sources 应非空"
         assert "orders_a" in order_id["physical_sources"][0]["table"]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 契约 4：UNION 场景的 join_paths（关联路径不丢失）
+# ═══════════════════════════════════════════════════════════════
+
+class TestUnionJoinPaths:
+    """UNION 场景下，每个分支的主表→从表关联路径（join_paths）必须构建。
+
+    Bug: _parse_set_operation 没调用 _build_join_paths，导致 UNION 场景下
+    字段映射详情丢失关联信息（从表字段不显示与主表的关联条件）。
+    """
+
+    def test_union_has_join_paths(self):
+        """UNION 场景的 result.join_paths 不应为空"""
+        parsed = parse_single_sql(UNION_SUBQUERY_SQL, "dws")
+        assert parsed.join_paths, \
+            f"UNION 场景 join_paths 不应为空，实际 {parsed.join_paths}"
+
+    def test_union_branch_join_links_present(self):
+        """UNION 每个分支应含从表到主表的关联路径（ON 条件）"""
+        parsed = parse_single_sql(UNION_SUBQUERY_SQL, "dws")
+        # 分支1的 dim_region（d1）应有关联路径到主表
+        has_d1_link = any(
+            "dim_region" in str(p.get("to_table", "")).lower()
+            or "d1" in str(p.get("to_alias", "")).lower()
+            for paths in parsed.join_paths.values()
+            for p in paths.get("path", [])
+        )
+        assert has_d1_link, \
+            f"分支1的 dim_region 关联路径应存在，实际 join_paths={parsed.join_paths}"
+
+    def test_union_join_paths_in_data_flow(self):
+        """UNION 步骤的 data_flow 应携带 join_paths"""
+        rule = _make_rule(UNION_SUBQUERY_SQL)
+        parsed_map = {"R1": parse_single_sql(UNION_SUBQUERY_SQL, "dws")}
+        df = build_data_flow([rule], parsed_map)
+        step = df["steps"][0]
+        assert step.get("join_paths"), \
+            f"UNION 步骤的 join_paths 不应为空，实际 {step.get('join_paths')}"
+
+    def test_union_branch_join_paths_in_union_branches(self):
+        """每个 union_branch 应携带自己的 join_paths（分支级关联路径）"""
+        parsed = parse_single_sql(UNION_SUBQUERY_SQL, "dws")
+        for b in parsed.union_branches:
+            assert "join_paths" in b, f"分支{b['branch_index']} 应有 join_paths 字段"
+            # 分支1的 dim_region 是 LEFT JOIN 从表，应在 join_paths 里有路径
+            if b["branch_index"] == 1:
+                branch_jp = b.get("join_paths", {})
+                # 至少有一个从表关联路径
+                has_link = any(
+                    info.get("path") for info in branch_jp.values()
+                )
+                assert has_link, f"分支1应有关联路径，实际 {branch_jp}"

@@ -721,10 +721,13 @@ def _parse_set_operation(tree, sqlglot_dialect: str, comment_alias_map: dict, ra
         branch_joins = _extract_joins(branch, branch)
         all_joins.extend(branch_joins)
         branch_columns = _extract_select_columns(branch, comment_alias_map)
+        # 为每个分支构建 join_paths（主表→从表关联路径），避免 UNION 场景丢失关联信息
+        branch_join_paths = _build_join_paths(branch_joins)
         union_branches.append({
             "branch_index": idx + 1,
             "source_tables": branch_joins,
             "columns": branch_columns,
+            "join_paths": branch_join_paths,
         })
 
     # 去重（同名同别名）
@@ -737,6 +740,9 @@ def _parse_set_operation(tree, sqlglot_dialect: str, comment_alias_map: dict, ra
             deduped.append(j)
     result.source_tables = deduped
     result.union_branches = union_branches
+    # result.join_paths 取第一分支的（与 select_columns 取第一分支保持一致口径）
+    if union_branches:
+        result.join_paths = dict(union_branches[0]["join_paths"])
 
     # select_columns 以第一个分支为准
     first_branch = branches[0] if branches else None
@@ -2968,6 +2974,7 @@ def build_data_flow(
                          "physical_sources": c.source_fields}
                         for c in b["columns"]
                     ],
+                    "join_paths": b.get("join_paths", {}),
                 }
                 for b in parsed.union_branches
             ] if parsed.union_branches else [],
