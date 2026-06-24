@@ -405,6 +405,7 @@ def build_report_data(knowledge):
             "rule_code": s.get("rule_code", ""),
             "exec_sequence": s.get("exec_sequence", 0),
             "join_paths": merged_jp,
+            "join_key_lineage": df_step.get("join_key_lineage", {}),
         }
 
     # ── field_chain_map (字段 → 完整链路树，供详情面板用) ──
@@ -527,6 +528,7 @@ def build_report_data(knowledge):
             "sources": sources,
             "raw_sql": raw_sql,
             "join_paths": si.get("join_paths", {}),
+            "join_key_lineage": si.get("join_key_lineage", {}),
         })
 
     # ── field_details (CTE 穿透血缘链) ──

@@ -3175,6 +3175,55 @@ def _find_producing_step(table_name: str, field_name: str, steps_list: list, rul
     return ""
 
 
+def enrich_join_key_lineage(
+    data_flow: dict,
+    rules: list[RawRule],
+    parsed_map: dict,
+    topology: dict,
+    field_mappings: dict,
+) -> None:
+    """对 data_flow 的每个 step，计算关联键的跨步骤追溯链，注入 step.join_key_lineage。
+
+    只对"中间表关联键"（join_usage 里 table 是中间表的字段）算追溯，
+    物理源表的关联键不需要追溯（它就是源端）。
+
+    直接修改 data_flow["steps"] 的每个 step，加 "join_key_lineage" 字段：
+        {field_name: [追溯链树, ...]}  # 同名关联键可能多个（不同 JOIN）
+    """
+    steps_list = topology.get("steps", [])
+    for step in data_flow.get("steps", []):
+        step_id = step.get("step_id", "")
+        join_usage = step.get("join_usage", [])
+        if not join_usage:
+            continue
+        key_lineage = {}
+        seen_keys = set()
+        for ju in join_usage:
+            field = ju.get("field", "")
+            if not field:
+                continue
+            # 只追溯中间表的关联键（物理源表不需要）
+            for tbl_info in ju.get("tables", []):
+                tbl = tbl_info.get("table", "")
+                alias = tbl_info.get("alias", "")
+                norm_tbl = _norm_table(tbl)
+                is_intermediate = norm_tbl.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+                if not is_intermediate:
+                    continue
+                trace_key = (field.lower(), norm_tbl)
+                if trace_key in seen_keys:
+                    continue
+                seen_keys.add(trace_key)
+                chain = build_join_key_lineage(
+                    step_id, field, alias, rules, parsed_map,
+                    topology, data_flow, field_mappings,
+                )
+                if chain and chain.get("children"):
+                    key_lineage.setdefault(field.lower(), []).append(chain)
+        if key_lineage:
+            step["join_key_lineage"] = key_lineage
+
+
 # ═══════════════════════════════════════════════════════════════
 # 辅助: detect_patterns() — 加工模式标签自动检测
 # ═══════════════════════════════════════════════════════════════
@@ -3762,6 +3811,13 @@ def main():
     print(f"  精确匹配: {stats['match_count']}")
     print(f"  仅 SQL: {len(stats['only_in_sql'])}")
     print(f"  仅 Excel: {len(stats['only_in_excel'])}")
+    print()
+
+    # ── Step 5c: 关联键跨步骤追溯 ──
+    print("Step 5c: 构建关联键追溯链...")
+    enrich_join_key_lineage(data_flow, rules, parsed_map, topology, field_mappings)
+    traced = sum(1 for s in data_flow["steps"] if s.get("join_key_lineage"))
+    print(f"  含追溯链的步骤: {traced}")
     print()
 
     # ── Step 6: 质量分析 ──
