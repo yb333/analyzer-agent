@@ -875,15 +875,21 @@ def _resolve_branch_columns_physical(union_branches: list) -> None:
                 sf_alias = (sf.get("alias", "") or "").upper()
                 sf_field = sf.get("field", "")
                 if sf_alias in subquery_field_map:
-                    # 子查询穿透
+                    # 子查询穿透：alias 用内部物理表的别名（join_paths 的 key 是内部别名）
                     fm = subquery_field_map[sf_alias]
                     key = (sf_field or col.alias or "").upper()
                     if key in fm:
-                        phys_sources.append({"table": fm[key][0], "field": fm[key][1], "branch": branch["branch_index"]})
+                        # 查内部物理表的别名（用于 join_paths 桥接查找）
+                        inner_table = fm[key][0]
+                        inner_alias = next((a.upper() for a, t in alias_to_table.items()
+                                            if _norm_table(t) == _norm_table(inner_table)), sf_alias)
+                        phys_sources.append({"table": inner_table, "field": fm[key][1],
+                                             "alias": inner_alias, "branch": branch["branch_index"]})
                         continue
-                # 普通物理表别名
+                # 普通物理表别名：保留外层 alias（join_paths 的 key 就是这个别名）
                 physical = alias_to_table.get(sf_alias, sf_alias)
-                phys_sources.append({"table": physical, "field": sf_field, "branch": branch["branch_index"]})
+                phys_sources.append({"table": physical, "field": sf_field,
+                                     "alias": sf_alias, "branch": branch["branch_index"]})
             # 写回 column：source_fields 在 UNION 分支中被替换为物理穿透来源
             # （{table, field, branch} 结构，替代原有的别名层 {alias, field}）。
             # 这是设计意图：union_branches 的 columns 专供物理穿透，不再保留别名层。

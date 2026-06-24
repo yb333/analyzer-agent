@@ -331,6 +331,7 @@ def build_report_data(knowledge):
                     fmap.setdefault(col_name, []).append({
                         "table": ps.get("table", ""),
                         "field": ps.get("field", ""),
+                        "alias": ps.get("alias", ""),
                         "branch": bidx,
                     })
         union_branch_sources[sid] = fmap
@@ -346,7 +347,7 @@ def build_report_data(knowledge):
         if ub:
             fname = (field_data.get("target_field", "") or "").lower()
             if fname in ub:
-                return [{"table": s["table"], "alias": "", "field": s["field"],
+                return [{"table": s["table"], "alias": s.get("alias", ""), "field": s["field"],
                          "branch": s["branch"]} for s in ub[fname]]
 
         amap = alias_table_map.get(step_id, {})
