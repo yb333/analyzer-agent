@@ -357,6 +357,31 @@ def _norm_table(name: str) -> str:
     return name.strip().lower()
 
 
+# 临时表/中间表判断的正则（匹配 tmp/temp 开头，或含 _tmp/_temp + 数字/分隔符）
+_INTERMEDIATE_TABLE_PATTERN = re.compile(
+    r"(?:^tmp\d*$|_tmp\d*$|^temp\d*$|_temp\d*$|^tmp_|_tmp_|^temp_|_temp_)",
+    re.IGNORECASE,
+)
+
+
+def _is_intermediate_table(table_name: str) -> bool:
+    """判断表名是否为临时表/中间表（需要穿透追溯的）。
+
+    覆盖命名格式：
+    - tmp开头: tmp, tmp1, tmp_xxx
+    - temp开头: temp, temp1, temp_xxx
+    - tmp/temp后缀: xxxx_xxxx_tmp1, xxxx_temp2（实际生产常见格式）
+    - 带分隔符: xxxx_tmp_xxx, xxxx_temp_xxx
+
+    所有临时表判断都必须走这个函数，禁止直接 startswith。
+    """
+    if not table_name:
+        return False
+    # 去掉 schema 前缀，只判断表名部分
+    short = _norm_table(table_name).split(".")[-1]
+    return bool(_INTERMEDIATE_TABLE_PATTERN.search(short))
+
+
 def _table_match(name1: str, name2: str) -> bool:
     """表名匹配（大小写不敏感）。所有表名比较都用这个函数，禁止直接 == 或 in。
 
@@ -2873,7 +2898,7 @@ def build_data_flow(
                 all_tables.append({
                     "schema": s_schema,
                     "name": s_name,
-                    "role": "intermediate" if j.source_table.startswith("tmp") else "source",
+                    "role": "intermediate" if _is_intermediate_table(j.source_table) else "source",
                     "layer": _infer_layer(s_schema, s_name),
                 })
 
@@ -2893,7 +2918,7 @@ def build_data_flow(
                     all_tables.append({
                         "schema": s_schema,
                         "name": s_name,
-                        "role": "intermediate" if tname.startswith("tmp") else "source",
+                        "role": "intermediate" if _is_intermediate_table(tname) else "source",
                         "layer": _infer_layer(s_schema, s_name),
                     })
 
@@ -3049,7 +3074,7 @@ def build_join_key_lineage(
 
     # 2. 判断是否物理源表（ods/dim 层或非中间表，子查询假名不算物理表）
     norm_table = _norm_table(resolved_table)
-    is_physical = (not norm_table.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+    is_physical = (not _is_intermediate_table(resolved_table)
                    and not resolved_table.startswith("(subquery:"))
 
     # steps_list 提前定义（子查询穿透和 lineage 查找都要用）
@@ -3148,7 +3173,7 @@ def build_join_key_lineage(
         # 解析 src_table_alias（用产出步骤的 alias 映射）
         src_resolved = producing_alias_map.get(src_table_alias.upper(), src_table_alias)
         src_norm = _norm_table(src_resolved)
-        src_is_physical = (not src_norm.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+        src_is_physical = (not _is_intermediate_table(src_resolved)
                           and not src_resolved.startswith("(subquery:"))
 
         child_node = {
@@ -3249,7 +3274,7 @@ def _trace_subquery_sources(
         sf_field = sf.get("field", "")
         src_table = sq_alias_map.get(sf_alias, sf_alias)
         src_norm = _norm_table(src_table)
-        src_is_physical = (not src_norm.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+        src_is_physical = (not _is_intermediate_table(src_table)
                           and not src_table.startswith("(subquery:"))
 
         child = {
@@ -3349,7 +3374,7 @@ def enrich_join_key_lineage(
                 tbl = tbl_info.get("table", "")
                 alias = tbl_info.get("alias", "")
                 norm_tbl = _norm_table(tbl)
-                is_intermediate = norm_tbl.startswith(("dws.tmp", "tmp", "dws.temp", "temp"))
+                is_intermediate = _is_intermediate_table(tbl)
                 if not is_intermediate:
                     continue
                 trace_key = (field.lower(), norm_tbl)
