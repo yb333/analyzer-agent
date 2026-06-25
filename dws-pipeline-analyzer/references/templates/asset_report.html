@@ -2499,11 +2499,21 @@ function openDetail(fieldName, scenario) {
           }
         });
 
-      // 关联键跨步骤追溯链（join_key_lineage）—— chain 级别渲染
-      // 这些关联键决定了当前字段能否取到，追溯它们的跨步骤来源
+      // 关联键跨步骤追溯链（join_key_lineage）—— 仅对从表字段显示
+      // 主表一路带过来的字段不涉及关联，不需要显示关联键追溯（避免冗余）
+      var showJoinKeyLineage = false;
+      var jp2 = c.join_paths || {};
+      (c.sources || []).forEach(function(src) {
+        var sa = (src.alias || '').toUpperCase();
+        var jpInfo = jp2[sa] || Object.keys(jp2).find(function(k){return k.toUpperCase()===sa;});
+        if (jpInfo && jp2[jpInfo] && jp2[jpInfo].is_primary === false) {
+          showJoinKeyLineage = true;
+        }
+      });
+
       var jkl = c.join_key_lineage || {};
       var jklKeys = Object.keys(jkl);
-      if (jklKeys.length > 0) {
+      if (jklKeys.length > 0 && showJoinKeyLineage) {
         jklKeys.forEach(function(fieldKey) {
           var chains2 = jkl[fieldKey] || [];
           chains2.forEach(function(traceChain) {
