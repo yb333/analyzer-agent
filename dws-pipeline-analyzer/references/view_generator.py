@@ -1226,6 +1226,22 @@ def _build_lineage_layout(topo, df, bl=None):
     node_meta = {}
     node_id_counter = 0
 
+    # 找出"多步骤串行写同一目标表"的场景：这些步骤需要错行避免连线交叉
+    # key: norm(target_table), value: 写它的步骤列表（按 exec_sequence 排序）
+    target_writers = {}
+    for s in steps_list:
+        tf = _norm(_schema_table(s.get("target_schema", ""), s.get("target_table", "")))
+        target_writers.setdefault(tf, []).append(s["step_id"])
+    # 只有写同一 target 的步骤 > 1 个时，第 2 个开始需要错行
+    stagger_steps = set()  # 需要下移的 step_id
+    for tf, writer_ids in target_writers.items():
+        if len(writer_ids) > 1:
+            # 按 exec_sequence 排序，奇数位（第2、4...个）下移
+            sorted_writers = sorted(writer_ids, key=lambda sid: step_seq_map.get(sid, 0))
+            for i, sid in enumerate(sorted_writers):
+                if i % 2 == 1:  # 第2、4...个错行
+                    stagger_steps.add(sid)
+
     for col in sorted(col_nodes.keys()):
         x = col_to_x.get(col, MARGIN_LEFT)
         col_nids = sorted(col_nodes[col], key=lambda n: (nodes[n]["type"] != "step", n))
@@ -1235,12 +1251,9 @@ def _build_lineage_layout(topo, df, bl=None):
 
         for ni, name in enumerate(col_nids):
             y = start_y + ni * (NODE_HEIGHT + NODE_GAP)
-            # 步骤节点按 exec_sequence 错行：奇数步骤下移一行，避免连线全挤同一水平线
-            ninfo = nodes.get(name, {})
-            if ninfo.get("type") == "step":
-                step_seq = step_seq_map.get(name, 0)
-                if step_seq % 2 == 1:
-                    y += NODE_HEIGHT + NODE_GAP
+            # 只有"多步骤串行写同一表"的第2+步才错行，其他步骤保持同一行
+            if name in stagger_steps:
+                y += NODE_HEIGHT + NODE_GAP
             node_id = f"n_{node_id_counter}"
             node_id_counter += 1
             positions[name] = node_id
