@@ -79,6 +79,11 @@ def search_field_usage(excel_path: str, keywords: list) -> list:
         if not rules:
             continue
 
+        # 预扫描：检查该规则组的 SQL 文本是否含任一关键字，不含则跳过（省解析时间）
+        all_sql = " ".join(r.query_sql or "" for r in rules).lower()
+        if not any(k in all_sql for k in keywords_lower):
+            continue
+
         # 完整解析（复用 analyzer 全部能力，含 enrich 追溯）
         sqls = [r.query_sql for r in rules if r.query_sql]
         dialect = detect_dialect(sqls)
@@ -235,47 +240,54 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
 def _get_physical_source(f, parsed_map=None, rules=None):
     """从 field 的 physical_source（enrich 注入）取物理源表.字段。
 
-    如果 physical_source 停在 CTE 别名（如 c.amount），用 lineage 的
-    cte_source_fields 穿透到 CTE 内部的物理表。
+    如果 physical_source 停在 CTE 别名（如 c.total），在整个规则组的
+    CTE 里找内部物理来源（跨步骤，CTE 可能在前面的步骤定义）。
     """
     ps_list = f.get("physical_source", [])
     lineages = f.get("lineage", [])
 
-    # CTE 穿透信息（lineage 里的 cte_source_fields + cte_name）
+    # 收集所有 CTE 的 {cte_name(UPPER): {fields_map, alias_to_table}}
+    all_ctes = {}
+    if parsed_map:
+        for rule in (rules or []):
+            p = parsed_map.get(rule.rule_code)
+            if not p:
+                continue
+            for ct in p.ctes:
+                cname = (ct.name or "").upper()
+                if not cname:
+                    continue
+                alias_to_table = {}
+                for st in ct.source_tables:
+                    if st.get("alias") and st.get("name"):
+                        alias_to_table[st["alias"].upper()] = st["name"]
+                fields_map = {}
+                for cf in ct.fields:
+                    fname = (cf.get("name") or "").upper()
+                    if fname:
+                        fields_map[fname] = {
+                            "source_fields": cf.get("source_fields", []),
+                            "alias_to_table": alias_to_table,
+                        }
+                all_ctes[cname] = {"fields_map": fields_map, "alias_to_table": alias_to_table}
+
+    # 当前 field lineage 里的 CTE 信息（同步骤的 CTE）
     cte_source_fields = None
-    cte_name = ""
     for l in lineages:
         if l.get("cte_source_fields"):
             cte_source_fields = l["cte_source_fields"]
-            cte_name = l.get("cte_name", "")
             break
-
-    # 构建 CTE 内部 alias→物理表 映射
-    cte_alias_map = {}
-    if cte_name and parsed_map:
-        for rule in (rules or []):
-            p = parsed_map.get(rule.rule_code)
-            if p:
-                for ct in p.ctes:
-                    if ct.name.upper() == cte_name.upper():
-                        for st in ct.source_tables:
-                            if st.get("alias") and st.get("name"):
-                                cte_alias_map[st["alias"].upper()] = st["name"]
 
     if not ps_list:
         # 回退：用 lineage 第一项
         if lineages:
             src = lineages[0].get("source_table", "")
             field = lineages[0].get("source_field", "")
-            # CTE 穿透
-            if cte_source_fields and cte_alias_map:
-                parts = []
-                for csf in cte_source_fields:
-                    csf_alias = (csf.get("alias", "") or "").upper()
-                    csf_field = csf.get("field", "")
-                    phys = cte_alias_map.get(csf_alias, csf_alias)
-                    parts.append(f"{phys}.{csf_field}")
-                return "；".join(parts) if parts else f"{src}.{field}"
+            # 同步骤 CTE 穿透
+            if cte_source_fields and all_ctes:
+                parts = _resolve_cte_sources(cte_source_fields, all_ctes)
+                if parts:
+                    return "；".join(parts)
             if src and field:
                 return f"{src}.{field}"
         return ""
@@ -284,20 +296,58 @@ def _get_physical_source(f, parsed_map=None, rules=None):
     for ps in ps_list:
         tbl = ps.get("table", "")
         fld = ps.get("field", "")
-        # 如果 table 不是物理表（CTE 别名如 c），用 CTE 穿透
-        if tbl and "." not in tbl and cte_source_fields and cte_alias_map:
-            for csf in cte_source_fields:
-                if (csf.get("field", "")).lower() == fld.lower():
-                    csf_alias = (csf.get("alias", "") or "").upper()
-                    phys = cte_alias_map.get(csf_alias, csf_alias)
-                    parts.append(f"{phys}.{csf_field if False else fld}")
-                    break
-            else:
-                if tbl and fld:
-                    parts.append(f"{tbl}.{fld}")
-        elif tbl and fld:
+        # 如果 table 是 CTE 别名（不含.），穿透 CTE
+        if tbl and "." not in tbl and all_ctes:
+            resolved = _resolve_cte_field(tbl, fld, all_ctes)
+            if resolved:
+                parts.extend(resolved)
+                continue
+        # 同步骤 CTE 穿透（lineage 有 cte_source_fields）
+        if cte_source_fields and all_ctes and "." not in tbl:
+            resolved = _resolve_cte_sources(cte_source_fields, all_ctes)
+            if resolved:
+                parts.extend(resolved)
+                continue
+        if tbl and fld:
             parts.append(f"{tbl}.{fld}")
     return "；".join(parts) if parts else ""
+
+
+def _resolve_cte_field(cte_alias, field_name, all_ctes):
+    """穿透 CTE 别名到物理表（跨步骤，在所有 CTE 里找）。"""
+    # CTE 别名可能就是 CTE 名（如 agg），也可能在 lineage 的 cte_name 里
+    # 遍历所有 CTE，尝试匹配
+    for cname, ct_info in all_ctes.items():
+        fields_map = ct_info["fields_map"]
+        alias_to_table = ct_info["alias_to_table"]
+        fld_upper = (field_name or "").upper()
+        if fld_upper in fields_map:
+            src_fields = fields_map[fld_upper]["source_fields"]
+            results = []
+            for sf in src_fields:
+                sf_alias = (sf.get("alias", "") or "").upper()
+                sf_field = sf.get("field", "")
+                phys = alias_to_table.get(sf_alias, sf_alias)
+                results.append(f"{phys}.{sf_field}")
+            return results
+    return None
+
+
+def _resolve_cte_sources(cte_source_fields, all_ctes):
+    """从 cte_source_fields 解析物理来源。"""
+    parts = []
+    for csf in cte_source_fields:
+        csf_alias = (csf.get("alias", "") or "").upper()
+        csf_field = csf.get("field", "")
+        # 在所有 CTE 的 alias_to_table 里找
+        for cname, ct_info in all_ctes.items():
+            alias_to_table = ct_info["alias_to_table"]
+            if csf_alias in alias_to_table:
+                parts.append(f"{alias_to_table[csf_alias]}.{csf_field}")
+                break
+        else:
+            parts.append(f"{csf_alias.lower()}.{csf_field}")
+    return parts
 
 
 def _is_intermediate(table_name):
