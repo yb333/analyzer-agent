@@ -3577,6 +3577,7 @@ def _extract_physical_sources_from_chain(chain: dict) -> list:
         result.append({
             "table": leaf.get("table", ""),
             "field": leaf.get("field", ""),
+            "step_id": leaf.get("step_id", ""),  # 叶节点所在步骤（CTE 穿透用）
             "alias": leaf.get("alias", ""),
             "transform": (processing or leaf).get("transform", "direct"),
             "raw_sql": (processing or leaf).get("raw_sql", ""),
