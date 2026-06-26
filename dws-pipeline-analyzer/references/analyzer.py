@@ -3539,9 +3539,13 @@ def enrich_field_physical_sources(
             continue
         first_src = lineages[0]
         src_alias = first_src.get("source_table", "")
+        # 追溯用 source_field（加工前的字段名），不是 target_field
+        # 因为加工后字段名可能变了（如 SUM(amount) AS total_amount），
+        # 上游步骤里存的是 amount 不是 total_amount
+        src_field = first_src.get("source_field", "") or fname
 
         chain = build_join_key_lineage(
-            step_id, fname, src_alias, rules, parsed_map,
+            step_id, src_field, src_alias, rules, parsed_map,
             topology, data_flow, field_mappings,
         )
         if not chain:
