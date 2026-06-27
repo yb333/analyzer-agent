@@ -1899,6 +1899,9 @@ function initLineageZoom() {
   var wrapper = document.getElementById('lineageWrapper');
   var svgEl = wrapper ? wrapper.querySelector('svg') : null;
   if (!svgEl) return;
+  // 防止重复绑定监听器（每次切换来源表都会调 initLineageZoom）
+  if (wrapper._zoomBound) return;
+  wrapper._zoomBound = true;
 
   // 把 SVG 子元素包到一个 g 容器里（用于 transform）
   var content = svgEl.querySelector('#lineageContent');
@@ -1999,7 +2002,7 @@ function renderSteps() {
 
     // 结构化步骤概述（标题下方、SQL 上方）
     if (step.structured_summary) {
-      html += '<div style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin:0;padding:8px 16px;background:var(--bg-card);border-radius:4px;border-left:3px solid var(--accent);">' + escapeHtml(step.structured_summary) + '</div>';
+      html += '<div style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin:0;padding:8px 16px;background:var(--bg-card);border-radius:4px;border-left:3px solid var(--accent);word-break:break-all;overflow-wrap:anywhere;">' + escapeHtml(step.structured_summary) + '</div>';
     }
 
     // Body
@@ -2048,7 +2051,7 @@ function renderFieldMapping() {
   document.getElementById('auxFieldsCount').textContent = '(' + auxFields.length + ')';
 
   if (fields.length === 0) {
-    document.getElementById('fieldMappingTable').innerHTML = '';
+    document.getElementById('fieldMappingTable').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);">无字段映射数据（可能是 SELECT * 或 SQL 解析失败）</div>';
     return;
   }
 
@@ -2109,7 +2112,7 @@ function renderFieldMapping() {
     var st = (REPORT_DATA.steps || []).find(function(s) { return s.step_id === f.producing_step; });
     var stepCode = st ? (st.rule_code || st.step_id) : '-';
 
-    html += '<tr data-field="' + escapeHtml(f.target_field) + '" onclick="openDetail(\'' + escapeHtml(f.target_field) + '\')" style="cursor:pointer;' + (f.is_final_field === false ? 'opacity:0.6;' : '') + '">';
+    html += '<tr data-field="' + escapeHtml(f.target_field) + '" onmouseup="if(!window.getSelection().toString())openDetail(\'' + escapeHtml(f.target_field) + '\')" style="cursor:pointer;' + (f.is_final_field === false ? 'opacity:0.6;' : '') + '">';
     html += '<td style="font-size:12px;color:var(--text-muted);">' + (fi + 1) + '</td>';
     var fieldBadge = f.is_final_field === false ? ' <span style="font-size:9px;padding:1px 5px;border-radius:4px;background:#fef9c3;color:#854d0e;vertical-align:middle;">中间过程</span>' : '';
     html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span>' + fieldBadge + '</td>';
@@ -2162,7 +2165,7 @@ function renderFieldMapping() {
           var c = r === '关联键' ? '#f97316' : (r === '过滤' ? '#3b82f6' : '#8b5cf6');
           return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;color:white;background:' + c + ';margin-right:4px;">' + r + '</span>';
         }).join('');
-        auxHtml += '<tr data-field="' + escapeHtml(af.field) + '" onclick="openDetail(\'' + escapeHtml(af.field) + '\')" style="cursor:pointer;">';
+        auxHtml += '<tr data-field="' + escapeHtml(af.field) + '" onmouseup="if(!window.getSelection().toString())openDetail(\'' + escapeHtml(af.field) + '\')" style="cursor:pointer;">';
         auxHtml += '<td style="font-size:12px;color:var(--text-muted);">' + (ai + 1) + '</td>';
         auxHtml += '<td><span class="field-name">' + escapeHtml(af.field) + '</span></td>';
         auxHtml += '<td style="font-size:12px;">' + escapeHtml(stepsText) + '</td>';
@@ -2856,7 +2859,12 @@ function drawChainLinks(treeId, layerCount, fieldName) {
 // ================================================================
 // Event Listeners
 // ================================================================
-document.getElementById('fieldSearch').addEventListener('input', handleFieldSearch);
+// 字段搜索防抖（避免大数据量时每次按键都重排）
+var _fieldSearchTimer = null;
+document.getElementById('fieldSearch').addEventListener('input', function() {
+  clearTimeout(_fieldSearchTimer);
+  _fieldSearchTimer = setTimeout(handleFieldSearch, 200);
+});
 document.getElementById('detailClose').addEventListener('click', closeDetail);
 document.getElementById('detailOverlay').addEventListener('click', closeDetail);
 document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeDetail(); });

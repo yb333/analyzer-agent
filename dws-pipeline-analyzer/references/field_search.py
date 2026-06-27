@@ -456,10 +456,9 @@ def _resolve_cte_sources(cte_source_fields, step_ctes):
 
 
 def _is_intermediate(table_name):
-    """判断是否中间表（复用 analyzer 逻辑）。"""
-    import re
-    short = (table_name or "").strip().lower().split(".")[-1]
-    return bool(re.search(r"(?:^tmp\d*$|_tmp\d*$|^temp\d*$|_temp\d*$|^tmp_|_tmp_|^temp_|_temp_)", short))
+    """判断是否中间表（复用 analyzer 的 _is_intermediate_table）。"""
+    from analyzer import _is_intermediate_table
+    return _is_intermediate_table(table_name)
 
 
 def _match_field(fname, f, keywords_lower):

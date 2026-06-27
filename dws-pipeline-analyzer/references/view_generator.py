@@ -1673,6 +1673,26 @@ def generate_mapping(knowledge, output_dir):
                         target_field_name, field_cn, field_type,
                     ])
 
+    # 格式化：冻结首行 + 筛选器 + 列宽
+    for ws in [ws1, ws2]:
+        ws.freeze_panes = "A2"  # 冻结首行
+        # autofilter 覆盖所有有数据的列
+        max_col = ws.max_column
+        max_row = ws.max_row
+        if max_row > 0 and max_col > 0:
+            ws.auto_filter.ref = f"A1:{ws.cell(row=1, column=max_col).column_letter}{max_row}"
+
+    # 实体级列宽
+    col_widths_1 = [12, 14, 18, 10, 10, 14, 18, 35, 30, 10, 10, 10]
+    for i, w in enumerate(col_widths_1, 1):
+        if i <= ws1.max_column:
+            ws1.column_dimensions[ws1.cell(row=1, column=i).column_letter].width = w
+    # 属性级列宽
+    col_widths_2 = [12, 12, 18, 10, 16, 12, 18, 30, 18, 14, 12]
+    for i, w in enumerate(col_widths_2, 1):
+        if i <= ws2.max_column:
+            ws2.column_dimensions[ws2.cell(row=1, column=i).column_letter].width = w
+
     # 写入
     output_path = Path(output_dir) / "mapping.xlsx"
     output_path.parent.mkdir(parents=True, exist_ok=True)
