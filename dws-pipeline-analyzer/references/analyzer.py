@@ -341,8 +341,7 @@ def _read_query_sql(row: tuple, col_idx: dict) -> str:
     if not parts:
         return ""
 
-    # 最后一个非空部分去掉末尾 \r\n（Excel 可能残留两个字节）
-    parts[-1] = parts[-1].rstrip("\r\n")
+    # 完整拼接，保留所有原始字符（包括末尾 \r\n，它是完整 SQL 的一部分）
     return "".join(parts)
 
 
