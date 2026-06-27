@@ -2851,6 +2851,22 @@ def analyze_quality(
                     "step_id": step_id,
                 })
 
+        # 1b. Oracle (+) 外关联语法检测（不推荐，建议改用标准 LEFT JOIN）
+        raw_sql = parsed.raw_sql or ""
+        if "(+)" in raw_sql:
+            import re as _re
+            plus_count = len(_re.findall(r'\(\+\)', raw_sql))
+            issue_id += 1
+            issues.append({
+                "id": f"ISS_{issue_id:03d}",
+                "severity": "medium",
+                "category": "code_quality",
+                "title": f"使用 Oracle (+) 外关联语法（{plus_count}处），建议改用标准 LEFT JOIN",
+                "description": "(+) 是 Oracle 老式外关联语法，DWS 虽兼容但可读性差、易出错，建议改用标准 JOIN ... LEFT OUTER JOIN ... ON 语法",
+                "rule_code": rc,
+                "step_id": step_id,
+            })
+
         # 2. 单步骤 JOIN 过多（含 CTE 内部 JOIN）
         if total_join_count > 8:
             issue_id += 1
