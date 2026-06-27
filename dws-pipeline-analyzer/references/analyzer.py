@@ -2415,8 +2415,11 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
                             })
 
     # ── 自引用检测 ──
+    # 排除删数规则（rule_type=2: TRUNCATE/DELETE），它们的目标表出现在 SQL 里是正常的
     self_references = []
     for s in steps:
+        if s.get("rule_type") == 2:
+            continue
         target = s["target_table_full"]
         all_tables = s.get("all_tables_from_sql", s["source_tables_from_sql"])
         # 用 _table_match 检测自引用（大小写不敏感）
