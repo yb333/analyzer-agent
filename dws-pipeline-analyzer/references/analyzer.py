@@ -2928,14 +2928,14 @@ def analyze_quality(
                 "step_id": step_id,
             })
 
-        # 2. 单步骤 JOIN 过多（含 CTE 内部 JOIN）
-        if total_join_count > 8:
+        # 2. 单规则 JOIN 过多（含 CTE 内部 JOIN，阈值翻倍）
+        if total_join_count > 16:
             issue_id += 1
             issues.append({
                 "id": f"ISS_{issue_id:03d}",
                 "severity": "medium",
                 "category": "performance",
-                "title": f"单步骤 JOIN {total_join_count} 张表（主查询{join_count} + CTE内部{cte_join_count}）",
+                "title": f"单规则 JOIN {total_join_count} 张表（主查询{join_count} + CTE内部{cte_join_count}）",
                 "rule_code": rc,
                 "step_id": step_id,
             })
