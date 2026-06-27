@@ -52,8 +52,9 @@ def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
     # 读取并按规则组分组
     raw = read_excel(excel_path)
     all_rules = raw["rules"]
+    global_group_en = (raw.get("rule_group_en") or "").strip()
 
-    # 按规则组编码分组（复用 field_search 的分组逻辑）
+    # 按规则组编码分组
     groups_map = {}
     unknown_idx = 0
     for rule in all_rules:
@@ -62,9 +63,11 @@ def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
             code = f"_SOLO_{rule.rule_code or f'ROW{unknown_idx}'}"
             unknown_idx += 1
         if code not in groups_map:
+            # 目录名优先用英文名（和单个分析一致），兜底用编码
+            en = global_group_en if global_group_en else code
             groups_map[code] = {
                 "rule_group_code": code,
-                "rule_group_en": code,
+                "rule_group_en": en,
                 "rules": [],
             }
         groups_map[code]["rules"].append(rule)

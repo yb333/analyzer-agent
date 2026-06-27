@@ -1900,9 +1900,9 @@ function initLineageZoom() {
   var wrapper = document.getElementById('lineageWrapper');
   var svgEl = wrapper ? wrapper.querySelector('svg') : null;
   if (!svgEl) return;
-  // 防止重复绑定监听器（每次切换来源表都会调 initLineageZoom）
-  if (wrapper._zoomBound) return;
-  wrapper._zoomBound = true;
+  // 防止对同一个 SVG 重复绑定（SVG 重建后需重新绑定）
+  if (svgEl._zoomBound) return;
+  svgEl._zoomBound = true;
 
   // 把 SVG 子元素包到一个 g 容器里（用于 transform）
   var content = svgEl.querySelector('#lineageContent');
