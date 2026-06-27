@@ -2940,7 +2940,8 @@ def analyze_quality(
             })
 
         # 1c. SELECT * / t.* 检测（规范不允许，必须明确列出字段）
-        if parsed.has_star:
+        rule_type_val = s.get("rule_type", 1)
+        if parsed.has_star and rule_type_val in SELECT_RULE_TYPES:
             issue_id += 1
             issues.append({
                 "id": f"ISS_{issue_id:03d}",
@@ -2952,8 +2953,8 @@ def analyze_quality(
                 "step_id": step_id,
             })
 
-        # 1d. SQL 解析失败检测（提示用户 SQL 可能有语法问题）
-        if parsed.parse_error:
+        # 1d. SQL 解析失败检测（仅 SELECT 类规则，非 SELECT 类的空 SQL 是正常的）
+        if parsed.parse_error and rule_type_val in SELECT_RULE_TYPES:
             issue_id += 1
             issues.append({
                 "id": f"ISS_{issue_id:03d}",
