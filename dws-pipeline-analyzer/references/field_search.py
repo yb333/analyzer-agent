@@ -56,8 +56,8 @@ def read_excel_grouped(excel_path: str) -> list:
 def search_field_usage(excel_path: str, keywords: list) -> list:
     """主入口：搜索字段使用情况。
 
-    对每个规则组跑完整 analyzer 解析（含 enrich 追溯），复用所有解析逻辑。
-    field_search 只负责搜索 + 组织输出。
+    轻量解析策略：只 parse_single_sql + build_field_mappings（跳过 topology/
+    data_flow/enrich），对匹配字段按需追溯。避免大数据量时 enrich 全量计算过慢。
 
     Args:
         excel_path: Excel 文件路径
@@ -66,9 +66,7 @@ def search_field_usage(excel_path: str, keywords: list) -> list:
     Returns: [FieldUsage, ...] 按目标表分组排序
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from analyzer import (detect_dialect, parse_single_sql, build_topology,
-                          build_data_flow, build_field_mappings,
-                          enrich_join_key_lineage, enrich_field_physical_sources)
+    from analyzer import detect_dialect, parse_single_sql, build_field_mappings
 
     groups = read_excel_grouped(excel_path)
     all_usages = []
@@ -79,22 +77,18 @@ def search_field_usage(excel_path: str, keywords: list) -> list:
         if not rules:
             continue
 
-        # 预扫描：检查该规则组的 SQL 文本是否含任一关键字，不含则跳过（省解析时间）
+        # 预扫描：检查该规则组的 SQL 文本是否含任一关键字，不含则跳过
         all_sql = " ".join(r.query_sql or "" for r in rules).lower()
         if not any(k in all_sql for k in keywords_lower):
             continue
 
-        # 完整解析（复用 analyzer 全部能力，含 enrich 追溯）
+        # 轻量解析：只 parse + field_mappings（跳过 topology/data_flow/enrich）
         sqls = [r.query_sql for r in rules if r.query_sql]
         dialect = detect_dialect(sqls)
         parsed_map = {r.rule_code: parse_single_sql(r.query_sql, dialect) for r in rules}
-        topology = build_topology(rules, parsed_map)
-        data_flow = build_data_flow(rules, parsed_map)
         field_mappings = build_field_mappings(rules, parsed_map, {})
-        enrich_join_key_lineage(data_flow, rules, parsed_map, topology, field_mappings)
-        enrich_field_physical_sources(field_mappings, data_flow, rules, parsed_map, topology)
 
-        # 搜索字段
+        # 搜索字段（按需追溯，只对匹配字段算）
         _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
 
     # 按目标表分组排序
@@ -157,7 +151,7 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
 
             entry = field_usage_map[fl]
             transform = f.get("transform_type", "direct")
-            source = _get_physical_source(f, parsed_map, rules) if is_final_step else ""
+            source = _trace_physical_source(f, parsed_map, rules) if is_final_step else ""
 
             if is_final_step:
                 if "写入目标表" not in entry["roles"]:
@@ -235,6 +229,101 @@ def _search_group(rules, parsed_map, field_mappings, keywords_lower, all_usages)
             source=entry["source"] or "-",
             detail="；".join(entry["details"]) if entry["details"] else "-",
         ))
+
+
+def _trace_physical_source(f, parsed_map, rules, depth=0, visited=None):
+    """按需追溯字段的物理来源（轻量，不依赖 enrich）。
+
+    沿 lineage 追，遇到中间表继续追，遇到 CTE 穿透到内部，物理源表停止。
+    带深度限制（max 12）和循环保护。
+    """
+    if visited is None:
+        visited = set()
+    if depth > 12:
+        return ""
+
+    lineages = f.get("lineage", [])
+    if not lineages:
+        return ""
+
+    first = lineages[0]
+    src_alias = first.get("source_table", "")
+    src_field = first.get("source_field", f.get("target_field", ""))
+
+    # CTE 穿透信息
+    cte_source_fields = first.get("cte_source_fields")
+    cte_step = first.get("step", "")
+    if cte_source_fields:
+        step_ctes = _get_step_ctes(cte_step, parsed_map, rules)
+        parts = _resolve_cte_sources(cte_source_fields, step_ctes)
+        if parts:
+            return "；".join(parts)
+
+    # 解析别名 → 物理表
+    src_table = _resolve_alias_to_table(src_alias, f.get("producing_step", ""), parsed_map, rules)
+    if not src_table:
+        return src_field
+
+    # 物理源表 → 返回
+    if not _is_intermediate(src_table):
+        return f"{src_table}.{src_field}"
+
+    # 中间表 → 继续追溯
+    visit_key = (src_table.lower(), src_field.lower())
+    if visit_key in visited:
+        return f"{src_table}.{src_field}"
+    visited.add(visit_key)
+
+    for r2 in rules:
+        if r2.target_table and r2.target_table.lower() == src_table.split(".")[-1].lower():
+            from analyzer import build_field_mappings
+            fm2 = build_field_mappings([r2], parsed_map, {}).get("fields", [])
+            for f2 in fm2:
+                if f2.get("target_field", "").lower() == src_field.lower():
+                    result = _trace_physical_source(f2, parsed_map, rules, depth + 1, visited.copy())
+                    if result:
+                        return result
+    return f"{src_table}.{src_field}"
+
+
+def _resolve_alias_to_table(alias, step_id, parsed_map, rules):
+    """解析别名到物理表名。"""
+    if not alias:
+        return ""
+    step_to_rule = {f"step_{i+1}": r.rule_code for i, r in enumerate(rules)}
+    rule_code = step_to_rule.get(step_id, "")
+    p = parsed_map.get(rule_code)
+    if not p:
+        return alias
+    for j in p.source_tables:
+        if j.alias and j.alias.upper() == alias.upper():
+            return j.source_table
+    return alias
+
+
+def _get_step_ctes(step_id, parsed_map, rules):
+    """获取某步骤的 CTE 索引。"""
+    step_to_rule = {f"step_{i+1}": r.rule_code for i, r in enumerate(rules)}
+    rule_code = step_to_rule.get(step_id, "")
+    p = parsed_map.get(rule_code)
+    if not p:
+        return {}
+    result = {}
+    for ct in p.ctes:
+        cname = (ct.name or "").upper()
+        if not cname:
+            continue
+        alias_to_table = {}
+        for st in ct.source_tables:
+            if st.get("alias") and st.get("name"):
+                alias_to_table[st["alias"].upper()] = st["name"]
+        fields_map = {}
+        for cf in ct.fields:
+            fname = (cf.get("name") or "").upper()
+            if fname:
+                fields_map[fname] = cf.get("source_fields", [])
+        result[cname] = {"fields_map": fields_map, "alias_to_table": alias_to_table}
+    return result
 
 
 def _get_physical_source(f, parsed_map=None, rules=None):
