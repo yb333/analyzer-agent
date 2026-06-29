@@ -3479,7 +3479,7 @@ def analyze_quality(
     for oc in topology.get("over_constraints", []):
         if oc.get("over_constrained_on"):
             # 找 rule_code
-            oc_step_info = next((s for s in topo_steps if s.get("step_id") == oc["step"]), {})
+            oc_step_info = next((s for s in topology.get("steps", []) if s.get("step_id") == oc["step"]), {})
             oc_rule = oc_step_info.get("rule_code", oc["step"])
             issue_id += 1
             issues.append({
