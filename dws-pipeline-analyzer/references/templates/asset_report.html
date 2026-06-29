@@ -2015,11 +2015,11 @@ function renderSteps() {
       html += '<div class="step-logic" style="font-size:13px;line-height:1.7;color:var(--text-secondary);white-space:pre-wrap;">' + escapeHtml(step.logic) + '</div>';
     }
 
-    // 数据块展示（加工逻辑）
+    // 逻辑块展示（加工逻辑）
     var blocks = step.data_blocks || [];
     if (blocks.length > 0) {
       html += '<details style="margin:8px 0 0;padding:0;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);" open>';
-      html += '<summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--text-secondary);padding:10px 12px;">数据块（' + blocks.length + '）</summary>';
+      html += '<summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--text-secondary);padding:10px 12px;">逻辑块（' + blocks.length + '）</summary>';
       html += '<div style="padding:0 12px 10px;">';
 
       blocks.forEach(function(blk) {
