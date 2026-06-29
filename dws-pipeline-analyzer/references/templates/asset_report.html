@@ -2014,9 +2014,35 @@ function renderSteps() {
       html += '<div class="step-logic" style="font-size:13px;line-height:1.7;color:var(--text-secondary);white-space:pre-wrap;">' + escapeHtml(step.logic) + '</div>';
     }
 
-    // 结构化步骤概述（AI 内容下方、SQL 上方）
-    if (step.structured_summary) {
-      html += '<div style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin:8px 0 0;padding:8px 12px;background:var(--bg-card);border-radius:4px;border-left:3px solid var(--accent);word-break:break-all;overflow-wrap:anywhere;"><span style="font-size:11px;color:var(--text-muted);font-weight:600;">脚本概述:</span> ' + escapeHtml(step.structured_summary) + '</div>';
+    // 数据块展示（加工逻辑）
+    var blocks = step.data_blocks || [];
+    if (blocks.length > 0) {
+      html += '<div style="margin:8px 0 0;padding:10px 12px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);">';
+      html += '<div style="font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:8px;">数据块</div>';
+
+      blocks.forEach(function(blk) {
+        var roleColor = blk.type === 'main' ? '#3b82f6' : (blk.type.indexOf('subquery') >= 0 ? '#8b5cf6' : (blk.type === 'union_branch' ? '#f97316' : '#22c55e'));
+        var roleLabel = blk.role || '';
+        var opsLabel = (blk.ops && blk.ops.length) ? ' <span style="font-size:10px;color:#f97316;">[' + blk.ops.join('、') + ']</span>' : '';
+
+        html += '<div style="margin-bottom:6px;padding-left:8px;border-left:3px solid ' + roleColor + ';">';
+        html += '<div style="font-size:13px;line-height:1.5;">';
+        html += '<span style="font-weight:600;color:' + roleColor + ';">' + escapeHtml(roleLabel) + '</span> ';
+        html += '<code style="color:var(--accent);">' + escapeHtml(blk.table) + '</code>';
+        if (blk.alias) html += ' <span style="color:var(--text-muted);">(' + escapeHtml(blk.alias) + ')</span>';
+        html += opsLabel;
+        html += '</div>';
+
+        if (blk.join_type && blk.join_type !== 'FROM' && blk.join_type !== 'UNION') {
+          html += '<div style="font-size:12px;color:var(--text-secondary);padding-left:8px;">' + escapeHtml(blk.join_type) + (blk.on_condition ? ' ON ' + escapeHtml(blk.on_condition) : '') + '</div>';
+        }
+        if (blk.brought_fields && blk.brought_fields.length > 0) {
+          html += '<div style="font-size:11px;color:var(--text-muted);padding-left:8px;">带出：' + escapeHtml(blk.brought_fields.join('、')) + '</div>';
+        }
+        html += '</div>';
+      });
+
+      html += '</div>';
     }
 
     // SQL 全文（折叠）

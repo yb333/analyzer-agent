@@ -484,6 +484,7 @@ def build_report_data(knowledge):
             "scenario_name": s.get("scenario_name", ""),
             "is_common_step": s.get("is_common_step", False),
             "structured_summary": _build_step_summary_inline(s, df_step, fields_list),
+            "data_blocks": df_step.get("data_blocks", []),
             "delete_mode_label": s.get("delete_mode_label", ""),
             "delete_condition": s.get("delete_condition", ""),
             "source_tables": s.get("source_tables_from_sql", []),

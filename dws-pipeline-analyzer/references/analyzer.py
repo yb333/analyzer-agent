@@ -2255,6 +2255,138 @@ DELETE_MODE_LABEL = {
 }
 
 
+def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
+    """构建步骤的"数据块"结构——展示每个数据来源的角色、关联方式、带出字段。
+
+    返回 [{type, table, alias, role, join_type, on_condition, brought_fields, ops}]
+    - type: main(主表)/secondary(从表)/subquery(子查询块)/union(UNION合并块)
+    - ops: 该块的操作标签列表（如"过滤""聚合""去重"）
+    """
+    joins = df_step.get("joins", [])
+    where_clause = (df_step.get("where_clause", "") or "").replace("WHERE ", "").strip()
+    group_by = df_step.get("group_by", [])
+    step_id = step.get("step_id", "")
+
+    blocks = []
+    # alias → 该从表带出的字段
+    alias_fields = {}
+    for f in fields:
+        if f.get("producing_step") != step_id:
+            continue
+        for l in f.get("lineage", []):
+            src_alias = (l.get("source_table", "") or "").lower()
+            if src_alias:
+                alias_fields.setdefault(src_alias, []).append(f["target_field"])
+
+    # CTE 名集合（用于识别 CTE 子查询块）
+    cte_names = set()
+    if parsed and hasattr(parsed, "ctes"):
+        cte_names = {c.name.lower() for c in parsed.ctes if c.name}
+
+    has_subquery = False
+    for j in joins:
+        src_table = j.get("source_table", "")
+        jt = (j.get("join_type", "") or "").upper()
+        alias = (j.get("alias", "") or "").lower()
+
+        # 跳过子查询假名
+        if src_table.startswith("(subquery:"):
+            has_subquery = True
+            continue
+
+        if jt in ("FROM", "FROM_SUBQUERY_MAIN"):
+            # 主表（含子查询内部主表）
+            block_type = "main"
+            if "SUBQUERY" in jt:
+                block_type = "subquery_main"
+            brought = list(dict.fromkeys(alias_fields.get(alias, [])))
+            blocks.append({
+                "type": block_type,
+                "table": src_table,
+                "alias": alias,
+                "role": "主表",
+                "join_type": "",
+                "on_condition": "",
+                "brought_fields": brought,
+                "ops": [],
+            })
+        elif "SUBQUERY" in jt:
+            # 子查询内部从表
+            brought = list(dict.fromkeys(alias_fields.get(alias, [])))
+            blocks.append({
+                "type": "subquery_secondary",
+                "table": src_table,
+                "alias": alias,
+                "role": "子查询内从表",
+                "join_type": "",
+                "on_condition": "",
+                "brought_fields": brought,
+                "ops": [],
+            })
+        else:
+            # 从表
+            brought = list(dict.fromkeys(alias_fields.get(alias, [])))
+            blocks.append({
+                "type": "secondary",
+                "table": src_table,
+                "alias": alias,
+                "role": "从表",
+                "join_type": j.get("join_type", ""),
+                "on_condition": j.get("join_condition", ""),
+                "brought_fields": brought,
+                "ops": [],
+            })
+
+    # 给主表块加操作标签
+    if blocks:
+        main_ops = []
+        if where_clause:
+            main_ops.append("过滤")
+        if group_by:
+            main_ops.append("收敛")
+        if blocks[0]["ops"] is not None:
+            blocks[0]["ops"].extend(main_ops)
+
+    # 如果有子查询，给第一个子查询主表块标注内部操作
+    if has_subquery:
+        where_usages = df_step.get("where_clause", "")
+        join_usages = []
+        # 从 parsed 的 join_usage 和 where_usage 提取子查询内部操作
+        if parsed and hasattr(parsed, "join_usage"):
+            inner_joins = [ju for ju in parsed.join_usage]
+            if inner_joins:
+                for b in blocks:
+                    if b["type"] in ("subquery_main", "subquery_secondary"):
+                        b["ops"].append("内部关联")
+                        break
+        if parsed and hasattr(parsed, "where_usage"):
+            inner_wheres = [wu for wu in parsed.where_usage]
+            if inner_wheres:
+                for b in blocks:
+                    if b["type"] in ("subquery_main", "subquery_secondary"):
+                        if "内部过滤" not in b["ops"]:
+                            b["ops"].append("内部过滤")
+                        break
+
+    # UNION 分支
+    if parsed and hasattr(parsed, "union_branches") and parsed.union_branches:
+        for idx, branch in enumerate(parsed.union_branches):
+            branch_tables = [j.source_table for j in branch.get("source_tables", [])
+                             if not j.source_table.startswith("(subquery:")]
+            blocks.append({
+                "type": "union_branch",
+                "table": "、".join(branch_tables),
+                "alias": "",
+                "role": f"UNION 分支{branch.get('branch_index', idx+1)}",
+                "join_type": "UNION",
+                "on_condition": "",
+                "brought_fields": [c.alias for c in branch.get("columns", [])],
+                "ops": [],
+            })
+
+    return blocks
+
+
 def build_structured_step_summary(step: dict, df_step: dict, fields: list) -> str:
     """生成结构化步骤概述（自然语言，精简归类）。
 
@@ -4538,6 +4670,10 @@ def main():
         ds = next((s for s in df_steps if s.get("step_id") == ts.get("step_id")), None)
         if ds:
             ds["structured_summary"] = build_structured_step_summary(ts, ds, fields_list)
+            # 数据块结构（步骤卡片的加工逻辑展示）
+            rc = ts.get("rule_code", "")
+            parsed = parsed_map.get(rc)
+            ds["data_blocks"] = build_data_blocks(ts, ds, parsed, fields_list)
 
     # ── Step 6: 质量分析 ──
     print("Step 6: 质量分析...")
