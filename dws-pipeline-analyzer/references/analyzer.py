@@ -4517,6 +4517,9 @@ def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings,
     lines.append("# ETL 分析摘要（AI 增强用）")
     lines.append("")
     lines.append("> AI 请基于以下信息，补充每个步骤的业务目的和加工逻辑，")
+    lines.append("> 每个步骤的逻辑块结构已经列出，请基于块结构推理：")
+    lines.append("> 1. 每个块的业务目的（块目的）")
+    lines.append("> 2. 整个步骤的业务目的（块目的的组合概括）")
     lines.append("> 输出格式见文末模板，保存为 knowledge_ai.md")
     lines.append("")
 
@@ -4611,8 +4614,9 @@ def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings,
         step = next((s for s in topology["steps"] if s["rule_code"] == rule.rule_code), None)
         sid = step["step_id"] if step else ""
         lines.append(f"## {sid}")
-        lines.append(f"（描述这步的业务目的和加工逻辑）")
+        lines.append(f"（基于以下逻辑块推理这步的业务目的，1-2句话）")
         lines.append(f"### 块目的")
+        lines.append(f"（为每个块补充业务目的，格式: - 块N (角色 表): 目的）")
         # 列出该步骤的逻辑块，让 AI 为每个块补充目的
         df_step_tpl = next((s for s in data_flow.get("steps", []) if s.get("step_id") == sid), None)
         if df_step_tpl and df_step_tpl.get("data_blocks"):
