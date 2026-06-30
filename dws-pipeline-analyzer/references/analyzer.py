@@ -2650,9 +2650,14 @@ def build_data_blocks(step: dict, df_step: dict, parsed, fields: list) -> list:
     from sqlglot import exp as _exp
 
     # 从 AST 递归构建嵌套结构
+    # 注意：必须走和 parse_single_sql 一样的预处理（strip + replace_placeholders），
+    # 否则占位符/特殊语法会导致第二次解析失败，回退到 _build_blocks_flat 丢数据
     if parsed and not parsed.parse_error:
         try:
-            tree = sqlglot.parse_one(_strip_dws_clauses(parsed.raw_sql), dialect="oracle")
+            clean = _strip_dws_clauses(parsed.raw_sql)
+            clean = _replace_placeholders(clean)
+            clean = clean.strip().rstrip(";").strip()
+            tree = sqlglot.parse_one(clean, dialect="oracle")
         except Exception:
             tree = None
     else:
