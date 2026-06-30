@@ -2778,10 +2778,11 @@ def _enhance_blocks_with_cte(blocks, tree, df_step, fields, step_id):
                         blk["children"] = children
                         # CTE 内部的操作标签加到 children 的第一个块（内部主表），不加到 CTE 块本身
                         if children:
-                            if cte_unit.where:
+                            if cte_unit.where and "过滤" not in children[0].get("ops", []):
                                 children[0]["ops"].append("过滤")
+                            if children[0] and cte_unit.where and not children[0].get("where_clause"):
                                 children[0]["where_clause"] = cte_unit.where
-                            if cte_unit.group_by:
+                            if cte_unit.group_by and "收敛" not in children[0].get("ops", []):
                                 children[0]["ops"].append("收敛")
                 _enhance_recursive(blk.get("children", []))
 
