@@ -27,19 +27,16 @@ class BatchResult:
     has_ai: bool = False
 
 
-def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
-              no_ai: bool = False, ddl_dir: str = "",
-              verbose: bool = None) -> list:
+def run_batch(excel_path: str, output_dir: str, batch_size: int = 20,
+              no_ai: bool = False, ddl_dir: str = "") -> list:
     """批量分析多个规则组，生成交付件。
 
     Args:
         excel_path: Excel 文件路径（含多个规则组）
         output_dir: 输出基础目录（每个规则组在其下建子目录）
-        batch_size: 每批处理的规则组数量（默认 50）
+        batch_size: 每批处理的规则组数量（默认 20）
         no_ai: 是否跳过 AI 增强
         ddl_dir: DDL 文件目录（可选）
-        verbose: True=逐组详细输出到 stdout（终端调试用）；False=详细输出写日志文件，
-            stdout 只留批次级进度；None=按环境变量 DWS_BATCH_VERBOSE 决定（默认 False）
 
     Returns: [BatchResult, ...]
 
@@ -52,53 +49,50 @@ def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
         子进程失败时自动降级为进程内执行（兼容小批量/测试场景）。
 
     输出策略（配合内存隔离）：
-        非 verbose 模式下，子进程 stdout/stderr 重定向到「每批日志文件」而非继承
-        主进程 stdout；逐组详细状态也写入日志文件，stdout 只保留批次级进度 + 最终
-        汇总（输出量与规则组数无关，为常数级）。这是为根治"逐组 print 累积超出
-        上游捕获管道上限（如 AI 工具捕获 stdout）导致整个进程树被 SIGKILL"——
-        典型表现为「前两批正常、第三批起步即被杀」。verbose=True 可恢复完整 stdout
-        供终端实时调试。
+        子进程 stdout/stderr 始终重定向到「每批日志文件」而非继承主进程 stdout；
+        逐组详细状态也写入日志文件。stdout 只保留批次级进度 + 最终汇总（输出量
+        与规则组数无关，为常数级）。这是为根治"逐组 print 累积超出上游捕获管道
+        上限（如 AI 工具捕获 stdout）导致整个进程树被 SIGKILL"——典型表现为
+        「前两批正常、第三批起步即被杀」。
     """
-    if verbose is None:
-        verbose = os.environ.get("DWS_BATCH_VERBOSE") == "1"
-
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from analyzer import read_excel
 
-    # 非 verbose：详细输出去日志文件，stdout 只留常数级进度，避免捕获管道累积
-    log_dir = None
-    if not verbose:
-        log_dir = Path(output_dir) / "batch_logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
+    # 输出目录与日志目录创建：路径无效/权限不足/磁盘满时给出清晰错误，
+    # 而非让后续子进程静默失败（表现为「连 batch_logs 都没产出」）。
+    try:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"错误: 无法创建输出目录 {output_dir}: {e}", file=sys.stderr)
+        raise
 
-    # 读取并按规则组分组（主进程只读一次，大 workbook 常驻可接受，不是累积源）
+    # 日志目录【始终创建】：逐组详细输出永远写文件，绝不进 stdout。
+    # 早期 bug：曾用 verbose 开关控制日志是否落盘，verbose=True 时所有逐组输出
+    # 全进 stdout，规则组多时累积超出上游捕获管道上限（如 AI 工具捕获 stdout），
+    # 整个进程树被 SIGKILL —— 用户为「看到更多输出」加 --verbose，反而被杀。
+    log_dir = Path(output_dir) / "batch_logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        # 日志目录建不了：stdout 仍只留批次级进度（绝不能把逐组输出退回 stdout，
+        # 否则又回到累积被杀的老路）。记录警告，log_dir 置 None 让下游跳过写日志。
+        print(f"警告: 无法创建日志目录 {log_dir}: {e}（逐组详细日志将无法落盘）", file=sys.stderr)
+        log_dir = None
+
+    # 主进程只读一次 Excel。读完后只保留分组结果（rules 已在 groups 内），
+    # 释放 raw 里的 target_fields/group_variables 等大对象，降低主进程常驻内存。
     raw = read_excel(excel_path)
     all_rules = raw["rules"]
     global_group_en = (raw.get("rule_group_en") or "").strip()
 
-    # 按规则组编码分组
-    # 每个组的目录名取【该组】第一条非空 rule_group_en（每行存了），而非全局值，
-    # 否则多个 code 不同的组会撞同一个英文名 → 全写进同一目录互相覆盖。
-    groups_map = {}
-    unknown_idx = 0
-    for rule in all_rules:
-        code = rule.rule_group_code
-        if not code:
-            code = f"_SOLO_{rule.rule_code or f'ROW{unknown_idx}'}"
-            unknown_idx += 1
-        if code not in groups_map:
-            # 优先用本组的英文名；本组没填再兜底全局；最后兜底 code
-            en = (rule.rule_group_en or "").strip() or global_group_en or code
-            groups_map[code] = {
-                "rule_group_code": code,
-                "rule_group_en": en,
-                "rules": [],
-            }
-        groups_map[code]["rules"].append(rule)
-
-    groups = list(groups_map.values())
+    # 按规则组编码分组，并处理同名（英文名相同）不同码的规则组（实时/离线区等）
+    groups = _group_rules_by_code(all_rules, global_group_en)
     total = len(groups)
     results = []
+
+    # 主进程不再需要 raw 的大对象（target_fields/group_variables 等），主动释放。
+    # 注意：_process_group 内部会按需自己读 Excel 取这些数据，主进程不必持有。
+    del raw
 
     print(f"=== 批量分析 ===")
     print(f"输入: {excel_path}")
@@ -106,8 +100,8 @@ def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
     print(f"批量大小: {batch_size}")
     print(f"AI 增强: {'跳过' if no_ai else '启用'}")
     print(f"输出目录: {output_dir}")
-    if not verbose:
-        print(f"详细日志: {log_dir}/batch_*.log（stdout 只保留批次级进度，避免累积超限）")
+    if log_dir:
+        print(f"详细日志: {log_dir}/batch_*.log（stdout 只保留批次级进度，查细节看日志）")
     print()
 
     # 分批处理 —— 每批开子进程执行（子进程退出即归还 RSS）
@@ -122,31 +116,32 @@ def run_batch(excel_path: str, output_dir: str, batch_size: int = 50,
             batch_start, batch_end, log_dir, batch_num)
         results.extend(batch_results)
 
-        # 逐组详细状态：verbose→stdout；否则写日志文件（与规则组数成正比的输出，
-        # 不进 stdout 即可避免捕获管道累积导致进程被杀）
-        _log_group_results(batch_results, batch_num, log_dir, verbose)
+        # 逐组详细状态：始终写日志文件。stdout 绝不打印逐组内容（与规则组数成正比，
+        # 大批量时会累积超出捕获管道上限导致被杀），只在有失败时打一行简要汇总。
+        _log_group_results(batch_results, batch_num, log_dir)
 
         fail_count = sum(1 for r in batch_results if not r.success)
         print(f"--- 批次 {batch_num} 完成：{len(batch_results)} 组"
               f"（成功 {len(batch_results)-fail_count}，失败 {fail_count}）---")
+        if fail_count and log_dir:
+            print(f"    ⚠ {fail_count} 组失败，详见: {log_dir}/batch_{batch_num}.log")
         print()
 
     # 汇总
     success_count = sum(1 for r in results if r.success)
     print(f"=== 完成: {success_count}/{total} 成功 ===")
-    if not verbose and log_dir:
+    if log_dir:
         fails = [r for r in results if not r.success]
         if fails:
             print(f"失败 {len(fails)} 组，详见: {log_dir}/batch_*.log")
     return results
 
 
-def _log_group_results(batch_results, batch_num, log_dir, verbose):
-    """逐组详细状态落盘/出屏。
+def _log_group_results(batch_results, batch_num, log_dir):
+    """逐组详细状态写入日志文件。
 
-    逐组行（与规则组数成正比）是 stdout 累积的主体：
-    - verbose：原样打到 stdout（终端调试）
-    - 非 verbose：追加到该批日志文件，不进 stdout
+    铁律：逐组详细内容（与规则组数成正比）一律只写日志，绝不进 stdout。
+    stdout 只允许出现与规则组数无关的常数级简要信息（批次进度、失败计数）。
     """
     lines = []
     for r in batch_results:
@@ -156,17 +151,56 @@ def _log_group_results(batch_results, batch_num, log_dir, verbose):
         if not r.success and r.error:
             lines.append(f"        ↳ {r.error}")
 
-    if verbose:
-        for line in lines:
-            print(line)
-        return
-
-    # 非 verbose：追加到批次日志（与子进程日志同文件，便于一次性排查）
+    # 追加到批次日志（与子进程日志同文件，便于一次性排查整批）
     if log_dir is not None:
         log_path = log_dir / f"batch_{batch_num}.log"
         with open(log_path, "a", encoding="utf-8") as f:
             f.write("=== 逐组结果 ===\n")
             f.write("\n".join(lines) + "\n")
+
+
+def _group_rules_by_code(all_rules, global_group_en):
+    """按 rule_group_code 分组，并处理同名（英文名相同）不同码的规则组。
+
+    历史 bug：输出目录名只用 rule_group_en（英文名），当两个 code 不同但英文名
+    相同的规则组（典型：实时区/离线区同名表）同时存在时，两者写进同一目录互相
+    覆盖（generate_* 均覆盖写），后跑的组把先跑的组完整覆盖，造成交付件丢失。
+
+    解法：分组完成后扫描英文名冲突，对冲突的组在其目录名后追加 code 去重。
+    目录名策略（_process_group 按 group['dir_name'] 取用）：
+        - 无冲突：保持英文原名（向后兼容）
+        - 有冲突：{英文名}__{code}
+    """
+    groups_map = {}
+    unknown_idx = 0
+    for rule in all_rules:
+        code = rule.rule_group_code
+        if not code:
+            code = f"_SOLO_{rule.rule_code or f'ROW{unknown_idx}'}"
+            unknown_idx += 1
+        if code not in groups_map:
+            en = (rule.rule_group_en or "").strip() or global_group_en or code
+            groups_map[code] = {
+                "rule_group_code": code,
+                "rule_group_en": en,
+                "rules": [],
+            }
+        groups_map[code]["rules"].append(rule)
+
+    groups = list(groups_map.values())
+
+    # 检测英文名冲突 → 冲突组目录名追加 code
+    from collections import Counter
+    name_counts = Counter(g["rule_group_en"] for g in groups)
+    for g in groups:
+        en = g["rule_group_en"]
+        if name_counts[en] > 1:
+            # 英文名相同但 code 不同（实时区/离线区等）→ 追加 code 防止目录互相覆盖
+            g["dir_name"] = f"{en}__{g['rule_group_code']}"
+        else:
+            g["dir_name"] = en
+
+    return groups
 
 
 def _run_batch_in_subprocess(excel_path, output_dir, no_ai, ddl_dir,
@@ -182,7 +216,6 @@ def _run_batch_in_subprocess(excel_path, output_dir, no_ai, ddl_dir,
         否则子进程里 generate_*/_process_group 的逐组 print 会汇入主进程 stdout，
         规则组数多时累积超出上游捕获管道上限（如 AI 工具捕获 stdout 的缓冲区），
         整个进程树会被 SIGKILL —— 表现为「前两批正常、第三批起步即被杀」。
-        log_dir=None 时退回原行为（继承 stdout，兼容 verbose/测试）。
     """
     import json
     import subprocess
@@ -195,7 +228,7 @@ def _run_batch_in_subprocess(excel_path, output_dir, no_ai, ddl_dir,
     result_path = result_file.name
     result_file.close()
 
-    # 非 verbose：子进程 stdout/stderr 重定向到每批日志文件，根治 stdout 累积
+    # 子进程 stdout/stderr 重定向到每批日志文件，根治 stdout 累积
     child_stdout = None
     child_stderr = None
     log_path = None
@@ -250,26 +283,32 @@ def _run_batch_inprocess(excel_path, output_dir, no_ai, ddl_dir,
     all_rules = raw["rules"]
     global_group_en = (raw.get("rule_group_en") or "").strip()
 
-    groups_map = {}
-    unknown_idx = 0
-    for rule in all_rules:
-        code = rule.rule_group_code
-        if not code:
-            code = f"_SOLO_{rule.rule_code or f'ROW{unknown_idx}'}"
-            unknown_idx += 1
-        if code not in groups_map:
-            en = (rule.rule_group_en or "").strip() or global_group_en or code
-            groups_map[code] = {
-                "rule_group_code": code,
-                "rule_group_en": en,
-                "rules": [],
-            }
-        groups_map[code]["rules"].append(rule)
-
-    groups = list(groups_map.values())
+    groups = _group_rules_by_code(all_rules, global_group_en)
     batch_groups = groups[batch_start:batch_end]
-    return [_process_group(g, output_dir, raw, no_ai, ddl_dir)
-            for g in batch_groups]
+    # 逐组隔离：单个组处理异常绝不拖垮同批其它组。
+    # 历史 bug：用列表推导 [_process_group(g,...) for g in batch_groups]，
+    # 一旦某个组抛出 _process_group 内 try 未覆盖的异常（openpyxl
+    # IllegalCharacterError、json 序列化、OOM 被杀等），整个列表推导式中断，
+    # 该组之后的所有组都不会被处理 → 表现为「一批里有的组正常、有的直接没有文件夹」。
+    results = []
+    for g in batch_groups:
+        try:
+            results.append(_process_group(g, output_dir, raw, no_ai, ddl_dir))
+        except Exception as e:
+            # 兜底：_process_group 理论上不该抛（内部有 try），但极端异常
+            # （如 openpyxl 写 Excel、子进程信号）可能穿透。这里保证不中断，
+            # 且失败组也带 output_dir（便于定位/重跑）。
+            import re
+            code = g.get("rule_group_code", "")
+            dir_name = g.get("dir_name") or g.get("rule_group_en", "") or code or "unknown"
+            safe_name = re.sub(r'[<>:"/\\|?*\s]', "_", dir_name).strip("_") or code or "unknown"
+            results.append(BatchResult(
+                rule_group_code=code,
+                rule_group_en=g.get("rule_group_en", ""),
+                output_dir=str(Path(output_dir) / safe_name),
+                error=f"{type(e).__name__}: {e}",
+            ))
+    return results
 
 
 def _process_group(group, output_dir, raw, no_ai, ddl_dir):
@@ -287,9 +326,18 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
     code = group["rule_group_code"]
     group_en = group["rule_group_en"]
 
+    # 安全目录名：优先 dir_name（经重名去重处理），清洗非法字符；
+    # 清洗后为空（英文名全是特殊字符或缺失）时回退 code，绝不落到空目录名
+    # （空目录名会让 out_dir=output_dir 本身，多组写进根目录互相覆盖）。
+    import re
+    dir_name = group.get("dir_name") or group_en or code or "unknown"
+    safe_name = re.sub(r'[<>:"/\\|?*\s]', "_", dir_name).strip("_") or code or "unknown"
+    out_dir = Path(output_dir) / safe_name
+
     result = BatchResult(
         rule_group_code=code,
         rule_group_en=group_en,
+        output_dir=str(out_dir),  # 提前赋值，失败组也可定位/追踪
     )
 
     try:
@@ -301,12 +349,8 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
         if not result.target_table and rules:
             result.target_table = f"{rules[-1].target_schema}.{rules[-1].target_table}"
 
-        # 输出目录：基础目录 / 规则组英文名
-        import re
-        safe_name = re.sub(r'[<>:"/\\|?*\s]', "_", group_en)
-        out_dir = Path(output_dir) / safe_name
+        # 输出目录创建（output_dir 已在 try 外预赋值）
         out_dir.mkdir(parents=True, exist_ok=True)
-        result.output_dir = str(out_dir)
 
         # 解析（复用 analyzer 全流程）
         sqls = [r.query_sql for r in rules if r.query_sql]
@@ -360,8 +404,8 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
         result.success = True
     except Exception as e:
         result.error = f"{type(e).__name__}: {e}"
-        print(f"  [ERROR] {group_en}: {result.error}", file=sys.stderr)
-
+        # output_dir 已在对象初始化时预赋值，失败组也能定位目录（便于排查/重跑）。
+        # 详细错误经 _log_group_results 写入批次日志；这里不再 print，避免 stdout 累积。
     return result
 
 
@@ -411,12 +455,12 @@ def main():
     )
     parser.add_argument("--input", required=True, help="execution_tasks.xlsx 文件路径（含多个规则组）")
     parser.add_argument("--output", required=True, help="输出基础目录")
-    parser.add_argument("--batch-size", type=int, default=50, help="每批处理的规则组数量（默认 50）")
+    parser.add_argument("--batch-size", type=int, default=20,
+                        help="每批处理的规则组数量（默认 20）。单批内解析 AST+knowledge "
+                             "随组数累积，复杂 SQL（多层 CTE/UNION/窗口）单组占内存大，"
+                             "50 组易触发单进程内存超限。20 为实测安全值。")
     parser.add_argument("--no-ai", action="store_true", help="跳过 AI 增强（只生成脚本产物）")
     parser.add_argument("--ddl-dir", default="", help="DDL 文件目录（可选）")
-    parser.add_argument("--verbose", action="store_true",
-                        help="逐组详细输出到 stdout（终端调试用）。默认详细输出写日志文件，"
-                             "stdout 只保留批次级进度，避免大批量时 stdout 累积超限被杀。")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -425,7 +469,7 @@ def main():
         sys.exit(1)
 
     run_batch(str(input_path), args.output, args.batch_size, args.no_ai,
-              args.ddl_dir, verbose=args.verbose)
+              args.ddl_dir)
 
 
 if __name__ == "__main__":
