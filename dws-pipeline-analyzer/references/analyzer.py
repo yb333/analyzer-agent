@@ -5352,6 +5352,147 @@ def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings,
     return "\n".join(lines)
 
 
+def analyze_pipeline(
+    rules: list,
+    target_fields: dict,
+    group_variables: dict,
+    dialect: str,
+    *,
+    ddl_dir: str = "",
+    source_file: str = "",
+    rule_group_code: str = "",
+) -> dict:
+    """Step 3~7 核心解析，返回完整 knowledge dict。
+
+    单条路径（main）和批量路径（batch._process_group）共用此函数，避免「两套逻辑、
+    改一处漏一处」。历史 bug：批量路径曾独立复制了这段逻辑，单条路径后续新增的
+    Step 5e（data_blocks/structured_summary）、auto_step_desc、DDL 元数据、meta 字段
+    等都没同步到批量，导致批量产出的 knowledge 缺数据块、缺步骤描述。
+
+    本函数为纯函数（无 print、不读 args、不写文件），进度输出由调用方负责。
+
+    Args:
+        rules: 规则列表（RawRule）
+        target_fields: raw["target_fields"]（按规则编码分组的 TargetFields）
+        group_variables: raw["group_variables"]（按规则编码分组的组变量）
+        dialect: SQL 方言（调用方已决定，main 用 args.dialect，批量用自动检测）
+        ddl_dir: DDL 文件目录（可选，为空则跳过 DDL 元数据解析）
+        source_file: 源文件名（可选，写入 meta.source_file）
+        rule_group_code: 规则组编码（可选，写入 meta.rule_group_code）
+
+    Returns: (knowledge, parsed_map)
+        knowledge: 完整 knowledge dict（与原 main 组装结构完全一致）
+        parsed_map: {rule_code: ParsedSQL}，供调用方做 _generate_ai_summary 等下游复用，
+            避免调用方重复构造 parsed_map（否则又回到两套解析逻辑）。
+    """
+    # ── Step 3: SQL 解析（分层：SELECT类深度解析，其他记录） ──
+    parsed_map = {}
+    for rule in rules:
+        if rule.rule_type in SELECT_RULE_TYPES and rule.query_sql:
+            parsed_map[rule.rule_code] = parse_single_sql(rule.query_sql, dialect)
+        elif rule.query_sql:
+            # 非 SELECT 类但有 SQL（删数/分区交换等）：记录但不深度解析
+            parsed_map[rule.rule_code] = ParsedSQL(raw_sql=rule.query_sql)
+        else:
+            parsed_map[rule.rule_code] = ParsedSQL(parse_error="空 SQL")
+
+    # ── Step 4: 拓扑构建 ──
+    topology = build_topology(rules, parsed_map)
+
+    # ── Step 5: 数据流 ──
+    data_flow = build_data_flow(rules, parsed_map)
+
+    # ── Step 5b: 字段映射（双源交叉：target_fields + SQL AST）──
+    field_mappings = build_field_mappings(rules, parsed_map, target_fields)
+
+    # ── Step 5c: 关联键跨步骤追溯 ──
+    enrich_join_key_lineage(data_flow, rules, parsed_map, topology, field_mappings)
+
+    # ── Step 5d: 字段物理来源穿透（供 mapping 用）──
+    enrich_field_physical_sources(field_mappings, data_flow, rules, parsed_map, topology)
+
+    # ── Step 5e: 结构化步骤概述 + 数据块（步骤卡片的加工逻辑展示）──
+    topo_steps = topology.get("steps", [])
+    df_steps = data_flow.get("steps", [])
+    fields_list = field_mappings.get("fields", [])
+    for ts in topo_steps:
+        ds = next((s for s in df_steps if s.get("step_id") == ts.get("step_id")), None)
+        if ds:
+            ds["structured_summary"] = build_structured_step_summary(ts, ds, fields_list)
+            rc = ts.get("rule_code", "")
+            parsed = parsed_map.get(rc)
+            ds["data_blocks"] = build_data_blocks(ts, ds, parsed, fields_list)
+
+    # ── Step 6: 质量分析 ──
+    quality = analyze_quality(topology, data_flow, field_mappings, parsed_map)
+
+    # ── Step 7: 组装输出 ──
+    # 最终目标表（最大 exec_sequence 的步骤目标表，考虑交换分区）
+    target_name = "unknown"
+    if rules:
+        max_seq_rule = max(rules, key=lambda r: r.exec_sequence)
+        if max_seq_rule.rule_type == 9 and max_seq_rule.exchange_source_table:
+            target_name = max_seq_rule.exchange_source_table
+        else:
+            target_name = max_seq_rule.target_table or "unknown"
+
+    # 加工模式标签自动检测
+    patterns = detect_patterns(parsed_map, topology)
+
+    # DDL 字段元数据（类型+中文名，可选）
+    target_metadata = {}
+    if ddl_dir:
+        target_metadata = parse_ddl_for_metadata(ddl_dir, target_name)
+
+    # 生成兜底 step_descriptions（脚本自动，不依赖 AI）
+    scenarios = topology.get("scenarios", [])
+    auto_step_desc = []
+    for rule in rules:
+        parsed = parsed_map.get(rule.rule_code, ParsedSQL())
+        desc = generate_step_description(rule, parsed, scenarios, rules)
+        step = next((s for s in topology["steps"] if s["rule_code"] == rule.rule_code), None)
+        step_id = step["step_id"] if step else ""
+        auto_step_desc.append({
+            "step_id": step_id,
+            "rule_code": rule.rule_code,
+            "purpose": desc["purpose"],
+            "logic": desc["logic"],
+            "is_auto_generated": True,
+        })
+
+    knowledge = {
+        "meta": {
+            "source_type": "execution_tasks.xlsx",
+            "source_file": source_file,
+            "analysis_time": datetime.now().isoformat(),
+            "dialect": dialect,
+            "rule_group_code": rule_group_code,
+            "total_rules": len(rules),
+            "total_target_fields": sum(len(v) for v in target_fields.values()),
+            "total_sql_columns": sum(
+                len(parsed_map.get(r.rule_code, ParsedSQL()).select_columns)
+                for r in rules
+            ),
+            "target_table": target_name,
+            "version": "1.0.0",
+            "patterns": patterns,
+            "target_field_types": {k: v["type"] for k, v in target_metadata.items() if v.get("type")},
+            "target_field_comments": {k: v["comment"] for k, v in target_metadata.items() if v.get("comment")},
+        },
+        "topology": topology,
+        "data_flow": data_flow,
+        "field_mappings": field_mappings,
+        "quality": quality,
+        "business_logic": {
+            "summary": "",
+            "step_descriptions": auto_step_desc,
+            "key_transforms": [],
+        },
+        "source": build_source(rules, target_fields, group_variables, parsed_map),
+    }
+    return knowledge, parsed_map
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="dws-pipeline-analyzer — 制品包深度分析器",
@@ -5476,162 +5617,23 @@ def main():
     print(f"Step 2: 方言 = {dialect}")
     print()
 
-    # ── Step 3: SQL 解析（分层：SELECT类深度解析，其他记录） ──
-    print("Step 3: 解析 SQL...")
-    parsed_map = {}
-    for rule in rules:
-        if rule.rule_type in SELECT_RULE_TYPES and rule.query_sql:
-            # SELECT 类规则：完整解析
-            parsed = parse_single_sql(rule.query_sql, dialect)
-            parsed_map[rule.rule_code] = parsed
-            if parsed.parse_error:
-                print(f"  [!] {rule.rule_code}: {parsed.parse_error}")
-            else:
-                print(f"  {rule.rule_code} [{RULE_TYPE_MAP.get(rule.rule_type, '?')}]: "
-                      f"{len(parsed.select_columns)} 列, "
-                      f"{len(parsed.source_tables)} 表, {len(parsed.ctes)} CTE")
-        elif rule.query_sql:
-            # 非 SELECT 类但有 SQL（删数/分区交换等）：记录但不深度解析
-            parsed_map[rule.rule_code] = ParsedSQL(raw_sql=rule.query_sql)
-            print(f"  {rule.rule_code} [{RULE_TYPE_MAP.get(rule.rule_type, '?')}]: "
-                  f"记录操作（不深度解析）")
-        else:
-            parsed_map[rule.rule_code] = ParsedSQL(parse_error="空 SQL")
-    print()
-
-    # ── Step 4: 拓扑构建 ──
-    print("Step 4: 构建拓扑...")
-    topology = build_topology(rules, parsed_map)
-    print(f"  调度层级: {len(topology['schedule_plan'])}")
-    print(f"  数据依赖: {len(topology['data_dependencies'])}")
-    print(f"  自引用: {len(topology['self_references'])}")
-    print(f"  场景数: {len(topology.get('scenarios', []))}")
-    for sc in topology.get("scenarios", []):
-        print(f"    {sc['name']}: {sc['rule_count']} 个规则")
-    print()
-
-    # ── Step 5: 数据流 ──
-    print("Step 5: 构建数据流...")
-    data_flow = build_data_flow(rules, parsed_map)
-    print(f"  涉及表: {len(data_flow['tables'])}")
-    print()
-
-    # ── Step 5b: 字段映射 ──
-    print("Step 5b: 构建字段映射（双源交叉）...")
-    field_mappings = build_field_mappings(rules, parsed_map, raw["target_fields"])
+    # ── Step 3~7: 核心解析（与批量路径共用 analyze_pipeline，避免两套逻辑漂移）──
+    print("Step 3-7: 解析 + 组装 knowledge...")
+    knowledge, parsed_map = analyze_pipeline(
+        rules, raw["target_fields"], raw["group_variables"], dialect,
+        ddl_dir=args.ddl_dir, source_file=input_path.name,
+        rule_group_code=raw["rule_group_code"],
+    )
+    # 从 knowledge 取回 AI summary 需要的中间结构
+    topology = knowledge["topology"]
+    data_flow = knowledge["data_flow"]
+    field_mappings = knowledge["field_mappings"]
+    quality = knowledge["quality"]
+    target_name = knowledge["meta"]["target_table"]
     stats = field_mappings["statistics"]
-    print(f"  SQL 列: {stats['total_in_sql']}")
-    print(f"  TargetFields: {stats['total_in_excel']}")
-    print(f"  精确匹配: {stats['match_count']}")
-    print(f"  仅 SQL: {len(stats['only_in_sql'])}")
-    print(f"  仅 Excel: {len(stats['only_in_excel'])}")
+    print(f"  步骤数: {len(rules)}, 字段数: {stats['total_in_sql']}, "
+          f"问题数: {len(quality['issues'])}")
     print()
-
-    # ── Step 5c: 关联键跨步骤追溯 ──
-    print("Step 5c: 构建关联键追溯链...")
-    enrich_join_key_lineage(data_flow, rules, parsed_map, topology, field_mappings)
-    traced = sum(1 for s in data_flow["steps"] if s.get("join_key_lineage"))
-    print(f"  含追溯链的步骤: {traced}")
-    print()
-
-    # ── Step 5d: 字段物理来源穿透（供 mapping 用）──
-    print("Step 5d: 构建字段物理来源穿透...")
-    enrich_field_physical_sources(field_mappings, data_flow, rules, parsed_map, topology)
-    traced_f = sum(1 for f in field_mappings["fields"] if f.get("physical_source"))
-    print(f"  含物理穿透的字段: {traced_f}")
-    print()
-
-    # ── Step 5e: 结构化步骤概述（供 HTML 详情用）──
-    topo_steps = topology.get("steps", [])
-    df_steps = data_flow.get("steps", [])
-    fields_list = field_mappings.get("fields", [])
-    for ts in topo_steps:
-        ds = next((s for s in df_steps if s.get("step_id") == ts.get("step_id")), None)
-        if ds:
-            ds["structured_summary"] = build_structured_step_summary(ts, ds, fields_list)
-            # 数据块结构（步骤卡片的加工逻辑展示）
-            rc = ts.get("rule_code", "")
-            parsed = parsed_map.get(rc)
-            ds["data_blocks"] = build_data_blocks(ts, ds, parsed, fields_list)
-
-    # ── Step 6: 质量分析 ──
-    print("Step 6: 质量分析...")
-    quality = analyze_quality(topology, data_flow, field_mappings, parsed_map)
-    q_stats = quality["issue_statistics"]
-    print(f"  问题: {len(quality['issues'])} "
-          f"(critical={q_stats['critical']}, medium={q_stats['medium']}, "
-          f"low={q_stats['low']}, info={q_stats['info']})")
-    print()
-
-    # ── Step 7: 组装输出 ──
-    print("Step 7: 组装 knowledge_draft.json...")
-
-    # 找最终目标表（最大 exec_sequence 的步骤目标表，考虑交换分区）
-    target_name = "unknown"
-    if rules:
-        max_seq_rule = max(rules, key=lambda r: r.exec_sequence)
-        if max_seq_rule.rule_type == 9 and max_seq_rule.exchange_source_table:
-            target_name = max_seq_rule.exchange_source_table
-        else:
-            target_name = max_seq_rule.target_table or "unknown"
-
-    # 加工模式标签自动检测
-    patterns = detect_patterns(parsed_map, topology)
-    print(f"  加工模式标签: {[p['label'] for p in patterns]}")
-
-    # DDL 字段元数据（类型+中文名，可选）
-    target_metadata = {}
-    if args.ddl_dir:
-        target_metadata = parse_ddl_for_metadata(args.ddl_dir, target_name)
-        print(f"  DDL 字段元数据: {len(target_metadata)} 个字段")
-
-    # ── 生成兜底 step_descriptions（脚本自动，不依赖 AI）──
-    scenarios = topology.get("scenarios", [])
-    auto_step_desc = []
-    for rule in rules:
-        parsed = parsed_map.get(rule.rule_code, ParsedSQL())
-        desc = generate_step_description(rule, parsed, scenarios, rules)
-        # 找 step_id
-        step = next((s for s in topology["steps"] if s["rule_code"] == rule.rule_code), None)
-        step_id = step["step_id"] if step else ""
-        auto_step_desc.append({
-            "step_id": step_id,
-            "rule_code": rule.rule_code,
-            "purpose": desc["purpose"],
-            "logic": desc["logic"],
-            "is_auto_generated": True,  # 标记为自动生成，AI 可以覆盖
-        })
-
-    knowledge = {
-        "meta": {
-            "source_type": "execution_tasks.xlsx",
-            "source_file": input_path.name,
-            "analysis_time": datetime.now().isoformat(),
-            "dialect": dialect,
-            "rule_group_code": raw["rule_group_code"],
-            "total_rules": len(rules),
-            "total_target_fields": sum(len(v) for v in raw["target_fields"].values()),
-            "total_sql_columns": sum(
-                len(parsed_map.get(r.rule_code, ParsedSQL()).select_columns)
-                for r in rules
-            ),
-            "target_table": target_name,
-            "version": "1.0.0",
-            "patterns": patterns,
-            "target_field_types": {k: v["type"] for k, v in target_metadata.items() if v.get("type")},
-            "target_field_comments": {k: v["comment"] for k, v in target_metadata.items() if v.get("comment")},
-        },
-        "topology": topology,
-        "data_flow": data_flow,
-        "field_mappings": field_mappings,
-        "quality": quality,
-        "business_logic": {
-            "summary": "",
-            "step_descriptions": auto_step_desc,
-            "key_transforms": [],
-        },
-        "source": build_source(rules, raw["target_fields"], raw["group_variables"], parsed_map),
-    }
 
     # 写入文件
     output_file = output_dir / "knowledge_draft.json"

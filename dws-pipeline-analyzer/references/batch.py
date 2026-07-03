@@ -313,14 +313,10 @@ def _run_batch_inprocess(excel_path, output_dir, no_ai, ddl_dir,
 
 def _process_group(group, output_dir, raw, no_ai, ddl_dir):
     """处理单个规则组：解析 + 生成交付件。"""
-    from datetime import datetime
-    from analyzer import (detect_dialect, parse_single_sql,
-                          build_topology, build_data_flow, build_field_mappings,
-                          analyze_quality, detect_patterns, build_source,
-                          enrich_join_key_lineage, enrich_field_physical_sources,
-                          _is_intermediate_table)
-    from view_generator import (build_report_data, generate_mapping,
-                                generate_asset_report, generate_tech_design)
+    from analyzer import (detect_dialect, analyze_pipeline,
+                          _generate_ai_summary, _is_intermediate_table)
+    from view_generator import (generate_mapping, generate_asset_report,
+                                generate_tech_design)
 
     rules = group["rules"]
     code = group["rule_group_code"]
@@ -341,7 +337,8 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
     )
 
     try:
-        # 目标表（取最后一个非中间表）
+        # 目标表（取最后一个非中间表，仅用于日志/结果展示；
+        # knowledge.meta.target_table 由 analyze_pipeline 内部按 max(exec_sequence) 算）
         for rule in reversed(rules):
             if not _is_intermediate_table(rule.target_table):
                 result.target_table = f"{rule.target_schema}.{rule.target_table}" if rule.target_schema else rule.target_table
@@ -352,35 +349,19 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
         # 输出目录创建（output_dir 已在 try 外预赋值）
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # 解析（复用 analyzer 全流程）
+        # 核心解析（与单条路径共用 analyze_pipeline，单一真相，杜绝两套逻辑漂移）。
+        # 历史 bug：批量曾独立复制 Step3-7，单条路径新增的 data_blocks、
+        # structured_summary、auto_step_desc、DDL 元数据等都没同步，导致批量产出缺数据块。
+        target_fields = raw.get("target_fields", {}) or {}
+        group_variables = raw.get("group_variables", {}) or {}
         sqls = [r.query_sql for r in rules if r.query_sql]
         dialect = detect_dialect(sqls)
-        parsed_map = {r.rule_code: parse_single_sql(r.query_sql, dialect) for r in rules}
-        topology = build_topology(rules, parsed_map)
-        data_flow = build_data_flow(rules, parsed_map)
-        field_mappings = build_field_mappings(rules, parsed_map, {})
-        enrich_join_key_lineage(data_flow, rules, parsed_map, topology, field_mappings)
-        enrich_field_physical_sources(field_mappings, data_flow, rules, parsed_map, topology)
-        quality = analyze_quality(topology, data_flow, field_mappings, parsed_map)
-        patterns = detect_patterns(parsed_map, topology)
+        knowledge, parsed_map = analyze_pipeline(
+            rules, target_fields, group_variables, dialect,
+            ddl_dir=ddl_dir, source_file="", rule_group_code=code,
+        )
 
-        # 构造 knowledge
-        knowledge = {
-            "meta": {
-                "source_type": "execution_tasks.xlsx",
-                "analysis_time": datetime.now().isoformat(),
-                "dialect": dialect, "total_rules": len(rules),
-                "target_table": result.target_table.split(".")[-1],
-                "patterns": patterns,
-                "target_field_types": {}, "target_field_comments": {},
-            },
-            "topology": topology, "data_flow": data_flow,
-            "field_mappings": field_mappings, "quality": quality,
-            "business_logic": {"summary": "", "step_descriptions": [], "key_transforms": []},
-            "source": build_source(rules, {}, {}, parsed_map),
-        }
-
-        # 生成 knowledge_draft.json + summary
+        # 生成 knowledge_draft.json
         import json
         (out_dir / "knowledge_draft.json").write_text(
             json.dumps(knowledge, ensure_ascii=False, indent=2),
@@ -394,9 +375,12 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
         # AI 增强（可选）
         if not no_ai:
             result.has_ai = True
-            # 批量场景下只标记，实际 AI 增强由 opencode 命令流程处理
-            # 这里生成 summary 供 AI 读取（注意：定义有 7 个参数，含 data_flow）
-            from analyzer import _generate_ai_summary
+            # 批量场景下只标记，实际 AI 增强由命令流程处理；
+            # 这里生成 summary 供 AI 读取（_generate_ai_summary 定义有 7 个参数，含 data_flow）
+            topology = knowledge["topology"]
+            data_flow = knowledge["data_flow"]
+            field_mappings = knowledge["field_mappings"]
+            quality = knowledge["quality"]
             summary_text = _generate_ai_summary(knowledge, rules, parsed_map, topology,
                                                  field_mappings, quality, data_flow)
             (out_dir / "knowledge_summary.md").write_text(summary_text, encoding="utf-8", newline="\n")

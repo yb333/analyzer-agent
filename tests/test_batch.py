@@ -101,6 +101,85 @@ class TestBatchAnalysis:
             assert (out_path / "tech_design.md").exists(), f"tech_design.md 应存在"
             assert (out_path / "knowledge_draft.json").exists(), f"knowledge_draft.json 应存在"
 
+    def test_batch_knowledge_has_data_blocks_and_summary(self, multi_group_xlsx, tmp_path):
+        """防回归：批量产出的 knowledge 必须含 data_blocks 和 structured_summary。
+
+        历史 bug：批量 _process_group 与单条 run_analyze 是两套独立写的逻辑，单条
+        路径有 Step 5e（build_data_blocks + build_structured_step_summary），批量
+        路径漏掉了，导致 asset_report.html 的「数据块」部分空白。此用例锁定：批量
+        产出的 knowledge_draft.json 里每个 step 都应有 data_blocks 和
+        structured_summary，与单条路径产出一致。
+        """
+        import json
+        from batch import run_batch
+        out = str(tmp_path / "output")
+        results = run_batch(multi_group_xlsx, out, batch_size=50, no_ai=True)
+
+        for r in results:
+            if not r.success:
+                continue
+            draft_path = Path(r.output_dir) / "knowledge_draft.json"
+            knowledge = json.loads(draft_path.read_text(encoding="utf-8"))
+            df_steps = knowledge.get("data_flow", {}).get("steps", [])
+            assert df_steps, f"{r.rule_group_en}: data_flow.steps 不应为空"
+            for ds in df_steps:
+                assert "data_blocks" in ds, \
+                    f"{r.rule_group_en} step {ds.get('step_id')}: 缺 data_blocks（数据块应生成）"
+                assert "structured_summary" in ds, \
+                    f"{r.rule_group_en} step {ds.get('step_id')}: 缺 structured_summary"
+
+    def test_batch_knowledge_matches_single_path(self, multi_group_xlsx, tmp_path):
+        """防回归：批量路径与单条路径产出 knowledge 结构必须一致。
+
+        终极验证：批量 _process_group 和单条 main 现在共用 analyze_pipeline，所以
+        用同一份规则组数据，分别走「直接调 analyze_pipeline」和「批量 run_batch」，
+        两者的 knowledge 结构（顶层字段、meta 字段、step 的 data_blocks/
+        structured_summary、business_logic.step_descriptions）必须一致。这锁定了
+        「单一真相」——以后单条路径任何变更，批量自动同步，不再可能漂移。
+        """
+        import json
+        from analyzer import read_excel, detect_dialect, analyze_pipeline
+        from batch import run_batch
+
+        # 1) 单条路径：直接调 analyze_pipeline（取第一个规则组的数据）
+        raw = read_excel(multi_group_xlsx)
+        all_rules = raw["rules"]
+        global_group_en = (raw.get("rule_group_en") or "").strip()
+        from batch import _group_rules_by_code
+        groups = _group_rules_by_code(all_rules, global_group_en)
+        g0 = groups[0]
+        sqls = [r.query_sql for r in g0["rules"] if r.query_sql]
+        dialect = detect_dialect(sqls)
+        single_kj, _ = analyze_pipeline(
+            g0["rules"], raw.get("target_fields", {}), raw.get("group_variables", {}),
+            dialect, rule_group_code=g0["rule_group_code"],
+        )
+
+        # 2) 批量路径
+        out = str(tmp_path / "output")
+        results = run_batch(multi_group_xlsx, out, batch_size=50, no_ai=True)
+        batch_r0 = next(r for r in results if r.rule_group_code == g0["rule_group_code"])
+        batch_kj = json.loads(
+            (Path(batch_r0.output_dir) / "knowledge_draft.json").read_text(encoding="utf-8"))
+
+        # 3) 结构一致性断言
+        # 顶层字段集合一致
+        assert set(single_kj.keys()) == set(batch_kj.keys()), \
+            f"顶层字段不一致: 单条={set(single_kj.keys())} 批量={set(batch_kj.keys())}"
+        # meta 字段集合一致
+        assert set(single_kj["meta"].keys()) == set(batch_kj["meta"].keys()), \
+            f"meta 字段不一致: 单条={set(single_kj['meta'].keys())} 批量={set(batch_kj['meta'].keys())}"
+        # data_flow.steps 每步都含 data_blocks 和 structured_summary（批量也不能漏）
+        for ds in batch_kj["data_flow"]["steps"]:
+            assert "data_blocks" in ds, "批量 step 缺 data_blocks"
+            assert "structured_summary" in ds, "批量 step 缺 structured_summary"
+        # business_logic.step_descriptions 非空（批量也要有自动生成的步骤描述）
+        assert batch_kj["business_logic"]["step_descriptions"], \
+            "批量 business_logic.step_descriptions 不应为空（应与单条一致自动生成）"
+        assert len(batch_kj["business_logic"]["step_descriptions"]) == \
+               len(single_kj["business_logic"]["step_descriptions"]), \
+            "步骤描述数量不一致"
+
     def test_batch_size_split(self, multi_group_xlsx, tmp_path):
         """分批处理：batch_size=2 时 3 个组应分 2 批"""
         from batch import run_batch
