@@ -56,9 +56,19 @@ class TestTypeConsistencyDetection:
         issues = _type_issues(kj)
 
         assert len(issues) >= 1, "应检出精度不一致"
-        assert issues[0]["severity"] == "high"
-        assert "DECIMAL(18,2)" in issues[0]["current_type"]
-        assert "DECIMAL(18,4)" in issues[0]["source_type"]
+        iss = issues[0]
+        assert iss["severity"] == "high"
+        # 描述里明确指出两边表名和类型
+        assert iss["current_table"], "应指明当前表"
+        assert iss["source_table"], "应指明来源表"
+        assert "DECIMAL(18,2)" in iss["current_type"]
+        assert "DECIMAL(18,4)" in iss["source_type"]
+        assert iss["source_step"], "应指明来源步骤"
+        assert iss["current_step"], "应指明当前步骤"
+        assert iss["mismatch_kind"] == "精度不一致"
+        # title 里含两边表名
+        assert iss["source_table"] in iss["title"]
+        assert iss["current_table"] in iss["title"]
 
     def test_length_truncation_detected(self, tmp_path):
         """VARCHAR(128) → VARCHAR(64) 长度截断应检出。"""

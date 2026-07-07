@@ -187,6 +187,33 @@ class TestFieldLevelTypeInjection:
         if order_id_field:
             assert order_id_field.get("field_type"), "过程表字段 order_id 应有类型"
 
+    def test_view_generator_reads_field_type(self, mock_repo_data):
+        """防回归：view_generator 从 field_type/field_comment 取（不从 meta）。
+
+        历史 bug：view_generator 从 meta.target_field_types 取类型（只有目标表），
+        不从 field_mappings.fields[].field_type 取（P2 注入的，含过程表），
+        导致 HTML 报告和 mapping.xlsx 里字段无类型/业务含义。
+        """
+        from engine import analyze_pipeline, detect_dialect
+        from view_generator import build_report_data
+        raw = mock_repo_data["raw"]
+        ddl_dir = str(mock_repo_data["ddl_dir"])
+        dialect = detect_dialect([r.query_sql for r in raw["rules"] if r.query_sql])
+
+        kj, _ = analyze_pipeline(raw["rules"], raw["target_fields"],
+                                  raw["group_variables"], dialect, ddl_dir=ddl_dir)
+        report = build_report_data(kj)
+
+        # HTML 报告 schema_fields 应有类型（从 field_type 取）
+        schema_fields = report.get("schema_fields", [])
+        total_field = next((f for f in schema_fields if f["name"] == "total_amount"), None)
+        assert total_field, "schema_fields 应含 total_amount"
+        assert total_field.get("type") == "DECIMAL(18,2)", \
+            f"total_amount 类型应为 DECIMAL(18,2)，实际 {total_field.get('type')}"
+        # 业务含义应从 DDL 注释取（field_comment）
+        assert "订单总额" in total_field.get("meaning", ""), \
+            f"total_amount 业务含义应含'订单总额'，实际 {total_field.get('meaning')}"
+
 
 # ── Fixtures ──────────────────────────────────────────────
 

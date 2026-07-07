@@ -514,8 +514,11 @@ def build_report_data(knowledge):
             )
             seen_fields[fname] = {
                 "name": fname,
-                "type": target_types.get(fname.lower(), ""),
-                "meaning": ai_transform.get("meaning", ""),
+                # 优先从字段自身的 field_type 取（P2 注入，含过程表），
+                # 兜底从 meta 的 target_types 取（只有目标表）
+                "type": f.get("field_type", "") or target_types.get(fname.lower(), ""),
+                # 业务含义：优先 DDL 注释（field_comment），兜底 AI 增强
+                "meaning": f.get("field_comment", "") or ai_transform.get("meaning", ""),
                 "transform_type": f.get("transform_type", ""),
                 "producing_step": f.get("producing_step", ""),
             }
@@ -1705,8 +1708,10 @@ def generate_mapping(knowledge, output_dir):
             rule = rule_map.get(tt, "加工")
 
             target_field_name = f.get("target_field", "")
-            field_cn = ddl_comments.get(target_field_name.lower(), "")
-            field_type = ddl_types.get(target_field_name.lower(), "")
+            # 优先从字段自身的 field_type/field_comment 取（P2 注入，含过程表），
+            # 兜底从 meta 的 ddl_types/ddl_comments 取（只有目标表）
+            field_cn = f.get("field_comment", "") or ddl_comments.get(target_field_name.lower(), "")
+            field_type = f.get("field_type", "") or ddl_types.get(target_field_name.lower(), "")
 
             # 优先用跨步骤穿透的 physical_source（追到物理源表），没有则回退 CTE 穿透
             phys_sources = f.get("physical_source", [])

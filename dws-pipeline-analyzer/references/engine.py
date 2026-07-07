@@ -5082,20 +5082,19 @@ def check_type_consistency(field_mappings: dict, table_catalog: dict,
     # 构建 step_id → {alias_upper: real_table_full} 的别名映射
     # lineage 里的 source_table 是别名（如 t/a），需要解析为真实表名
     step_alias_map = {}
-    for rule in rules:
+    # step_id → 该步写入的目标表（producing table），用于 issue 描述里指出"在哪"
+    step_target_table = {}
+    for i, rule in enumerate(rules):
+        sid = f"step_{i+1}"
+        step_target_table[sid] = _normalize_table_name(rule.target_schema, rule.target_table)
         parsed = parsed_map.get(rule.rule_code)
         if not parsed:
             continue
-        # 从 parsed.source_tables 取 alias → source_table
         amap = {}
         for j in parsed.source_tables:
             if j.alias and j.source_table:
                 amap[j.alias.upper()] = j.source_table
-        # 找 step_id
-        for i, r in enumerate(rules):
-            if r.rule_code == rule.rule_code:
-                step_alias_map[f"step_{i+1}"] = amap
-                break
+        step_alias_map[sid] = amap
 
     issues = []
     fields = field_mappings.get("fields", [])
@@ -5107,6 +5106,7 @@ def check_type_consistency(field_mappings: dict, table_catalog: dict,
 
         target_field = f.get("target_field", "")
         producing_step = f.get("producing_step", "")
+        current_table = step_target_table.get(producing_step, "")
 
         # 遍历 lineage，找指向 catalog 表的源字段
         for lin in f.get("lineage", []):
@@ -5137,25 +5137,32 @@ def check_type_consistency(field_mappings: dict, table_catalog: dict,
             if ftype_norm != src_type_norm:
                 # 精度变化（DECIMAL 精度不同）比纯类型不同更值得关注
                 severity = "medium"
+                mismatch_kind = "类型不一致"
                 if _is_precision_change(ftype_norm, src_type_norm):
                     severity = "high"  # 精度丢失/截断风险
+                    mismatch_kind = "精度不一致"
                 elif ftype_norm.split("(")[0] != src_type_norm.split("(")[0]:
                     severity = "high"  # 类型族不同（VARCHAR→INT）
+                    mismatch_kind = "类型不一致"
 
                 issues.append({
                     "category": "type_consistency",
                     "severity": severity,
-                    "title": f"字段类型不一致: {target_field}",
+                    "title": f"字段{mismatch_kind}: {target_field} ({src_table} → {current_table})",
                     "description": (
-                        f"字段 '{target_field}' 在 {producing_step} 类型为 {ftype}，"
-                        f"但来源表 {src_table}.{src_field} 类型为 {src_type}，"
-                        f"可能导致精度丢失或数据截断"
+                        f"字段 '{target_field}' 在 {src_table}（{lin_step}）类型为 {src_type}，"
+                        f"写入 {current_table}（{producing_step}）后类型变为 {ftype}，"
+                        f"{mismatch_kind}可能导致数据{'精度丢失或截断' if severity == 'high' else '异常'}"
                     ),
                     "field": target_field,
-                    "current_type": ftype,
                     "source_table": src_table,
                     "source_field": src_field,
                     "source_type": src_type,
+                    "source_step": lin_step,
+                    "current_table": current_table,
+                    "current_type": ftype,
+                    "current_step": producing_step,
+                    "mismatch_kind": mismatch_kind,
                 })
 
     return issues
