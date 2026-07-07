@@ -2381,7 +2381,18 @@ function renderQuality() {
           html += ' <span style="font-size:11px;color:var(--text-muted);font-weight:400;">[' + escapeHtml(iss.rule_code) + ']</span>';
         }
         html += '</div>';
-        if (iss.detail) html += '<div style="color:var(--text-secondary);font-size:12px;margin-top:2px;">' + escapeHtml(iss.detail) + '</div>';
+        var detail = iss.detail || iss.description || '';
+        if (detail) html += '<div style="color:var(--text-secondary);font-size:12px;margin-top:2px;">' + escapeHtml(detail) + '</div>';
+        // 类型不一致：显示两边类型对比
+        if (iss.category === 'type_consistency' && iss.source_table && iss.current_table) {
+          html += '<div style="font-size:12px;margin-top:4px;padding:4px 8px;background:var(--bg-secondary);border-radius:4px;">';
+          html += '<span style="color:var(--text-muted);">' + escapeHtml(iss.source_table) + '.' + escapeHtml(iss.source_field || '') + '</span>';
+          html += ' <code style="background:#fecaca;padding:1px 4px;border-radius:3px;">' + escapeHtml(iss.source_type || '?') + '</code>';
+          html += ' <span style="color:var(--text-muted);">→</span> ';
+          html += '<span style="color:var(--text-muted);">' + escapeHtml(iss.current_table) + '.' + escapeHtml(iss.field || '') + '</span>';
+          html += ' <code style="background:#fecaca;padding:1px 4px;border-radius:3px;">' + escapeHtml(iss.current_type || '?') + '</code>';
+          html += '</div>';
+        }
         html += '</div>';
         html += '</div>';
       });

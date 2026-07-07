@@ -42,14 +42,14 @@ python -c "import openpyxl, sqlglot; print('OK')"
 
 ## 工作流程
 
-> **路径约定**：`--output` 指定**基础目录**（工作目录或 `docs/` 等）。脚本会自动在其下按
-> **规则组英文名称**（取自 Excel「规则组英文名称」列，缺失则回退规则组编码）建子目录。
+> **路径约定**：`--output` 固定用 `./output/`（基础目录）。脚本会自动在其下按
+> **规则组英文名称**（取自 Excel/yml「规则组英文名称」，缺失则回退规则组编码）建子目录。
 > 下文 `{output_dir}` 代指该自动创建的子目录，从 Step 1 输出日志读取真实路径。
 
 ### Step 1: 执行分析脚本
 
 ```bash
-python {skill_dir}/run.py analyzer --input {input_xlsx} --output {base_dir} [--ddl-dir {ddl_dir}]
+python {skill_dir}/run.py analyzer --input {input_xlsx} --output ./output/ [--ddl-dir {ddl_dir}]
 ```
 
 DDL 目录：xlsx 场景用 `--ddl-dir` 指定（可选）；yml/代码仓场景自动发现。
