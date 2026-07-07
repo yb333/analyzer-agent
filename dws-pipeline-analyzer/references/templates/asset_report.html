@@ -2171,8 +2171,8 @@ function renderFieldMapping() {
     html += '<td style="font-size:12px;color:var(--text-muted);">' + (fi + 1) + '</td>';
     var fieldBadge = f.is_final_field === false ? ' <span style="font-size:9px;padding:1px 5px;border-radius:4px;background:#fef9c3;color:#854d0e;vertical-align:middle;">中间过程</span>' : '';
     html += '<td><span class="field-name">' + escapeHtml(f.target_field) + '</span>' + fieldBadge + '</td>';
-    html += '<td><span class="field-type">' + escapeHtml(sf.type || '-') + '</span></td>';
-    html += '<td><span style="font-size:12px;color:var(--text-secondary);">' + escapeHtml(sf.meaning || '-') + '</span></td>';
+    html += '<td><span class="field-type">' + escapeHtml(f.field_type || sf.type || '-') + '</span></td>';
+    html += '<td><span style="font-size:12px;color:var(--text-secondary);">' + escapeHtml(f.field_comment || sf.meaning || '-') + '</span></td>';
     html += '<td><span class="source-info" style="font-size:12px;">' + escapeHtml(srcText) + '</span></td>';
     html += '<td>' + roleHtml + '</td>';
     var chainData = REPORT_DATA.field_chain_map || {};

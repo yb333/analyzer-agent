@@ -768,6 +768,9 @@ def build_report_data(knowledge):
             "target_table": target_table,
             "scenario": scenario,
             "transform_type": best_tt,
+            # 字段类型+业务含义：从 P2 注入的 field_type/field_comment 取（写入表的类型）
+            "field_type": f.get("field_type", ""),
+            "field_comment": f.get("field_comment", ""),
             "origin_sources": origin_sources,
             "is_final_field": is_final_field,
             "in_target_fields": f.get("in_target_fields", False),
