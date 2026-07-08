@@ -159,6 +159,37 @@ class TestReadYml:
         assert len(tfs) == 1, f"额外信息整体为|也应解析，实际{len(tfs)}"
         assert tfs[0].target_field == "x"
 
+    def test_read_yml_multi_part_query_sql(self, tmp_path):
+        """防回归：超长SQL拆成查询语句1+查询语句2（和Excel多列一样）。
+
+        真实 yml 把超长 SQL 拆成多条 key（|(生成的)查询语句1/2），
+        read_yml 需要拼接，否则 SQL 被截断。
+        """
+        yml_content = (
+            "规则编码: R0001\n"
+            "规则类型: '1'\n"
+            "目标表: dwb_test_f\n"
+            "(生成的)查询语句1: |-\n"
+            "  WITH agg AS (\n"
+            "    SELECT a.id, a.amount FROM ods.src a\n"
+            "(生成的)查询语句2: |-\n"
+            "  WHERE a.del='N')\n"
+            "  SELECT * FROM agg\n"
+            "规则组编码: GR_TEST\n"
+            "规则组英文名称: DWB_TEST_F\n"
+        )
+        yml_dir = tmp_path / "multipart"
+        yml_dir.mkdir()
+        (yml_dir / "R0001.yml").write_text(yml_content, encoding="utf-8")
+
+        from analyzer import read_yml
+        raw = read_yml(str(yml_dir))
+        assert len(raw["rules"]) == 1
+        sql = raw["rules"][0].query_sql
+        assert "WITH agg AS" in sql, "查询语句1 应拼接"
+        assert "WHERE a.del" in sql, "查询语句2 应拼接"
+        assert "SELECT * FROM agg" in sql, "查询语句2 末尾应拼接"
+
     def test_read_yml_group_variables(self, tmp_path):
         """read_yml 能解析额外信息里的 GroupVariables。"""
         from analyzer import read_yml

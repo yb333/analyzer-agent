@@ -440,6 +440,35 @@ def _parse_int(val: str) -> int:
         return 0
 
 
+def _yml_read_query_sql(data: dict) -> str:
+    """从 yml dict 读取查询语句（支持多段拼接，和 read_excel 的 _read_query_sql 对齐）。
+
+    真实 yml 里超长 SQL 会被拆成多条（和 Excel 多列一样）：
+        (生成的)查询语句1: |-   ← 第一段
+          WITH agg AS (...
+        (生成的)查询语句2: |-   ← 第二段
+          FROM ods.t WHERE...)
+
+    本函数找所有「查询语句N」key，按 N 排序拼接。
+    key 格式容错：半角/全角括号、有无后缀数字、| literal block scalar。
+    """
+    import re
+    sql_parts = []  # [(序号, 内容)]
+    for key, val in data.items():
+        key_str = str(key)
+        # 匹配「查询语句N」或「查询语句」（无数字视为1）
+        m = re.match(r'.*查询语句\s*(\d*)', key_str)
+        if m:
+            num = int(m.group(1)) if m.group(1) else 1
+            val_str = "" if val is None else str(val)
+            if val_str.strip():
+                sql_parts.append((num, val_str))
+    if not sql_parts:
+        return ""
+    sql_parts.sort(key=lambda x: x[0])
+    return "".join(part for _, part in sql_parts)
+
+
 def read_yml(yml_dir: str) -> dict:
     """读取代码仓规则组目录下的 yml 文件，返回和 read_excel 完全一致的结构。
 
@@ -505,7 +534,7 @@ def read_yml(yml_dir: str) -> dict:
             target_table=_yml_get(data, "target_table", _YML_RULE_KEY_ALIASES),
             delete_mode=_yml_get(data, "delete_mode", _YML_RULE_KEY_ALIASES),
             delete_condition=_yml_get(data, "delete_condition", _YML_RULE_KEY_ALIASES),
-            query_sql=_yml_get(data, "query_sql", _YML_RULE_KEY_ALIASES).strip(),
+            query_sql=_yml_read_query_sql(data).strip(),
             project_code=_yml_get(data, "project_code", _YML_RULE_KEY_ALIASES),
             data_source=_yml_get(data, "data_source", _YML_RULE_KEY_ALIASES),
             business_owner=_yml_get(data, "business_owner", _YML_RULE_KEY_ALIASES),
