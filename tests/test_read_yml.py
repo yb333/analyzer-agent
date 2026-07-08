@@ -98,6 +98,67 @@ class TestReadYml:
         assert tfs[0].target_field == "id"
         assert tfs[1].field_type == "DECIMAL(18,2)"
 
+    def test_read_yml_pipe_scalar_extra_and_targetfields(self, tmp_path):
+        """防回归：额外信息和TargetFields冒号后有 |（literal block scalar）。
+
+        历史 bug：真实 yml 里「额外信息」和「TargetFields」的冒号后都有 |，
+        导致 YAML 把它们解析成字符串而非 dict/list。read_yml 的 isinstance 判断
+        失败，TargetFields 解析被跳过，质量评估报「TargetFields和SQL差异很多字段」。
+        """
+        import yaml
+        yml_content = (
+            "规则编码: R0001\n"
+            "规则类型: '1'\n"
+            "执行序列: '1'\n"
+            "目标Schema: dws\n"
+            "目标表: dwb_test_f\n"
+            "(生成的)查询语句: SELECT a.id, a.amount FROM ods.src a\n"
+            "规则组编码: GR_TEST\n"
+            "规则组英文名称: DWB_TEST_F\n"
+            "额外信息（其他sheet页信息）:\n"
+            "  TargetFields: |\n"
+            "    - 目标字段名称: id\n"
+            "      来源字段名称: a.id\n"
+            "      加密方式: '0'\n"
+            "      字段类型: VARCHAR(64)\n"
+            "    - 目标字段名称: amount\n"
+            "      来源字段名称: a.amount\n"
+            "      加密方式: '0'\n"
+            "      字段类型: DECIMAL(18,2)\n"
+        )
+        yml_dir = tmp_path / "pipe_group"
+        yml_dir.mkdir()
+        (yml_dir / "R0001.yml").write_text(yml_content, encoding="utf-8")
+
+        from analyzer import read_yml
+        raw = read_yml(str(yml_dir))
+        tfs = raw["target_fields"].get("R0001", [])
+        assert len(tfs) == 2, f"双重|格式应解析2个TargetFields，实际{len(tfs)}"
+        assert tfs[0].target_field == "id"
+        assert tfs[1].field_type == "DECIMAL(18,2)"
+
+    def test_read_yml_pipe_scalar_extra_as_string(self, tmp_path):
+        """防回归：整个额外信息被 | 解析成字符串时也能恢复。"""
+        yml_content = (
+            "规则编码: R0001\n"
+            "规则类型: '1'\n"
+            "目标表: dwb_f\n"
+            "(生成的)查询语句: SELECT 1\n"
+            "额外信息（其他sheet页信息）: |\n"
+            "  TargetFields:\n"
+            "    - 目标字段名称: x\n"
+            "      来源字段名称: a.x\n"
+        )
+        yml_dir = tmp_path / "pipe_extra"
+        yml_dir.mkdir()
+        (yml_dir / "R0001.yml").write_text(yml_content, encoding="utf-8")
+
+        from analyzer import read_yml
+        raw = read_yml(str(yml_dir))
+        tfs = raw["target_fields"].get("R0001", [])
+        assert len(tfs) == 1, f"额外信息整体为|也应解析，实际{len(tfs)}"
+        assert tfs[0].target_field == "x"
+
     def test_read_yml_group_variables(self, tmp_path):
         """read_yml 能解析额外信息里的 GroupVariables。"""
         from analyzer import read_yml

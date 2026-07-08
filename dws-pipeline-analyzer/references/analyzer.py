@@ -526,14 +526,27 @@ def read_yml(yml_dir: str) -> dict:
             result["rule_group_en"] = rule.rule_group_en
 
         # ── 解析额外信息（TargetFields / GroupVariables，有则读，无则跳过）──
+        # 容错：真实 yml 里额外信息/TargetFields/GroupVariables 的冒号后可能有 |
+        # （literal block scalar），导致 YAML 把它们解析成字符串而非 dict/list。
+        # 遇到字符串时再 yaml.safe_load 一次，解析出真实结构。
         extra = data.get("额外信息（其他sheet页信息）") or data.get("额外信息") or {}
+        if isinstance(extra, str):
+            try:
+                extra = yaml.safe_load(extra) or {}
+            except Exception:
+                extra = {}
         if not isinstance(extra, dict):
             extra = {}
 
         rc = rule.rule_code
 
-        # TargetFields
+        # TargetFields（值可能因 | 变成字符串，需再解析）
         tf_list = extra.get("TargetFields") or []
+        if isinstance(tf_list, str):
+            try:
+                tf_list = yaml.safe_load(tf_list) or []
+            except Exception:
+                tf_list = []
         if isinstance(tf_list, list):
             for tf_item in tf_list:
                 if not isinstance(tf_item, dict):
@@ -551,8 +564,13 @@ def read_yml(yml_dir: str) -> dict:
                 if tf_rc:
                     result["target_fields"].setdefault(tf_rc, []).append(tf)
 
-        # GroupVariables
+        # GroupVariables（值同样可能因 | 变成字符串，需再解析）
         gv_list = extra.get("GroupVariables") or []
+        if isinstance(gv_list, str):
+            try:
+                gv_list = yaml.safe_load(gv_list) or []
+            except Exception:
+                gv_list = []
         if isinstance(gv_list, list):
             for gv_item in gv_list:
                 if not isinstance(gv_item, dict):
