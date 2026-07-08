@@ -500,6 +500,8 @@ def build_report_data(knowledge):
         },
         # I 视图资产信息（is_view=True 时前端渲染视图标注，否则不渲染）
         "asset_info": asset_info,
+        # 加工方式（增量/全量/分区/追加）
+        "load_strategy": meta.get("load_strategy", {}),
     }
 
     # ── lineage (分层布局) ──

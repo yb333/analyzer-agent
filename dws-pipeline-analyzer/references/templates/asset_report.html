@@ -1558,7 +1558,8 @@ function renderOverview() {
     { label: '来源表', value: s.source_count || complexity.total_source_tables || 0 },
     stepMetric,
     { label: '目标字段', value: s.field_count || (REPORT_DATA.schema_fields ? REPORT_DATA.schema_fields.length : 0) },
-    { label: '加工步骤', value: REPORT_DATA.steps ? REPORT_DATA.steps.length : (s.rule_count || 0) }
+    { label: '加工方式', value: (s.load_strategy && s.load_strategy.label) ? s.load_strategy.label : '-',
+      title: (s.load_strategy && s.load_strategy.detail) ? s.load_strategy.detail : '' }
   ];
 
   var metricsHtml = '';

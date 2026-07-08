@@ -5221,6 +5221,86 @@ def _is_precision_change(type1: str, type2: str) -> bool:
     base1 = type1.split("(")[0]
     base2 = type2.split("(")[0]
     return base1 == base2 and type1 != type2
+
+
+def detect_load_strategy(rules: list) -> dict:
+    """判断资产的加工方式（增量/全量/分区/追加）。
+
+    判断依据：最终目标表（F表）相关步骤的 delete_mode。
+    交换分区（rule_type=9）的特殊处理：F表本身的 delete_mode 可能为空，
+    需要看交换分区步骤的操作。
+
+    Returns: {
+        "strategy": "full" | "incremental" | "partition" | "append" | "unknown",
+        "label": "全量" | "增量" | "分区级" | "追加" | "未知",
+        "detail": str,              # 判断依据说明
+        "delete_mode": str,         # 最终步骤的 delete_mode
+        "delete_mode_label": str,   # delete_mode 的中文标签
+    }
+    """
+    if not rules:
+        return {"strategy": "unknown", "label": "未知", "detail": "无规则",
+                "delete_mode": "", "delete_mode_label": ""}
+
+    # 找最终目标表（max exec_sequence 的非中间表，考虑交换分区）
+    target_rule = None
+    for rule in reversed(rules):
+        is_exchange = rule.rule_type == 9 and rule.exchange_source_table
+        if is_exchange:
+            # 交换分区：真正目标表是 exchange_source_table，操作本身是这一步
+            target_rule = rule
+            break
+        if not _is_intermediate_table(rule.target_table):
+            target_rule = rule
+            break
+
+    if not target_rule:
+        target_rule = rules[-1]
+
+    dm = (target_rule.delete_mode or "").strip()
+    dm_label = DELETE_MODE_MAP.get(dm, f"delete_mode={dm}" if dm else "未配置")
+
+    # delete_mode → 加工方式映射
+    # 1=TRUNCATE 全量, 2=追加, 3/5=分区级, 4=DELETE增量, 6=MERGE增量, 7=特殊
+    FULL_MODES = {"1"}
+    APPEND_MODES = {"2"}
+    PARTITION_MODES = {"3", "5"}
+    INCREMENTAL_MODES = {"4", "6"}
+
+    if dm in FULL_MODES:
+        strategy, label = "full", "全量"
+        detail = f"TRUNCATE TABLE（先清空整表再写入），{dm_label}"
+    elif dm in APPEND_MODES:
+        strategy, label = "append", "追加"
+        detail = f"NO DELETE（不删只追加），{dm_label}"
+    elif dm in PARTITION_MODES:
+        strategy, label = "partition", "分区级"
+        dc = (target_rule.delete_condition or "").strip()
+        detail = f"分区级写入（{dm_label}）" + (f"，分区条件：{dc}" if dc else "")
+    elif dm in INCREMENTAL_MODES:
+        strategy, label = "incremental", "增量"
+        dc = (target_rule.delete_condition or "").strip()
+        if dm == "6":
+            detail = f"MERGE INTO（增量合并/upsert），{dm_label}"
+        else:
+            detail = f"按条件删除后写入（{dm_label}）" + (f"，删除条件：{dc}" if dc else "")
+    elif target_rule.rule_type == 9:
+        # 交换分区无 delete_mode，但本质是分区级全量（把临时表数据交换到分区表）
+        strategy, label = "partition", "分区级"
+        detail = f"交换分区（{target_rule.exchange_source_table}），分区级全量"
+    else:
+        strategy, label = "unknown", "未知"
+        detail = f"无法确定加工方式，{dm_label}"
+
+    return {
+        "strategy": strategy,
+        "label": label,
+        "detail": detail,
+        "delete_mode": dm,
+        "delete_mode_label": dm_label,
+    }
+
+
 # ═══════════════════════════════════════════════════════════════
 
 def build_source(
@@ -5437,6 +5517,9 @@ def analyze_pipeline(
     # 加工模式标签自动检测
     patterns = detect_patterns(parsed_map, topology)
 
+    # 加工方式判断（增量/全量/分区/追加）
+    load_strategy = detect_load_strategy(rules)
+
     # DDL 字段元数据（从多表 catalog 取目标表的结构，可选增强）
     # catalog 在 Step 5a 已构建（含过程表+目标表），这里只取目标表部分
     target_schema = ""
@@ -5480,6 +5563,7 @@ def analyze_pipeline(
             "target_table": target_name,
             "version": "1.0.0",
             "patterns": patterns,
+            "load_strategy": load_strategy,
             "target_field_types": {k: v["type"] for k, v in target_metadata.items() if v.get("type")},
             "target_field_comments": {k: v["comment"] for k, v in target_metadata.items() if v.get("comment")},
         },
