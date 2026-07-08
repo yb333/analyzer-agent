@@ -726,8 +726,19 @@ def build_report_data(knowledge):
     fields_out = []
     seen_fields_lower = {}  # {field_lower: idx}
 
-    # 先按 exec_sequence 排序，最终步骤优先
-    sorted_fields = sorted(fields_list, key=lambda f: -step_info_map.get(f.get("producing_step", ""), {}).get("exec_sequence", 0))
+    # 先按 exec_sequence 排序，最终步骤优先。
+    # I 视图场景特殊处理：F 表字段优先于 I 视图字段（F 表有加工逻辑/类型，
+    # I 视图只是继承），所以有 asset_info 时 base_table 步骤的字段排前面。
+    _base_table_norm = _norm(asset_info.get("base_table", "")) if asset_info else ""
+    def _field_sort_key(f):
+        si = step_info_map.get(f.get("producing_step", ""), {})
+        seq = si.get("exec_sequence", 0)
+        table = _norm(si.get("target_table", ""))
+        # I 视图场景：F 表字段优先（排前面），其他按 exec_sequence 倒序
+        if _base_table_norm and table == _base_table_norm:
+            return (1, -seq)  # F 表字段排最前
+        return (0, -seq)
+    sorted_fields = sorted(fields_list, key=_field_sort_key, reverse=True)
 
     for f in sorted_fields:
         fname = f.get("target_field", "")
@@ -764,6 +775,12 @@ def build_report_data(knowledge):
         _final_target = _norm(_max_seq_step.get("target_table", "")) if _max_seq_step else ""
         _producing_target = _norm(si.get("target_table", ""))
         is_final_field = bool(_final_target) and _final_target == _producing_target
+        # I 视图场景：F 表也是"写入目标表"（底表是资产的一部分，不是中间过程）。
+        # asset_info 里的 base_table 就是 F 表，写入 F 表的字段也是 final。
+        if not is_final_field and asset_info:
+            _base_table = _norm(asset_info.get("base_table", ""))
+            if _base_table and _base_table == _producing_target:
+                is_final_field = True
 
         if fname_lower in seen_fields_lower:
             continue
