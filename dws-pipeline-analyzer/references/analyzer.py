@@ -918,64 +918,103 @@ def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings,
             lines.append(f"- {label}: {sc['rule_count']} 个规则 ({', '.join(sc['rule_codes'])})")
         lines.append("")
 
-    # ── 步骤详情 ──
+    # ── 步骤详情（分层压缩，控制总量让 AI 能完整读完）──
     lines.append("## 步骤详情")
+    SUMMARY_MAX_LINES = 150  # 总量控制阈值
     for rule in rules:
         parsed = parsed_map.get(rule.rule_code)
         step = next((s for s in topology["steps"] if s["rule_code"] == rule.rule_code), None)
         sid = step["step_id"] if step else ""
+
+        # 总量控制：超过阈值时只输出标题行（避免 AI 吃不下）
+        if len(lines) > SUMMARY_MAX_LINES:
+            lines.append(f"### {sid} ({rule.rule_code}) {rule.rule_name or ''}")
+            lines.append("- (详情已省略，summary 超过总量阈值，请参考 knowledge_draft.json)")
+            lines.append("")
+            continue
 
         # 兜底描述
         auto_desc = next((d for d in knowledge.get("business_logic", {}).get("step_descriptions", [])
                          if d.get("step_id") == sid), {})
 
         lines.append(f"### {sid} ({rule.rule_code}) {rule.rule_name or ''}")
+
+        # 判断步骤复杂度（决定展开程度）
+        join_count = len([j for j in parsed.source_tables]) if parsed else 0
+        cte_count = len(parsed.ctes) if parsed else 0
+        is_simple = join_count <= 1 and cte_count == 0  # 单表直取 = 简单
+
+        # 基本信息（压缩：简单步骤合并为一行）
         rt_label = RULE_TYPE_MAP.get(rule.rule_type, "")
-        lines.append(f"- 规则类型: {rt_label}")
-        lines.append(f"- 执行序列: {rule.exec_sequence}")
-        lines.append(f"- 目标表: {rule.target_table}")
         dm_label = DELETE_MODE_MAP.get((rule.delete_mode or "").strip(), "")
         dc = rule.delete_condition or ""
-        lines.append(f"- 写入方式: {dm_label}" + (f" → 分区[{dc}]" if dc else ""))
-
-        if rule.rule_type == 9 and rule.exchange_source_table:
-            lines.append(f"- 分区交换: {rule.target_table} → {rule.exchange_source_table}")
-
-        if parsed:
+        if is_simple and parsed:
+            # 简单步骤压缩：来源→目标+字段数，一行搞定
             src_tables = [j.source_table for j in parsed.source_tables]
-            lines.append(f"- 来源表: {', '.join(src_tables[:5])}")
-            if parsed.ctes:
-                cte_names = [c.name for c in parsed.ctes]
-                lines.append(f"- CTE: {', '.join(cte_names)}")
-            # 加工类型分布
             tt_dist = Counter(c.transform_type for c in parsed.select_columns)
             tt_str = ", ".join(f"{k}={v}" for k, v in tt_dist.most_common())
-            lines.append(f"- 字段加工: {len(parsed.select_columns)} 列 ({tt_str})")
+            line = f"- {rt_label}: {' → '.join(src_tables[:3])} → {rule.target_table}"
+            line += f" | {len(parsed.select_columns)}列({tt_str})"
+            line += f" | {dm_label}" + (f"[{dc}]" if dc else "")
+            lines.append(line)
+        else:
+            # 复杂步骤展开
+            lines.append(f"- 类型: {rt_label} | 写入: {dm_label}" + (f" [{dc}]" if dc else ""))
+            if rule.rule_type == 9 and rule.exchange_source_table:
+                lines.append(f"- 分区交换: {rule.target_table} → {rule.exchange_source_table}")
+            if parsed:
+                src_tables = [j.source_table for j in parsed.source_tables]
+                lines.append(f"- 来源表: {', '.join(src_tables[:5])}")
+                if parsed.ctes:
+                    cte_names = [c.name for c in parsed.ctes]
+                    lines.append(f"- CTE: {', '.join(cte_names)}")
+                tt_dist = Counter(c.transform_type for c in parsed.select_columns)
+                tt_str = ", ".join(f"{k}={v}" for k, v in tt_dist.most_common())
+                lines.append(f"- 字段加工: {len(parsed.select_columns)} 列 ({tt_str})")
 
-        # SQL 前 200 字符（不完整 SQL）
-        if rule.query_sql:
-            sql_preview = rule.query_sql[:200].replace("\n", " ")
-            lines.append(f"- SQL 摘要: {sql_preview}...")
+                # SQL 关键特征（替代原来的200字符前缀，信息密度更高）
+                features = []
+                if join_count > 1:
+                    features.append(f"{join_count} JOIN")
+                if cte_count:
+                    features.append(f"{cte_count} CTE")
+                where_count = len(parsed.where_usage) if hasattr(parsed, 'where_usage') else 0
+                if where_count:
+                    features.append(f"{where_count} 条件")
+                if parsed.union_branches:
+                    features.append(f"{len(parsed.union_branches)} UNION分支")
+                if features:
+                    lines.append(f"- SQL特征: {', '.join(features)}")
 
-        # SQL 注释（帮助 AI 理解业务含义）
-        if rule.query_sql and parsed and not parsed.parse_error:
-            import re as _re
-            comments = _re.findall(r'/\*\s*(.*?)\s*\*/', rule.query_sql)
-            if comments:
-                lines.append(f"- SQL 注释: {'; '.join(comments[:5])}")
+            # SQL 注释（如果有，帮助 AI 理解业务含义）
+            if rule.query_sql and parsed and not parsed.parse_error:
+                import re as _re
+                comments = _re.findall(r'/\*\s*(.*?)\s*\*/', rule.query_sql)
+                if comments:
+                    lines.append(f"- SQL注释: {'; '.join(comments[:3])}")
 
-        # 逻辑块结构（供 AI 补充块目的）
-        df_step = next((s for s in data_flow.get("steps", []) if s.get("step_id") == sid), None)
-        if df_step and df_step.get("data_blocks"):
-            lines.append(f"- 逻辑块:")
-            for idx, blk in enumerate(df_step["data_blocks"]):
-                _append_block_summary(lines, blk, idx, indent=1)
+            # 逻辑块（只顶层概要，不递归 children）
+            df_step = next((s for s in data_flow.get("steps", []) if s.get("step_id") == sid), None)
+            if df_step and df_step.get("data_blocks"):
+                blocks = df_step["data_blocks"]
+                # 顶层概要：每个块一行，不递归
+                block_summary_parts = []
+                for idx, blk in enumerate(blocks[:6]):  # 最多展示6个顶层块
+                    role = blk.get("role", "")
+                    table = blk.get("table", "")
+                    jt = blk.get("join_type", "")
+                    ops = blk.get("ops", [])
+                    part = f"{table}"
+                    if jt and jt != "FROM":
+                        part += f"({jt})"
+                    if ops:
+                        part += f"[{','.join(ops[:3])}]"
+                    block_summary_parts.append(part)
+                lines.append(f"- 逻辑块({len(blocks)}): {' + '.join(block_summary_parts)}")
 
         # 兜底描述（脚本已生成）
         if auto_desc.get("purpose"):
-            lines.append(f"- 脚本兜底 purpose: {auto_desc['purpose']}")
-        if auto_desc.get("logic"):
-            lines.append(f"- 脚本兜底 logic: {auto_desc['logic']}")
+            lines.append(f"- 脚本兜底: {auto_desc['purpose']}")
         lines.append("")
 
     # ── 质量问题 ──
