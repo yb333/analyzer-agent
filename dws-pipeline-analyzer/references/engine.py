@@ -3709,8 +3709,8 @@ def build_field_mappings(
                     "note": "TargetFields 有记录但 SQL SELECT 中未找到对应别名",
                 })
 
-        # 差异预警（跳过 I 视图步骤——视图没有 TargetFields，对比无意义）
-        if not getattr(rule, "is_view_step", False):
+        # 差异预警（跳过非真实加工步骤：I视图无TargetFields，交换分区无SQL）
+        if not getattr(rule, "is_view_step", False) and rule.rule_type != 9:
             only_in_sql = [
                 col.alias for col in parsed.select_columns
                 if col.alias and col.alias not in tf_index
@@ -3726,14 +3726,17 @@ def build_field_mappings(
                     "only_in_sql": only_in_sql,
                 })
 
-    # ── 统计（排除 I 视图步骤——视图没有 TargetFields，对比无意义）──
-    view_steps = {f"step_{i+1}" for i, r in enumerate(rules) if getattr(r, "is_view_step", False)}
-    non_view_fields = [f for f in all_fields if f.get("producing_step") not in view_steps]
-    total_in_sql = len([f for f in non_view_fields if f.get("transform_type") != "unknown"])
-    total_in_excel = len([f for f in non_view_fields if f.get("in_target_fields")])
-    match_count = len([f for f in non_view_fields if f.get("validation", {}).get("excel_vs_sql_match") is True])
-    only_in_sql = [f["target_field"] for f in non_view_fields if f.get("in_target_fields") is False]
-    only_in_excel_list = [f["target_field"] for f in non_view_fields if f.get("note")]
+    # ── 统计（排除非真实加工步骤——视图无 TargetFields，交换分区无 SQL）──
+    # I 视图步骤(is_view_step)：无 TargetFields，对比无意义
+    # 交换分区步骤(rule_type=9)：无 SQL，字段从上游继承，不是自己 SELECT 的
+    skip_steps = {f"step_{i+1}" for i, r in enumerate(rules)
+                  if getattr(r, "is_view_step", False) or r.rule_type == 9}
+    stat_fields = [f for f in all_fields if f.get("producing_step") not in skip_steps]
+    total_in_sql = len([f for f in stat_fields if f.get("transform_type") != "unknown"])
+    total_in_excel = len([f for f in stat_fields if f.get("in_target_fields")])
+    match_count = len([f for f in stat_fields if f.get("validation", {}).get("excel_vs_sql_match") is True])
+    only_in_sql = [f["target_field"] for f in stat_fields if f.get("in_target_fields") is False]
+    only_in_excel_list = [f["target_field"] for f in stat_fields if f.get("note")]
 
     # ── 字段级 DDL 类型/注释下注（P2）──
     # 遍历所有字段，按 producing_step 找到对应表的 DDL，注入 field_type/field_comment。
