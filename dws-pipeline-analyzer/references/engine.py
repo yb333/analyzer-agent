@@ -3726,12 +3726,14 @@ def build_field_mappings(
                     "only_in_sql": only_in_sql,
                 })
 
-    # ── 统计 ──
-    total_in_sql = len([f for f in all_fields if f.get("transform_type") != "unknown"])
-    total_in_excel = len([f for f in all_fields if f.get("in_target_fields")])
-    match_count = len([f for f in all_fields if f.get("validation", {}).get("excel_vs_sql_match") is True])
-    only_in_sql = [f["target_field"] for f in all_fields if f.get("in_target_fields") is False]
-    only_in_excel_list = [f["target_field"] for f in all_fields if f.get("note")]
+    # ── 统计（排除 I 视图步骤——视图没有 TargetFields，对比无意义）──
+    view_steps = {f"step_{i+1}" for i, r in enumerate(rules) if getattr(r, "is_view_step", False)}
+    non_view_fields = [f for f in all_fields if f.get("producing_step") not in view_steps]
+    total_in_sql = len([f for f in non_view_fields if f.get("transform_type") != "unknown"])
+    total_in_excel = len([f for f in non_view_fields if f.get("in_target_fields")])
+    match_count = len([f for f in non_view_fields if f.get("validation", {}).get("excel_vs_sql_match") is True])
+    only_in_sql = [f["target_field"] for f in non_view_fields if f.get("in_target_fields") is False]
+    only_in_excel_list = [f["target_field"] for f in non_view_fields if f.get("note")]
 
     # ── 字段级 DDL 类型/注释下注（P2）──
     # 遍历所有字段，按 producing_step 找到对应表的 DDL，注入 field_type/field_comment。
