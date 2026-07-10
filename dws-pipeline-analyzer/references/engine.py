@@ -2086,30 +2086,57 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
         cte_name = _clean_name(str(cte_alias)) if cte_alias else ""
         cte_query = cte_node.this
 
-        # CTE 内的 SELECT 节点
-        cte_select = cte_query if isinstance(cte_query, exp.Select) else cte_query.find(exp.Select)
+        # CTE body 可能是普通 SELECT，也可能是 UNION/INTERSECT/EXCEPT（集合操作）
+        # 集合操作时不能用 find(exp.Select)——深度优先只拿第一个分支，其余分支的表/字段全丢
+        is_set_op = isinstance(cte_query, (exp.Union, exp.Intersect, exp.Except))
+        if is_set_op:
+            # 收集所有分支，合并源表（去重），字段取第一分支（UNION 按位置对齐）
+            branches = []
+            _collect_set_branches(cte_query, branches)
+            cte_select = branches[0] if branches else None  # 字段从第一分支取
+            all_branch_selects = branches  # 源表从所有分支取
+        elif isinstance(cte_query, exp.Select):
+            cte_select = cte_query
+            all_branch_selects = [cte_query]
+        else:
+            cte_select = cte_query if isinstance(cte_query, exp.Select) else cte_query.find(exp.Select)
+            all_branch_selects = [cte_select] if cte_select else []
 
         # CTE 内的源表 — 只取直接 FROM/JOIN（不递归进入嵌套子查询）
         # 含 join_type，用于复杂度统计（JOIN 数）和来源表统计
+        # 遍历所有分支（CTE 内 UNION 时每个分支都可能有不同的源表）
         cte_tables = []
-        if cte_select:
+        cte_seen_tables = set()
+        for branch_select in all_branch_selects:
+            if not branch_select:
+                continue
             # FROM
-            cte_from = cte_select.args.get("from_")
+            cte_from = branch_select.args.get("from_")
             if cte_from and isinstance(cte_from.this, exp.Table):
                 tname = ".".join(_clean_name(p.name) for p in cte_from.this.parts).lower()
                 talias = _clean_name(cte_from.this.alias).lower() if cte_from.this.alias else ""
-                cte_tables.append({"name": tname, "alias": talias, "join_type": "FROM"})
+                tkey = tname
+                if tkey not in cte_seen_tables:
+                    cte_seen_tables.add(tkey)
+                    cte_tables.append({"name": tname, "alias": talias, "join_type": "FROM"})
             for extra in cte_from.expressions if cte_from else []:
                 if isinstance(extra, exp.Table):
                     tname = ".".join(_clean_name(p.name) for p in extra.parts).lower()
                     talias = _clean_name(extra.alias).lower() if extra.alias else ""
-                    cte_tables.append({"name": tname, "alias": talias, "join_type": "FROM"})
+                    tkey = tname
+                    if tkey not in cte_seen_tables:
+                        cte_seen_tables.add(tkey)
+                        cte_tables.append({"name": tname, "alias": talias, "join_type": "FROM"})
             # JOIN（不递归进入 CTE 内的嵌套子查询）
-            for cte_join in cte_select.args.get("joins", []):
+            for cte_join in branch_select.args.get("joins", []):
                 t = cte_join.find(exp.Table)
                 if t:
                     tname = ".".join(_clean_name(p.name) for p in t.parts).lower()
                     talias = _clean_name(t.alias).lower() if t.alias else ""
+                    tkey = tname
+                    if tkey in cte_seen_tables:
+                        continue
+                    cte_seen_tables.add(tkey)
                     # JOIN 类型
                     jk = cte_join.args.get("kind", "")
                     js = cte_join.args.get("side", "")
@@ -2120,7 +2147,7 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
                     else:
                         jt = "INNER JOIN"
                     cte_tables.append({"name": tname, "alias": talias, "join_type": jt})
-        else:
+        if not cte_tables and cte_query:
             # fallback: find_all（覆盖非标准结构）
             for table in cte_query.find_all(exp.Table):
                 tname = ".".join(_clean_name(p.name) for p in table.parts)
@@ -2128,8 +2155,9 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
                 cte_tables.append({"name": tname, "alias": talias})
 
         # CTE 输出字段（含 transform_type 和 source_fields）
+        # 字段从第一分支取（UNION 按位置对齐，取任一分支即可）
         cte_fields = []
-        cte_select_for_fields = cte_query if isinstance(cte_query, exp.Select) else cte_query.find(exp.Select)
+        cte_select_for_fields = cte_select
         if cte_select_for_fields:
             for proj in cte_select_for_fields.expressions:
                 proj_sql = proj.sql(dialect=sqlglot_dialect)
@@ -3280,19 +3308,13 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
                             all_sql_tables.append(tname)
                             _all_sql_seen.add(_norm_table(tname))
             else:
-                select_node = tree.find(exp.Select)
-                if select_node:
-                    for table in select_node.find_all(exp.Table):
-                        tname = ".".join(_clean_name(p.name) for p in table.parts)
-                        if tname and _norm_table(tname) not in _all_sql_seen:
-                            all_sql_tables.append(tname)
-                            _all_sql_seen.add(_norm_table(tname))
-                else:
-                    for table in tree.find_all(exp.Table):
-                        tname = ".".join(_clean_name(p.name) for p in table.parts)
-                        if tname and _norm_table(tname) not in _all_sql_seen:
-                            all_sql_tables.append(tname)
-                            _all_sql_seen.add(_norm_table(tname))
+                # 全树扫描所有表（含 CTE 内部、子查询内部），
+                # 不用 find(exp.Select) —— 深度优先在 CTE 内 UNION 时只命中第一分支
+                for table in tree.find_all(exp.Table):
+                    tname = ".".join(_clean_name(p.name) for p in table.parts)
+                    if tname and _norm_table(tname) not in _all_sql_seen:
+                        all_sql_tables.append(tname)
+                        _all_sql_seen.add(_norm_table(tname))
         except Exception:
             all_sql_tables = list(sql_source_tables)  # fallback
 

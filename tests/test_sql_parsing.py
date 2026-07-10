@@ -558,3 +558,95 @@ JOIN ods.src_b b ON a.id = b.id"""
         parsed = parse(sql)
         tables = source_tables(parsed)
         assert len(tables) == 2
+
+
+# ═══════════════════════════════════════════════════════════════
+# CTE 内部 UNION（回归测试：不能只返回第一个 SELECT 分支）
+# ═══════════════════════════════════════════════════════════════
+
+class TestCteInternalUnion:
+    """CTE body 是 UNION 时，所有分支的源表都要提取。
+
+    背景：_extract_ctes 用 find(exp.Select) 处理 CTE body，
+    深度优先只拿 UNION 第一个分支，其余分支的表/字段全丢。
+    FROM 子查询内部 UNION 已修复（_parse_select 专门处理），
+    但 CTE 内部 UNION 被遗漏——同样的 find(exp.Select) 问题，
+    只修了一处没修另一处。
+    """
+
+    def test_cte_union_both_branches_tables(self):
+        """CTE 内部 UNION 两分支的表都要提取。"""
+        sql = """WITH cte_union AS (
+    SELECT user_id, amount FROM ods.src_a
+    UNION ALL
+    SELECT user_id, amount FROM ods.src_b
+)
+SELECT c.user_id, c.amount FROM cte_union c"""
+        parsed = parse(sql)
+        cte_tables = []
+        for cte in parsed.ctes:
+            cte_tables.extend(t["name"] for t in cte.source_tables)
+        assert any("src_a" in t for t in cte_tables), f"src_a 丢失: {cte_tables}"
+        assert any("src_b" in t for t in cte_tables), f"src_b 丢失（只取了第一分支）: {cte_tables}"
+
+    def test_cte_union_three_branches(self):
+        """CTE 内部 UNION 三分支：全部表都要在。"""
+        sql = """WITH cte_multi AS (
+    SELECT id FROM ods.t1
+    UNION ALL
+    SELECT id FROM ods.t2
+    UNION ALL
+    SELECT id FROM ods.t3
+)
+SELECT m.id FROM cte_multi m"""
+        parsed = parse(sql)
+        cte_tables = []
+        for cte in parsed.ctes:
+            cte_tables.extend(t["name"] for t in cte.source_tables)
+        for expected in ("t1", "t2", "t3"):
+            assert any(expected in t for t in cte_tables), \
+                f"{expected} 丢失: {cte_tables}"
+
+    def test_cte_union_with_join_in_branch(self):
+        """CTE 内部 UNION 分支里有 JOIN：JOIN 表也要提取。"""
+        sql = """WITH cte AS (
+    SELECT a.id, b.name FROM ods.src_a a LEFT JOIN ods.dim_a b ON a.id = b.id
+    UNION ALL
+    SELECT a.id, b.name FROM ods.src_b a LEFT JOIN ods.dim_b b ON a.id = b.id
+)
+SELECT c.id, c.name FROM cte c"""
+        parsed = parse(sql)
+        cte_tables = []
+        for cte in parsed.ctes:
+            cte_tables.extend(t["name"] for t in cte.source_tables)
+        for expected in ("src_a", "dim_a", "src_b", "dim_b"):
+            assert any(expected in t for t in cte_tables), \
+                f"{expected} 丢失: {cte_tables}"
+
+    def test_cte_union_data_flow_has_all_tables(self):
+        """CTE 内部 UNION 的表要出现在 data_flow。"""
+        from analyzer import build_data_flow, RawRule
+        sql = """WITH cte_union AS (
+    SELECT id FROM ods.src_a
+    UNION ALL
+    SELECT id FROM ods.src_b
+)
+SELECT c.id FROM cte_union c"""
+        rule = RawRule(rule_code="R1", rule_name="t", rule_type=1, exec_sequence=0,
+                       target_schema="dws", target_table="t_f", delete_mode="1", query_sql=sql)
+        df = build_data_flow([rule], {"R1": parse_single_sql(sql, "dws")})
+        table_names = {t["name"].lower() for t in df["tables"]}
+        assert "src_a" in " ".join(table_names), f"data_flow 缺 src_a: {table_names}"
+        assert "src_b" in " ".join(table_names), f"data_flow 缺 src_b: {table_names}"
+
+    def test_normal_cte_without_union_not_affected(self):
+        """普通 CTE（无 UNION）不受影响。"""
+        sql = """WITH cte_normal AS (
+    SELECT id, name FROM ods.src_a WHERE flag = 1
+)
+SELECT c.id, c.name FROM cte_normal c"""
+        parsed = parse(sql)
+        cte_tables = []
+        for cte in parsed.ctes:
+            cte_tables.extend(t["name"] for t in cte.source_tables)
+        assert any("src_a" in t for t in cte_tables), f"普通 CTE 也应能提取表: {cte_tables}"
