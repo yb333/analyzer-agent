@@ -36,13 +36,18 @@ SHEET2_HEADERS = [
 ]
 SHEET2_NOTE = "字段变化类型：字段类型及长度变化、字段下线/删除、字段值语义变化、新增字段、字段名称变化、字段数据初始化（刷时间戳）、字段数据初始化（不刷时间戳）"
 
-SHEET3_NAME = "变动类型说明"
-SHEET3_HEADERS = ["类型", "说明"]
+SHEET3_NAME = "受影响表清单"
+SHEET3_HEADERS = ["序号", "受影响的表名"]
+SHEET3_NOTE = "从血缘平台整理的受影响表名列表。填表名即可（可含schema前缀，工具自动归一化）。一行一张表。"
+
+SHEET4_NAME = "变动类型说明"
+SHEET4_HEADERS = ["类型", "说明"]
 
 # 每列的建议宽度（按列头和典型内容长度设定）
 SHEET1_WIDTHS = [22, 22, 10, 30, 28]
 SHEET2_WIDTHS = [6, 12, 14, 18, 16, 14, 16, 12, 14, 18, 16, 14, 16, 20, 14, 24, 12, 12]
-SHEET3_WIDTHS = [28, 50]
+SHEET3_WIDTHS = [6, 40]
+SHEET4_WIDTHS = [28, 50]
 
 
 def _set_widths(ws, widths):
@@ -78,8 +83,12 @@ def build_empty_template(path: str):
     _set_widths(ws2, SHEET2_WIDTHS)
 
     ws3 = wb.create_sheet(SHEET3_NAME)
-    _set_headers(ws3, SHEET3_HEADERS, "类型说明（可选）：补充每个变化类型的详细定义，用于报告翻译")
+    _set_headers(ws3, SHEET3_HEADERS, SHEET3_NOTE)
     _set_widths(ws3, SHEET3_WIDTHS)
+
+    ws4 = wb.create_sheet(SHEET4_NAME)
+    _set_headers(ws4, SHEET4_HEADERS, "类型说明（可选）：补充每个变化类型的详细定义，用于报告翻译")
+    _set_widths(ws4, SHEET4_WIDTHS)
 
     wb.save(path)
     wb.close()
@@ -121,10 +130,18 @@ def build_sample_template(path: str):
     for row in samples:
         ws2.append(row)
 
-    # ── Sheet3: 类型说明示例 ──
+    # ── Sheet3: 受影响表清单示例 ──
     ws3 = wb.create_sheet(SHEET3_NAME)
-    _set_headers(ws3, SHEET3_HEADERS, "类型说明（可选）：补充每个变化类型的详细定义")
+    _set_headers(ws3, SHEET3_HEADERS, SHEET3_NOTE)
     _set_widths(ws3, SHEET3_WIDTHS)
+    ws3.append([1, "dwb_user_info_f"])
+    ws3.append([2, "dwb_order_f"])
+    ws3.append([3, "dws.dwb_trade_sum_f"])
+
+    # ── Sheet4: 类型说明示例 ──
+    ws4 = wb.create_sheet(SHEET4_NAME)
+    _set_headers(ws4, SHEET4_HEADERS, "类型说明（可选）：补充每个变化类型的详细定义")
+    _set_widths(ws4, SHEET4_WIDTHS)
     type_docs = [
         ["字段类型及长度变化", "字段的数据类型或长度发生变化，需检查下游cast/转换是否兼容"],
         ["字段下线/删除", "字段被废弃删除，下游取不到该数据"],
@@ -145,7 +162,7 @@ def build_sample_template(path: str):
         ["表/视图数据硬删除", "数据被硬删除"],
     ]
     for t, d in type_docs:
-        ws3.append([t, d])
+        ws4.append([t, d])
 
     wb.save(path)
     wb.close()
