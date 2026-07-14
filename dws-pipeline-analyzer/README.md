@@ -10,6 +10,7 @@
 | 批量文档化 | `/analyze-batch` | 多个规则组：循环分析，每个规则组出三件套 |
 | 字段使用检索 | `/field-search` | 搜字段在多个表里的用法，输出 Excel |
 | **关联影响分析** | `/impact-analysis` | 源端变更 → 本资产受什么影响，输出影响清单 Excel |
+| **跨资产影响分析** | `/impact-analysis --cross-asset` | 批量分析多个受影响资产，按表名自动定位代码仓目录 |
 
 ## 安装
 
@@ -62,6 +63,12 @@ install.bat
 
 ```
 /impact-analysis @变更清单.xlsx @资产knowledge目录
+```
+
+### 跨资产影响分析
+
+```
+/impact-analysis --cross-asset @变更清单.xlsx（含Sheet3受影响表清单）
 ```
 
 ---

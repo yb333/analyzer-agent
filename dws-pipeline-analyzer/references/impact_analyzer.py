@@ -1406,5 +1406,360 @@ def main():
     print(f"  表级影响: {s.get('table_level', 0)}")
 
 
+# ═══════════════════════════════════════════════════════════════
+# 跨资产影响分析（批量编排 + 多资产汇总）
+# ═══════════════════════════════════════════════════════════════
+
+
+def _read_affected_tables(path: str) -> list:
+    """读 Sheet3 受影响表清单 → [表名] 列表。
+
+    表名归一化：去 schema 前缀、转小写，用于目录匹配。
+    """
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        print("[ERROR] 缺少依赖: openpyxl", file=sys.stderr)
+        return []
+
+    wb_path = Path(path)
+    if not wb_path.exists():
+        return []
+
+    wb = load_workbook(wb_path, read_only=True, data_only=True)
+    ws = _find_sheet(wb, ["受影响表清单", "受影响表"])
+    if not ws:
+        wb.close()
+        return []
+
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    if not rows:
+        return []
+
+    # 找列索引
+    header = rows[0]
+    col_idx = {}
+    for i, h in enumerate(header):
+        if h is not None:
+            col_idx[_safe_str(h)] = i
+    idx_table = _find_col(col_idx, "受影响的表名") or _find_col(col_idx, "表名")
+
+    tables = []
+    for row in rows[1:]:
+        tname = _get_val(row, idx_table)
+        if tname:
+            tables.append(tname)
+    return tables
+
+
+def locate_asset_dirs(affected_tables: list, repo_root: str) -> dict:
+    """按表名在代码仓定位规则组目录。
+
+    匹配规则：在 BFT/BftWideTable/ 下搜索目录名（大小写不敏感）== 表名（去schema前缀）。
+
+    返回: {原始表名: {"dir": 路径, "norm": 归一化表名, "found": bool}}
+    """
+    repo = Path(repo_root)
+    # 收集 BFT/BftWideTable/ 下所有规则组目录（含子项目的倒数第二层目录名）
+    # 规则组目录 = 含 *.yml 的目录
+    bft_wide = repo / "BFT" / "BftWideTable"
+    if not bft_wide.is_dir():
+        return {t: {"dir": "", "norm": _norm_table(t), "found": False} for t in affected_tables}
+
+    # 建索引：{norm_dir_name: [目录路径列表]}
+    dir_index = {}
+    for yml_file in bft_wide.rglob("*.yml"):
+        group_dir = yml_file.parent
+        dir_name_norm = _norm_table(group_dir.name)
+        dir_index.setdefault(dir_name_norm, []).append(group_dir)
+    # 也扫 yaml
+    for yml_file in bft_wide.rglob("*.yaml"):
+        group_dir = yml_file.parent
+        dir_name_norm = _norm_table(group_dir.name)
+        dir_index.setdefault(dir_name_norm, []).append(group_dir)
+
+    result = {}
+    for tname in affected_tables:
+        norm = _norm_table(tname)
+        matches = dir_index.get(norm, [])
+        if matches:
+            # 去重（同一个目录可能因多个 yml 被重复收集）
+            unique = list(dict.fromkeys(matches))
+            result[tname] = {"dir": str(unique[0]), "norm": norm,
+                             "found": True, "all_matches": [str(d) for d in unique]}
+        else:
+            result[tname] = {"dir": "", "norm": norm, "found": False}
+    return result
+
+
+def run_cross_asset(
+    changes_path: str,
+    affected_tables: list,
+    repo_root: str,
+    output_path: str,
+    ddl_dir: str = "",
+) -> dict:
+    """跨资产影响分析主流程。
+
+    对每个受影响表：
+      1. 按表名定位代码仓规则组目录
+      2. 跑 read_yml + analyze_pipeline 产 knowledge
+      3. 跑 filter_and_propagate 产影响清单
+    汇总所有资产结果，输出多资产 Excel。
+
+    返回: {"asset_results": [...], "not_found": [...], "errors": [...], "summary": {...}}
+    """
+    # 读变更清单（所有资产共用同一份变更清单）
+    table_changes, field_changes, type_dict = read_changes(changes_path)
+    print(f"[INFO] 变更清单: {len(table_changes)} 表级, {len(field_changes)} 字段级")
+
+    # 定位资产目录
+    located = locate_asset_dirs(affected_tables, repo_root)
+
+    asset_results = []
+    not_found = []
+    errors = []
+
+    for tname in affected_tables:
+        info = located.get(tname, {})
+        if not info.get("found"):
+            not_found.append(tname)
+            print(f"[WARN] 未定位到资产目录: {tname}")
+            continue
+
+        group_dir = info["dir"]
+        norm_name = info["norm"]
+        print(f"[INFO] 分析资产 {norm_name} ← {group_dir}")
+
+        try:
+            # 1. 读 yml → rules
+            from analyzer import read_yml, detect_dialect
+            from engine import analyze_pipeline
+
+            raw = read_yml(group_dir)
+            rules = raw.get("rules", [])
+            target_fields = raw.get("target_fields", [])
+            group_variables = raw.get("group_variables", [])
+
+            if not rules:
+                errors.append({"table": tname, "error": "规则组目录无 yml 规则"})
+                continue
+
+            # 2. 解析 → knowledge
+            dialect = detect_dialect(rules)
+            knowledge, _parsed_map = analyze_pipeline(
+                rules, target_fields, group_variables, dialect,
+                ddl_dir=ddl_dir, source_file="", rule_group_code=raw.get("rule_group_code", ""),
+            )
+
+            # 3. 影响分析
+            result = filter_and_propagate(table_changes, field_changes, knowledge, type_dict)
+
+            asset_results.append({
+                "asset": norm_name,
+                "table": tname,
+                "result": result,
+                "target_table": knowledge.get("meta", {}).get("target_table", ""),
+            })
+            s = result.summary
+            print(f"  🔴{s.get('impacted', 0)} 🟡{s.get('uncertain', 0)} "
+                  f"🟢{s.get('no_impact', 0)} ⚪{s.get('not_hit', 0)} "
+                  f"表级{s.get('table_level', 0)}")
+
+        except Exception as e:
+            errors.append({"table": tname, "error": str(e)})
+            print(f"[ERROR] 分析失败 {tname}: {e}", file=sys.stderr)
+
+    # 汇总输出
+    render_cross_asset_excel(asset_results, not_found, errors, output_path)
+
+    summary = {
+        "total_affected": len(affected_tables),
+        "analyzed": len(asset_results),
+        "not_found": len(not_found),
+        "errors": len(errors),
+        "total_impacted": sum(r["result"].summary.get("impacted", 0) for r in asset_results),
+        "total_uncertain": sum(r["result"].summary.get("uncertain", 0) for r in asset_results),
+        "total_no_impact": sum(r["result"].summary.get("no_impact", 0) for r in asset_results),
+        "total_not_hit": sum(r["result"].summary.get("not_hit", 0) for r in asset_results),
+    }
+    print(f"\n[INFO] 跨资产影响分析完成 → {output_path}")
+    print(f"  分析: {summary['analyzed']} | 未定位: {summary['not_found']} | 错误: {summary['errors']}")
+    print(f"  🔴合计有影响: {summary['total_impacted']}")
+    print(f"  🟡合计待确认: {summary['total_uncertain']}")
+
+    return {"asset_results": asset_results, "not_found": not_found,
+            "errors": errors, "summary": summary}
+
+
+def render_cross_asset_excel(
+    asset_results: list, not_found: list, errors: list, output_path: str
+):
+    """渲染多资产影响汇总 Excel。
+
+    Sheet 结构：
+      - 统计摘要：全链路总览（按资产分组统计）
+      - 影响清单：所有资产的🔴🟡（按资产分组，有资产名列）
+      - 表级影响：所有资产的表级影响
+      - 过滤摘要：所有资产的🟢⚪
+      - 未处理：未定位/出错的表
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+
+    wb = Workbook()
+    header_font = Font(bold=True)
+
+    red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+    yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
+    gray_fill = PatternFill(start_color="EEEEEE", end_color="EEEEEE", fill_type="solid")
+
+    def _fill_for(status):
+        if "🔴" in status:
+            return red_fill
+        if "🟡" in status:
+            return yellow_fill
+        return gray_fill
+
+    # ── Sheet1: 统计摘要 ──
+    ws0 = wb.active
+    ws0.title = "统计摘要"
+    ws0.append(["跨资产影响分析统计"])
+    ws0.append([])
+    ws0.append(["资产", "受影响表", "🔴有影响", "🟡待确认", "🟢无影响", "⚪未命中", "表级影响"])
+    for cell in ws0[3]:
+        cell.font = header_font
+    for ar in asset_results:
+        s = ar["result"].summary
+        ws0.append([
+            ar["asset"], ar["table"],
+            s.get("impacted", 0), s.get("uncertain", 0),
+            s.get("no_impact", 0), s.get("not_hit", 0),
+            s.get("table_level", 0),
+        ])
+    # 合计行
+    ws0.append([
+        "合计", "",
+        sum(r["result"].summary.get("impacted", 0) for r in asset_results),
+        sum(r["result"].summary.get("uncertain", 0) for r in asset_results),
+        sum(r["result"].summary.get("no_impact", 0) for r in asset_results),
+        sum(r["result"].summary.get("not_hit", 0) for r in asset_results),
+        sum(r["result"].summary.get("table_level", 0) for r in asset_results),
+    ])
+    for cell in ws0[ws0.max_row]:
+        cell.font = header_font
+    _auto_width(ws0)
+
+    # ── Sheet2: 影响清单（所有资产，有资产列）──
+    ws1 = wb.create_sheet("影响清单")
+    headers1 = ["资产", "状态", "严重度", "目标表", "目标字段", "源表", "源字段",
+                "变化类型", "变化前类型", "变化后类型", "说明", "传播路径",
+                "涉及步骤", "规则编码"]
+    ws1.append(headers1)
+    for cell in ws1[1]:
+        cell.font = header_font
+    for ar in asset_results:
+        for row in ar["result"].field_level_impacts:
+            ws1.append([ar["asset"]] + [row.get(h, "") for h in
+                        ["status", "severity", "target_table", "target_field",
+                         "source_table", "source_field", "change_type",
+                         "before_type", "after_type", "reason", "hops",
+                         "steps", "rule_codes"]])
+            fill = _fill_for(row.get("status", ""))
+            for cell in ws1[ws1.max_row]:
+                cell.fill = fill
+    _auto_width(ws1)
+
+    # ── Sheet3: 表级影响 ──
+    ws2 = wb.create_sheet("表级影响")
+    headers2 = ["资产", "状态", "类型", "源表", "切换后表", "影响说明",
+                "涉及步骤", "规则编码", "受影响字段数"]
+    ws2.append(headers2)
+    for cell in ws2[1]:
+        cell.font = header_font
+    for ar in asset_results:
+        for row in ar["result"].table_level_impacts:
+            touched = len(row.get("touched_fields", []))
+            ws2.append([
+                ar["asset"], row.get("status", ""), row.get("type", ""),
+                row.get("source_table", ""), row.get("new_table", ""),
+                row.get("note", ""),
+                ",".join(row.get("steps", [])),
+                ",".join(row.get("rule_codes", [])),
+                touched if touched else "",
+            ])
+            fill = _fill_for(row.get("status", ""))
+            for cell in ws2[ws2.max_row]:
+                cell.fill = fill
+    _auto_width(ws2)
+
+    # ── Sheet4: 过滤摘要 ──
+    ws3 = wb.create_sheet("过滤摘要")
+    headers3 = ["资产", "状态", "源表", "源字段", "变化类型", "原因", "目标字段"]
+    ws3.append(headers3)
+    for cell in ws3[1]:
+        cell.font = header_font
+    for ar in asset_results:
+        for row in ar["result"].filtered_out:
+            ws3.append([ar["asset"]] + [row.get(h, "") for h in
+                        ["status", "source_table", "source_field",
+                         "change_type", "reason", "target_field"]])
+            fill = _fill_for(row.get("status", ""))
+            for cell in ws3[ws3.max_row]:
+                cell.fill = fill
+    _auto_width(ws3)
+
+    # ── Sheet5: 未处理（未定位/出错）──
+    ws4 = wb.create_sheet("未处理")
+    ws4.append(["类型", "表名", "原因"])
+    for cell in ws4[1]:
+        cell.font = header_font
+    for t in not_found:
+        ws4.append(["未定位到资产目录", t, "代码仓 BFT/BftWideTable/ 下未找到匹配目录"])
+    for e in errors:
+        ws4.append(["分析出错", e.get("table", ""), e.get("error", "")])
+    _auto_width(ws4)
+
+    wb.save(output_path)
+
+
+def main_cross_asset():
+    """跨资产影响分析 CLI 入口。"""
+    parser = argparse.ArgumentParser(
+        description="跨资产关联影响分析（批量）"
+    )
+    parser.add_argument("--changes", required=True,
+                        help="变更清单 Excel（四 Sheet，含受影响表清单）")
+    parser.add_argument("--repo-root", required=True,
+                        help="代码仓根目录（含 BFT/ + DDL/）")
+    parser.add_argument("--output", default="impact_cross_asset.xlsx",
+                        help="输出 Excel 路径")
+    parser.add_argument("--ddl-dir", default="",
+                        help="DDL 目录（可选，yml 场景通常自动发现）")
+    args = parser.parse_args()
+
+    # 读受影响表清单（Sheet3）
+    affected_tables = _read_affected_tables(args.changes)
+    if not affected_tables:
+        print("[ERROR] 变更清单 Sheet3（受影响表清单）为空或未找到", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[INFO] 受影响表: {len(affected_tables)} 张")
+
+    # 验证代码仓根
+    repo_root = Path(args.repo_root)
+    if not (repo_root / "BFT").is_dir():
+        print(f"[ERROR] 代码仓根目录无效（无 BFT/）: {args.repo_root}", file=sys.stderr)
+        sys.exit(1)
+
+    run_cross_asset(args.changes, affected_tables, args.repo_root, args.output, args.ddl_dir)
+
+
 if __name__ == "__main__":
-    main()
+    # 支持 --cross-asset 参数切换到跨资产模式
+    if len(sys.argv) > 1 and sys.argv[1] == "--cross-asset":
+        sys.argv.pop(1)
+        main_cross_asset()
+    else:
+        main()
