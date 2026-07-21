@@ -79,7 +79,6 @@ SYNC_ITEMS=(
     "dws-pipeline-analyzer"
     "commands"
     "README.md"
-    "user-guide.md"
     "install.sh"
     "install.bat"
     "install.py"

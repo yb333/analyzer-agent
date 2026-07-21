@@ -92,7 +92,6 @@ if exist "%TEMP_DIR%\commands" (
 )
 
 REM 单个文件（sample_rule.yml 是开发者样例，不同步给用户）
-for %%F in (README.md user-guide.md install.sh install.bat install.py) do (
     if exist "%TEMP_DIR%\%%F" (
         copy /Y "%TEMP_DIR%\%%F" "!INTERNAL_REPO!\%%F" >nul
         echo   + %%F
