@@ -79,10 +79,10 @@ SYNC_ITEMS=(
     "dws-pipeline-analyzer"
     "commands"
     "README.md"
+    "user-guide.md"
     "install.sh"
     "install.bat"
     "install.py"
-    "sample_rule.yml"
 )
 
 # 先清理内网仓库里旧的同名成品（保持干净），再复制新的

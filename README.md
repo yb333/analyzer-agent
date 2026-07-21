@@ -83,7 +83,6 @@ output/{规则组英文名}/
 ## 文档
 
 - [用户指南](user-guide.md) — 面向使用者的详细说明
-- [架构设计](architecture.md) — 面向开发/维护者的架构文档
 - [影响分析模板](dws-pipeline-analyzer/templates/) — 变更清单模板和跨资产案例
 
 ## 目录结构
@@ -95,8 +94,6 @@ output/{规则组英文名}/
 │   └── SKILL.md             Skill 定义（AI 触发条件）
 ├── commands/                命令定义（/analyze /impact-analysis 等）
 ├── install.sh / install.bat 安装脚本
-├── sample_rule.yml          yml 样例
-├── architecture.md          架构设计文档
 └── user-guide.md            用户指南
 ```
 
