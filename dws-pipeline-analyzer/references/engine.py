@@ -186,6 +186,18 @@ def clear_sql_ast_cache():
     """
     _SQL_AST_CACHE.clear()
 
+
+# ── DDL 目录扫描缓存 ──
+# parse_ddl_for_metadata 每次调用都扫描整个 DDL 目录+读所有文件。
+# build_table_catalog 遍历多个表时会重复调，缓存目录扫描+文件内容避免重复 IO。
+# key: 目录绝对路径; value: [(sql_file, content, content_lower), ...]
+_DDL_DIR_CACHE: dict = {}
+
+
+def clear_ddl_dir_cache():
+    """清空 DDL 目录扫描缓存（batch 场景每组后调，防内存增长）。"""
+    _DDL_DIR_CACHE.clear()
+
 # ═══════════════════════════════════════════════════════════════
 # 数据类
 # ═══════════════════════════════════════════════════════════════
@@ -5178,21 +5190,32 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
     result: dict[str, dict] = {}
     target_lower = target_table.lower()
 
-    # 递归扫描（rglob）：支持 ddl_dir 是 table/ 或 schema/（含 table/+view/ 子目录）
-    # 多扩展名：.sql/.ddl/.txt（大小写不敏感）
-    sql_files = []
-    for ext in ("*.sql", "*.ddl", "*.txt", "*.SQL", "*.DDL", "*.TXT"):
-        sql_files.extend(ddl_path.rglob(ext))
-    # 去重
-    seen = set()
-    for sql_file in sql_files:
-        real = str(sql_file.resolve())
-        if real in seen:
-            continue
-        seen.add(real)
-        content = sql_file.read_text(encoding="utf-8", errors="ignore")
-        content_lower = content.lower()
+    # ★ 目录扫描+文件读取缓存：同一 DDL 目录多次调用（build_table_catalog 遍历多表）
+    # 只扫描一次目录、读一次文件，后续调用直接用内存里的文件列表
+    # 没缓存的化：N 个表 × M 个 DDL 文件 = N*M 次文件 IO，大目录下极慢
+    cache_key = str(ddl_path.resolve())
+    cached = _DDL_DIR_CACHE.get(cache_key)
+    if cached is None:
+        sql_files = []
+        for ext in ("*.sql", "*.ddl", "*.txt", "*.SQL", "*.DDL", "*.TXT"):
+            sql_files.extend(ddl_path.rglob(ext))
+        # 预读所有文件内容（去重）
+        seen = set()
+        files_content = []
+        for sql_file in sql_files:
+            real = str(sql_file.resolve())
+            if real in seen:
+                continue
+            seen.add(real)
+            try:
+                content = sql_file.read_text(encoding="utf-8", errors="ignore")
+                files_content.append((sql_file, content, content.lower()))
+            except Exception:
+                continue
+        cached = files_content
+        _DDL_DIR_CACHE[cache_key] = cached
 
+    for sql_file, content, content_lower in cached:
         if target_lower not in content_lower:
             continue
         if "create table" not in content_lower:
