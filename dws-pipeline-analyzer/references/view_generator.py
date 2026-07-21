@@ -481,7 +481,8 @@ def build_report_data(knowledge):
     asset_info = meta.get("asset_info", {})
     summary = {
         "target_table": target_table,
-        "table_cn_name": bl.get("summary", "").split("，")[0] if bl.get("summary") else "",
+        # 表中文名：优先用 DDL 表注释（标准稳定），没有再用 AI 业务描述
+        "table_cn_name": meta.get("table_comment", "") or (bl.get("summary", "").split("，")[0] if bl.get("summary") else ""),
         "description": bl.get("summary", ""),
         "rule_count": len(steps_list),
         # 目标字段数：只算最终目标表（最大 exec_sequence 步骤）的字段，不算中间步骤

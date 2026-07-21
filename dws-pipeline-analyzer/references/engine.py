@@ -5347,6 +5347,15 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
                 result[fname] = {"type": "", "comment": comment,
                                  "nullable": True, "default_value": "", "is_pk": False}
 
+        # ── 3. 提取表级注释 COMMENT ON TABLE ──
+        # 存到特殊 key，供标题等使用（不影响字段遍历——没有 type 会被跳过）
+        tbl_cm = re.search(
+            r"COMMENT\s+ON\s+TABLE\s+\S+\s+IS\s*['\"]([^'\"]*)['\"]",
+            content, re.IGNORECASE,
+        )
+        if tbl_cm:
+            result["__table_comment__"] = tbl_cm.group(1).strip()
+
     return result
 
 
@@ -6248,6 +6257,8 @@ def analyze_pipeline(
     if table_catalog:
         target_full = _normalize_table_name(target_schema, target_name).lower()
         target_metadata = table_catalog.get(target_full, {})
+    # 表级注释（从 DDL 的 COMMENT ON TABLE 提取，用于标题，比 AI 内容稳定）
+    table_comment = target_metadata.pop("__table_comment__", "") if target_metadata else ""
 
     # 生成兜底 step_descriptions（脚本自动，不依赖 AI）
     scenarios = topology.get("scenarios", [])
@@ -6284,6 +6295,7 @@ def analyze_pipeline(
             "load_strategy": load_strategy,
             "target_field_types": {k: v["type"] for k, v in target_metadata.items() if v.get("type")},
             "target_field_comments": {k: v["comment"] for k, v in target_metadata.items() if v.get("comment")},
+            "table_comment": table_comment,  # DDL 表级注释（用于标题，比AI内容稳定）
             "_timings": _timings,  # 各阶段耗时（秒），供性能诊断
         },
         "topology": topology,
