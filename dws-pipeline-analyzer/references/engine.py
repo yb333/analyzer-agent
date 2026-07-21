@@ -3614,6 +3614,32 @@ def build_topology(rules: list[RawRule], parsed_map: dict[str, ParsedSQL]) -> di
                         "confidence": "inferred",
                     })
 
+        # ★ 同表写入者之间的顺序依赖
+        # 多个步骤写同一张表时，后执行的写入者必须等先执行的写完
+        # （否则并发写同一张表，数据顺序/删写时序会错乱）
+        # 典型场景：R1 写 tmp1(seq=1)，R2 先删 tmp1 的数据再写(seq=2)，
+        #   R2 必须等 R1 写完才能删——否则删不到 R1 写的数据
+        if len(writers) > 1:
+            # 按 exec_sequence 排序写入者
+            writer_steps = sorted(
+                [s for s in steps if s["step_id"] in writers],
+                key=lambda s: s["exec_sequence"],
+            )
+            for i in range(1, len(writer_steps)):
+                later_writer = writer_steps[i]["step_id"]
+                earlier_writers = [ws["step_id"] for ws in writer_steps[:i]]
+                already = any(
+                    d["from"] in earlier_writers and d["to"] == later_writer
+                    for d in data_dependencies
+                )
+                if not already:
+                    implicit_dependencies.append({
+                        "from": earlier_writers,
+                        "to": later_writer,
+                        "reason": f"step {later_writer} 写入 {table}，该表已由 {', '.join(earlier_writers)} 写入，需按序执行",
+                        "confidence": "inferred",
+                    })
+
     # ── 删数步骤 → 后续写入步骤的隐式依赖 ──
     # 删数步骤(type=2)和写入步骤(type=1)同目标表时，建立依赖
     for s_del in steps:
