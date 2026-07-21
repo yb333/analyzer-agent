@@ -355,29 +355,6 @@ body {
   stroke: #94a3b8;
   stroke-width: 1.5;
   marker-end: url(#lh-arrow);
-  /* 加宽命中区：用透明粗描边垫底方便 hover（通过 :hover 直接加粗即可）*/
-  cursor: pointer;
-  transition: stroke-width 0.1s, stroke 0.1s, opacity 0.1s;
-}
-
-/* hover 时本线变粗变亮 */
-.lineage-svg .edge-path:hover {
-  stroke-width: 3;
-  stroke: #2563eb;
-}
-
-/* 任一线被 hover 时，其他线变淡（凸显当前线）*/
-.lineage-svg.edge-hovering .edge-path:not(:hover) {
-  opacity: 0.2;
-}
-
-/* 被高亮的线穿越的节点也降低透明度，让线看得更清楚 */
-.lineage-svg.edge-hovering .lh-node {
-  opacity: 0.45;
-  transition: opacity 0.1s;
-}
-.lineage-svg.edge-hovering .lh-node.edge-endpoint {
-  opacity: 1;
 }
 
 .lineage-svg .edge-path.self-ref {
@@ -385,18 +362,10 @@ body {
   stroke-dasharray: 5 3;
   marker-end: url(#lh-arrow-self);
 }
-.lineage-svg .edge-path.self-ref:hover {
-  stroke: #ea580c;
-}
 
 .lineage-svg .edge-label {
   font-size: 10px;
   fill: var(--text-secondary);
-  pointer-events: none;
-  transition: opacity 0.1s;
-}
-.lineage-svg.edge-hovering .edge-label {
-  opacity: 0.2;
 }
 
 .lineage-svg .node-content {
@@ -1687,41 +1656,18 @@ function renderLineage() {
   svg += '</defs>';
 
   // Render edges (来源表隐藏时，不渲染涉及隐藏节点的边)
-  // ★ 入边分散：同一目标节点的多条入边，在目标左侧 y 方向均匀分散连接点，
-  //   避免多条线挤在同一点导致视觉重叠（1→3 和 2→3 重叠看不出有没有 2→3）
-  var incomingByTarget = {};
-  edges.forEach(function(e) {
-    var tn = nodeMap[e.to];
-    if (!tn) return;
-    if (fromNodeHidden(e) || toNodeHidden(e)) return;
-    incomingByTarget[e.to] = (incomingByTarget[e.to] || []);
-    incomingByTarget[e.to].push(e);
-  });
-  function fromNodeHidden(e) { var n = nodeMap[e.from]; return n && n.hidden && !lineageShowSources; }
-  function toNodeHidden(e) { var n = nodeMap[e.to]; return n && n.hidden && !lineageShowSources; }
-
   edges.forEach(function(e) {
     var fromNode = nodeMap[e.from];
     var toNode = nodeMap[e.to];
     if (!fromNode || !toNode) return;
+    // 隐藏的来源表：如果开关关了就不渲染
     if (fromNode.hidden && !lineageShowSources) return;
     if (toNode.hidden && !lineageShowSources) return;
 
     var x1 = fromNode.x + fromNode.width;
-    // 出边连接点：同一来源的多条出边，在来源右侧分散
-    var outgoings = edges.filter(function(e2) {
-      return e2.from === e.from && !(nodeMap[e2.to] && nodeMap[e2.to].hidden && !lineageShowSources);
-    });
-    var outIdx = outgoings.indexOf(e);
-    var outCount = outgoings.length;
-    var y1 = fromNode.y + fromNode.height * (outCount > 1 ? (outIdx + 1) / (outCount + 1) : 0.5);
-
+    var y1 = fromNode.y + fromNode.height / 2;
     var x2 = toNode.x;
-    // 入边连接点：同一目标的多条入边，在目标左侧分散
-    var incomings = incomingByTarget[e.to] || [e];
-    var inIdx = incomings.indexOf(e);
-    var inCount = incomings.length;
-    var y2 = toNode.y + toNode.height * (inCount > 1 ? (inIdx + 1) / (inCount + 1) : 0.5);
+    var y2 = toNode.y + toNode.height / 2;
 
     var isSelfRef = selfRefs.indexOf(e.from) >= 0;
 
@@ -1802,41 +1748,6 @@ function renderLineage() {
       tooltip.style.top = (e.clientY - 30) + 'px';
     });
     g.addEventListener('mouseleave', function() {
-      tooltip.style.display = 'none';
-    });
-  });
-
-  // ★ 连线 hover 高亮：鼠标进入某条线时，该线变粗变亮，
-  // 其他线变淡，被穿越的节点也降低透明度，让线的完整路径看得清
-  var svgEl = wrapper.querySelector('.lineage-svg');
-  var edgePaths = wrapper.querySelectorAll('.edge-path');
-  edgePaths.forEach(function(p) {
-    p.addEventListener('mouseenter', function() {
-      if (svgEl) svgEl.classList.add('edge-hovering');
-      // 标记起止节点为 endpoint（保持不透明，让用户看到连到哪）
-      var fromId = p.getAttribute('data-from');
-      var toId = p.getAttribute('data-to');
-      lhNodes.forEach(function(n) {
-        var nid = n.getAttribute('data-id');
-        if (nid === fromId || nid === toId) {
-          n.classList.add('edge-endpoint');
-        }
-      });
-      // tooltip 显示连线信息
-      var fromNode = nodeMap[fromId];
-      var toNode = nodeMap[toId];
-      if (fromNode && toNode) {
-        tooltip.textContent = (fromNode.label || fromNode.name || fromId) + ' → ' + (toNode.label || toNode.name || toId);
-        tooltip.style.display = 'block';
-      }
-    });
-    p.addEventListener('mousemove', function(e) {
-      tooltip.style.left = (e.clientX + 12) + 'px';
-      tooltip.style.top = (e.clientY - 30) + 'px';
-    });
-    p.addEventListener('mouseleave', function() {
-      if (svgEl) svgEl.classList.remove('edge-hovering');
-      lhNodes.forEach(function(n) { n.classList.remove('edge-endpoint'); });
       tooltip.style.display = 'none';
     });
   });
