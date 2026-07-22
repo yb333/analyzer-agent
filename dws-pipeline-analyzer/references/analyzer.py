@@ -1536,17 +1536,25 @@ def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
     sorted_groups = sorted(groups_info["groups"], key=lambda g: -g["depth"])
 
     merged_rules = []
-    global_seq = 0
+    # ★ 用偏移量保留组内并行结构：
+    # 同一个 exec_sequence 的规则保持并行（seq 不变），
+    # 组间用偏移量保证上游在前（上游 seq 整体小于下游）。
+    # 不要拍平成一条线（那会让并行的规则变成串行）。
+    seq_offset = 0
     for group_info in sorted_groups:
         raw = read_yml(group_info["dir"])
-        for rule in raw.get("rules", []):
-            global_seq += 1
-            # 重新编号 exec_sequence
+        group_rules = raw.get("rules", [])
+        if not group_rules:
+            continue
+        # 该组内最大的原始 exec_sequence
+        max_seq_in_group = max(r.exec_sequence for r in group_rules)
+        # 该组的偏移量 = 当前累计偏移
+        for rule in group_rules:
             merged_rules.append(RawRule(
-                rule_code=f"{rule.rule_code}",
+                rule_code=rule.rule_code,
                 rule_name=rule.rule_name,
                 rule_type=rule.rule_type,
-                exec_sequence=global_seq,
+                exec_sequence=rule.exec_sequence + seq_offset,
                 target_schema=rule.target_schema,
                 target_table=rule.target_table,
                 delete_mode=rule.delete_mode,
@@ -1555,6 +1563,8 @@ def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
                 rule_group_code=rule.rule_group_code,
                 rule_group_en=rule.rule_group_en,
             ))
+        # 下一组的偏移 = 当前组最大 seq + 偏移 + 1（留一个间隔）
+        seq_offset += max_seq_in_group + 1
 
     return merged_rules
 

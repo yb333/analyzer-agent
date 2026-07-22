@@ -194,14 +194,66 @@ class TestMergeRuleGroups:
         assert "dwb_trade_mid_f" in mid_targets
         assert "dwb_detail_mid_f" in mid_targets
 
-    def test_merged_seq_continuous(self, tmp_path):
-        """合并后 exec_sequence 连续编号（1,2,3...）。"""
+    def test_merged_seq_upstream_before_downstream(self, tmp_path):
+        """合并后上游规则组的 seq 整体小于下游。"""
         repo, final_dir, _ = _make_chain_repo(tmp_path)
         result = trace_upstream_rule_groups(final_dir, repo)
         merged = merge_rule_groups(result, repo)
 
-        seqs = [r.exec_sequence for r in merged]
-        assert seqs == list(range(1, len(merged) + 1))
+        # 最终F的 seq 应该大于所有 mid 规则组的 seq
+        mid_seqs = [r.exec_sequence for r in merged if r.target_table != "dwb_trade_order_f"]
+        final_seqs = [r.exec_sequence for r in merged if r.target_table == "dwb_trade_order_f"]
+        assert max(mid_seqs) < min(final_seqs), \
+            f"上游seq应小于下游: mid={mid_seqs} final={final_seqs}"
+
+    def test_merged_preserves_internal_parallel(self, tmp_path):
+        """合并后规则组内部的并行结构保留（同 seq 的规则不被拍平成串行）。"""
+        repo = tmp_path / "repo"
+        sub = repo / "BFT" / "BftWideTable" / "P_TRADE" / "SUB_TRADE"
+        sub.mkdir(parents=True)
+
+        # mid规则组：seq=0 两条并行 + seq=1 串行
+        build_yml_group(sub / "DWB_MID_F", rules=[
+            {"rule_code": "M1", "rule_type": 1, "exec_sequence": 0,
+             "target_schema": "dws", "target_table": "tmp_mid_a", "delete_mode": "1",
+             "query_sql": "SELECT a.id FROM ods.src_a a",
+             "rule_group_en": "DWB_MID_F", "rule_group_code": "G1"},
+            {"rule_code": "M2", "rule_type": 1, "exec_sequence": 0,
+             "target_schema": "dws", "target_table": "tmp_mid_b", "delete_mode": "1",
+             "query_sql": "SELECT a.id FROM ods.src_b a",
+             "rule_group_en": "DWB_MID_F", "rule_group_code": "G1"},
+            {"rule_code": "M3", "rule_type": 1, "exec_sequence": 1,
+             "target_schema": "dws", "target_table": "dwb_mid_f", "delete_mode": "1",
+             "query_sql": "SELECT a.id FROM dws.tmp_mid_a a",
+             "rule_group_en": "DWB_MID_F", "rule_group_code": "G1"},
+        ])
+        # 最终F规则组：seq=0 两条并行 + seq=1 串行
+        build_yml_group(sub / "DWB_FINAL_F", rules=[
+            {"rule_code": "F1", "rule_type": 1, "exec_sequence": 0,
+             "target_schema": "dws", "target_table": "tmp_final_a", "delete_mode": "1",
+             "query_sql": "SELECT a.id FROM dws.dwb_mid_f a",
+             "rule_group_en": "DWB_FINAL_F", "rule_group_code": "G2"},
+            {"rule_code": "F2", "rule_type": 1, "exec_sequence": 0,
+             "target_schema": "dws", "target_table": "tmp_final_b", "delete_mode": "1",
+             "query_sql": "SELECT a.id FROM dws.dwb_mid_f a",
+             "rule_group_en": "DWB_FINAL_F", "rule_group_code": "G2"},
+            {"rule_code": "F3", "rule_type": 1, "exec_sequence": 1,
+             "target_schema": "dws", "target_table": "dwb_final_f", "delete_mode": "1",
+             "query_sql": "SELECT a.id FROM dws.tmp_final_a a",
+             "rule_group_en": "DWB_FINAL_F", "rule_group_code": "G2"},
+        ])
+
+        result = trace_upstream_rule_groups(sub / "DWB_FINAL_F", repo)
+        merged = merge_rule_groups(result, repo)
+
+        # mid组：seq=0 应有2条（M1/M2并行），seq=1 应有1条（M3）
+        mid_seq0 = [r for r in merged if r.rule_group_en == "DWB_MID_F" and r.exec_sequence == 0]
+        assert len(mid_seq0) == 2, f"mid组seq=0应有2条并行: {len(mid_seq0)}"
+
+        # final组：偏移后 seq=2 应有2条（F1/F2并行）
+        final_min_seq = min(r.exec_sequence for r in merged if r.rule_group_en == "DWB_FINAL_F")
+        final_parallel = [r for r in merged if r.rule_group_en == "DWB_FINAL_F" and r.exec_sequence == final_min_seq]
+        assert len(final_parallel) == 2, f"final组最小seq应有2条并行: {len(final_parallel)}"
 
 
 # ═══════════════════════════════════════════════════════════════
