@@ -1477,15 +1477,19 @@ def trace_upstream_rule_groups(
 
         # 目标表（这个规则组写的）
         target_table = ""
+        all_target_tables = set()
         if rules:
-            # 取最大 exec_sequence 的规则的目标表（最终产出）
             max_seq_rule = max(rules, key=lambda r: r.exec_sequence)
             target_table = max_seq_rule.target_table
+            for r in rules:
+                if r.target_table:
+                    all_target_tables.add(r.target_table.lower())
 
         groups.append({
             "dir": str(group_dir),
             "rule_group_en": rule_group_en,
             "target_table": target_table,
+            "all_target_tables": sorted(all_target_tables),
             "source_tables": list(source_tables),
             "depth": depth,
         })
@@ -1712,7 +1716,9 @@ def main_chain():
     # 标记这是多规则组链路分析（供报告区分）
     knowledge["meta"]["is_multi_group"] = True
     knowledge["meta"]["chain_groups"] = [
-        {"name": g["rule_group_en"], "target_table": g["target_table"], "depth": g["depth"]}
+        {"name": g["rule_group_en"], "target_table": g["target_table"],
+         "all_target_tables": g.get("all_target_tables", [g["target_table"].lower()] if g["target_table"] else []),
+         "depth": g["depth"]}
         for g in sorted(result["groups"], key=lambda x: x["depth"])
     ]
 

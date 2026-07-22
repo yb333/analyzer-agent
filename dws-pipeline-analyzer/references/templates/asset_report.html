@@ -1528,21 +1528,14 @@ function renderHeader() {
     }
     html += '</div>';
   }
-  // 多规则组链路标识
+  // 多规则组链路标识（只显示标识，交互在数据流图工具栏）
   if (s.is_multi_group && s.chain_groups && s.chain_groups.length > 0) {
     html += '<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">';
     html += '<span style="display:inline-block;padding:2px 10px;border-radius:4px;font-size:12px;font-weight:600;color:#8b5cf6;background:#f3e8ff;border:1px solid #a78bfa;">多规则组链路</span>';
-    // 链路总览：按 depth 排序（上游→下游），每个规则组名可 hover 高亮数据流图
     var sortedGroups = s.chain_groups.slice().sort(function(a, b) { return b.depth - a.depth; });
-    var chainParts = sortedGroups.map(function(g) {
-      var name = escapeHtml(g.name);
-      return '<span style="cursor:pointer;padding:1px 6px;border-radius:3px;border:1px solid transparent;transition:background 0.1s;"'
-           + ' onmouseenter="this.style.background=\'#f3e8ff\';this.style.borderColor=\'#a78bfa\';highlightRuleGroup(\'' + g.name.replace(/'/g, "\\'") + '\')"'
-           + ' onmouseleave="this.style.background=\'transparent\';this.style.borderColor=\'transparent\';clearRuleGroupHighlight()"'
-           + '>' + name + '</span>';
-    });
-    var chainHtml = chainParts.join(' <span style="color:var(--text-muted);">→</span> ');
-    html += '<span style="font-size:12px;color:var(--text-secondary);">悬停查看范围：</span>' + chainHtml;
+    var chainHtml = sortedGroups.map(function(g) { return escapeHtml(g.name); })
+      .join(' <span style="color:var(--text-muted);">→</span> ');
+    html += '<span style="font-size:12px;color:var(--text-secondary);">' + chainHtml + '</span>';
     html += '</div>';
   }
 
@@ -1933,6 +1926,11 @@ function highlightStep(nodeId) {
 
 function clearHighlight() {
   highlightedStep = null;
+  // 如果正在聚焦某个规则组，恢复聚焦状态（不全恢复）
+  if (activeRuleGroup) {
+    focusRuleGroup(activeRuleGroup);
+    return;
+  }
   var allNodes = document.querySelectorAll('#lineageWrapper .lh-node');
   var allEdges = document.querySelectorAll('#lineageWrapper .edge-path');
   allNodes.forEach(function(g) {

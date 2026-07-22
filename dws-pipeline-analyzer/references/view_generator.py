@@ -539,10 +539,19 @@ def build_report_data(knowledge):
 
     # ── steps (步骤详情 + SQL) ──
     steps_out = []
-    # 多规则组：建 target_table → rule_group_name 映射（用于步骤卡片标注归属）
-    chain_group_map = {}
-    for cg in meta.get("chain_groups", []):
-        chain_group_map[cg.get("target_table", "").lower()] = cg.get("name", "")
+    # 多规则组：用 all_target_tables 匹配归属
+    # （含临时表步骤的 target_table，不只是最终产出表）
+    chain_group_map = {}  # {target_table_lower: rule_group_name}
+    is_multi_group = meta.get("is_multi_group", False)
+    if is_multi_group:
+        for cg in meta.get("chain_groups", []):
+            name = cg.get("name", "")
+            # all_target_tables 包含该组所有步骤写的表（含临时表）
+            for tbl in cg.get("all_target_tables", []):
+                chain_group_map[tbl.lower()] = name
+            # 最终 target_table 也加（兜底）
+            if cg.get("target_table"):
+                chain_group_map[cg["target_table"].lower()] = name
     for s in steps_list:
         step_id = s["step_id"]
         df_step = next((d for d in data_flow_steps if d.get("step_id") == step_id), {})
@@ -574,7 +583,7 @@ def build_report_data(knowledge):
             # I 视图步骤标注：从 topology steps 的 is_view_step 取（统一真相源）
             "is_view_step": s.get("is_view_step", False),
             # 多规则组：该步骤属于哪个规则组（从 target_table 反查 chain_groups）
-            "rule_group_name": chain_group_map.get(s.get("target_table", "").lower(), ""),
+            "rule_group_name": chain_group_map.get(s.get("target_table", "").lower(), "") if is_multi_group else "",
             "join_usage": df_step.get("join_usage", []),
             "where_usage": df_step.get("where_usage", []),
             "groupby_usage": df_step.get("groupby_usage", []),
