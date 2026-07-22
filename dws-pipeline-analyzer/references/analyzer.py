@@ -1508,6 +1508,11 @@ def trace_upstream_rule_groups(
                 continue
 
             for writer in writers:
+                # 跳过 _init 规则组（初始化数据，不属于日常加工链路）
+                writer_name = writer.get("rule_group_en", "")
+                writer_dir_name = Path(writer["dir"]).name
+                if writer_name.lower().endswith("_init") or writer_dir_name.lower().endswith("_init"):
+                    continue
                 _trace(writer["dir"], depth + 1)
 
     _trace(final_group_dir, 0)
@@ -1691,7 +1696,7 @@ def main_chain():
     ddl_dir = args.ddl_dir
     if not ddl_dir and repo_root:
         try:
-            ddl_dir = _auto_discover_ddl_from_repo(merged_rules, final_group_dir) or ""
+            ddl_dir = _auto_discover_ddl_from_repo(final_group_dir, merged_rules) or ""
         except Exception:
             ddl_dir = ""
 
