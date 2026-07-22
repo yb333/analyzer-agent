@@ -1545,11 +1545,15 @@ def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
     if not groups:
         return []
 
-    # 读所有规则组的 rules（缓存，避免重复 read_yml）
+    # 读所有规则组的 rules + target_fields + group_variables（缓存，避免重复 read_yml）
     group_rules_cache = {}
+    group_tf_cache = {}
+    group_gv_cache = {}
     for g in groups:
         raw = read_yml(g["dir"])
         group_rules_cache[g["dir"]] = raw.get("rules", [])
+        group_tf_cache[g["dir"]] = raw.get("target_fields", {})
+        group_gv_cache[g["dir"]] = raw.get("group_variables", {})
 
     # 算每个规则组的 target_table（归一化）
     group_target = {}  # {group_dir: norm_target_table}
@@ -1635,7 +1639,17 @@ def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
                 rule_group_en=rule.rule_group_en,
             ))
 
-    return merged_rules
+    # 合并 target_fields 和 group_variables（按 rule_code 分组，合并所有规则组的）
+    merged_target_fields = {}
+    merged_group_variables = {}
+    for g in groups:
+        dir_path = g["dir"]
+        for rc, tfs in group_tf_cache.get(dir_path, {}).items():
+            merged_target_fields.setdefault(rc, []).extend(tfs)
+        for rc, gvs in group_gv_cache.get(dir_path, {}).items():
+            merged_group_variables.setdefault(rc, []).extend(gvs)
+
+    return merged_rules, merged_target_fields, merged_group_variables
 
 
 def main_chain():
@@ -1693,7 +1707,7 @@ def main_chain():
 
     # 合并
     print(f"\n[Step 2] 合并规则组...")
-    merged_rules = merge_rule_groups(result, repo_root)
+    merged_rules, merged_target_fields, merged_group_variables = merge_rule_groups(result, repo_root)
     print(f"  合并后 {len(merged_rules)} 条规则（exec_sequence 已重编号）")
 
     # DDL 发现
@@ -1708,7 +1722,7 @@ def main_chain():
     print(f"\n[Step 3] 分析完整链路...")
     dialect = detect_dialect(merged_rules)
     knowledge, parsed_map = analyze_pipeline(
-        merged_rules, {}, {}, dialect,
+        merged_rules, merged_target_fields, merged_group_variables, dialect,
         ddl_dir=ddl_dir, source_file="",
         rule_group_code="CHAIN",
     )

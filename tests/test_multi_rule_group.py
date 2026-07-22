@@ -183,7 +183,7 @@ class TestMergeRuleGroups:
         """合并后最终F的seq大于所有mid的seq（按依赖拓扑排序）。"""
         repo, final_dir, _ = _make_chain_repo(tmp_path)
         result = trace_upstream_rule_groups(final_dir, repo)
-        merged = merge_rule_groups(result, repo)
+        merged, _, _ = merge_rule_groups(result, repo)
 
         # 最终 F 的 seq 应大于所有 mid
         mid_seqs = [r.exec_sequence for r in merged if r.target_table != "dwb_trade_order_f"]
@@ -195,7 +195,7 @@ class TestMergeRuleGroups:
         """合并后上游规则组的 seq 整体小于下游。"""
         repo, final_dir, _ = _make_chain_repo(tmp_path)
         result = trace_upstream_rule_groups(final_dir, repo)
-        merged = merge_rule_groups(result, repo)
+        merged, _, _ = merge_rule_groups(result, repo)
 
         # 最终F的 seq 应该大于所有 mid 规则组的 seq
         mid_seqs = [r.exec_sequence for r in merged if r.target_table != "dwb_trade_order_f"]
@@ -241,7 +241,7 @@ class TestMergeRuleGroups:
         ])
 
         result = trace_upstream_rule_groups(sub / "DWB_FINAL_F", repo)
-        merged = merge_rule_groups(result, repo)
+        merged, _, _ = merge_rule_groups(result, repo)
 
         # mid组：seq=0 应有2条（M1/M2并行），seq=1 应有1条（M3）
         mid_seq0 = [r for r in merged if r.rule_group_en == "DWB_MID_F" and r.exec_sequence == 0]
@@ -264,7 +264,7 @@ class TestChainAnalysis:
         """完整链路分析：3个规则组合并后 topology 正确串联。"""
         repo, final_dir, _ = _make_chain_repo(tmp_path)
         result = trace_upstream_rule_groups(final_dir, repo)
-        merged = merge_rule_groups(result, repo)
+        merged, _, _ = merge_rule_groups(result, repo)
 
         kj, pm = analyze_pipeline(merged, {}, {}, "dws")
 
