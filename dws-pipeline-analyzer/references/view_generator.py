@@ -991,10 +991,29 @@ def build_report_data(knowledge):
                 roles.append("过滤")
             if usage["groupby"]:
                 roles.append("分组")
+
+            # 提取最初来源（从 usage 的 tables/alias 反查物理表名）
+            source_tables = set()
+            for cat in ("join", "where", "groupby"):
+                for u in usage.get(cat, []):
+                    # join usage 有 tables 列表
+                    for t in u.get("tables", []):
+                        if t.get("table"):
+                            source_tables.add(t["table"])
+                    # where/groupby 没有 tables，但有 alias，从 step 的 source_tables 反查
+                    if not u.get("tables") and u.get("alias"):
+                        # 从步骤的 source_tables 里按 alias 找表名
+                        step_id = u.get("step_id", "")
+                        step_info = next((s for s in steps_list if s.get("step_id") == step_id), None)
+                        if step_info:
+                            for st in step_info.get("source_tables_from_sql", []):
+                                source_tables.add(st)
+
             auxiliary_fields.append({
                 "field": fname,
                 "roles": roles,
                 "usage": usage,
+                "source_tables": sorted(source_tables),
             })
 
     return {
