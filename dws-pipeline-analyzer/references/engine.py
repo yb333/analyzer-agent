@@ -911,17 +911,21 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
     # ★ 注意：split 前先保护字符串字面量里的分号（如 LISTAGG(x, ';') 里的分号）
     if ";" in clean:
         # 保护单引号内的分号：临时替换成占位符
-        protected = clean
-        str_placeholders = []
+        # ★ 先收集所有匹配，再从后往前替换（从后往前不影响前面的位置）
         import re as _re
-        for m in _re.finditer(r"'[^']*'", protected):
+        matches = list(_re.finditer(r"'[^']*'", clean))
+        str_placeholders = []
+        protected = clean
+        for i, m in enumerate(matches):
             placeholder = f"\x00STR{len(str_placeholders)}\x00"
             str_placeholders.append((placeholder, m.group(0)))
-            protected = protected[:m.start()] + placeholder + protected[m.end():]
+        # 从后往前替换（避免位置错乱）
+        for i in range(len(matches) - 1, -1, -1):
+            m = matches[i]
+            ph = str_placeholders[i][0]
+            protected = protected[:m.start()] + ph + protected[m.end():]
 
         stmts = [s.strip() for s in protected.split(";") if s.strip()]
-        # 还原占位符
-        stmts = [s for s in stmts]
         select_stmts = [s for s in stmts
                         if s.upper().startswith(("SELECT", "WITH"))]
         if select_stmts:
