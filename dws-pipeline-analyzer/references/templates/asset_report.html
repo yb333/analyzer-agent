@@ -1945,11 +1945,49 @@ function clearHighlight() {
   });
 }
 
-// ── 多规则组：hover 链路总览标签 → 高亮该组的数据流图节点 ──
-// 用边框高亮（不碰透明度），跟点击高亮不冲突
-function highlightRuleGroup(groupName) {
+// ── 多规则组：点击规则组标签 → 聚焦该组（其他变灰）──
+var activeRuleGroup = null;
+
+function toggleRuleGroupHighlight(groupName) {
+  if (activeRuleGroup === groupName) {
+    // 再点同一个 → 取消聚焦，恢复全部
+    activeRuleGroup = null;
+    clearRuleGroupFocus();
+    // 恢复标签样式
+    document.querySelectorAll('[id^="rgTag_"]').forEach(function(btn) {
+      btn.style.background = '#f3e8ff';
+      btn.style.borderColor = '#a78bfa';
+      btn.style.color = '#7c3aed';
+    });
+    return;
+  }
+
+  activeRuleGroup = groupName;
+
+  // 恢复所有标签为默认样式，当前标签变实心
+  document.querySelectorAll('[id^="rgTag_"]').forEach(function(btn) {
+    btn.style.background = '#f3e8ff';
+    btn.style.borderColor = '#a78bfa';
+    btn.style.color = '#7c3aed';
+  });
+  var tagBtn = document.getElementById('rgTag_' + groupName.replace(/\W/g, '_'));
+  if (tagBtn) {
+    tagBtn.style.background = '#7c3aed';
+    tagBtn.style.borderColor = '#7c3aed';
+    tagBtn.style.color = 'white';
+  }
+
+  focusRuleGroup(groupName);
+}
+
+// 聚焦规则组：该组相关的节点和连线正常，其他变灰
+function focusRuleGroup(groupName) {
   if (!groupName) return;
+
   var steps = REPORT_DATA.steps || [];
+  var edges = REPORT_DATA.lineage.edges || [];
+  var nodes = REPORT_DATA.lineage.nodes || [];
+
   // 找该规则组的所有 step_id
   var groupStepIds = {};
   steps.forEach(function(s) {
@@ -1957,75 +1995,66 @@ function highlightRuleGroup(groupName) {
       groupStepIds[s.step_id] = true;
     }
   });
-  if (Object.keys(groupStepIds).length === 0) return;
 
-  // 高亮数据流图里属于该规则组的节点（边框加粗变色）
-  var allNodes = document.querySelectorAll('#lineageWrapper .lh-node');
-  allNodes.forEach(function(g) {
-    // node 的 name 就是 step_id（如 step_1）
-    var nodeName = g.getAttribute('data-name');
-    if (groupStepIds[nodeName]) {
-      var rect = g.querySelector('.node-rect');
-      if (rect) {
-        rect.style.strokeWidth = '3';
-        rect.style.stroke = '#7c3aed';
-      }
+  // 找该组的 step 节点在 lineage 里的 node id（data-name == step_id）
+  var groupNodeIds = new Set();
+  nodes.forEach(function(n) {
+    if (n.type === 'step' && n.name && groupStepIds[n.name]) {
+      groupNodeIds.add(n.id);
     }
   });
-}
 
-function clearRuleGroupHighlight() {
-  // 只清除规则组高亮（边框），不影响点击高亮（透明度）
-  // 如果当前有点击高亮，恢复到点击高亮的状态；否则恢复默认
+  // 扩散：该组的 step 节点直接相连的边和另一端节点也属于该组范围
+  // （来源表、目标表/中间表、CTE 等）
+  var relatedNodeIds = new Set(groupNodeIds);
+  var relatedEdges = new Set();
+  edges.forEach(function(e, idx) {
+    if (groupNodeIds.has(e.from) || groupNodeIds.has(e.to)) {
+      relatedNodeIds.add(e.from);
+      relatedNodeIds.add(e.to);
+      relatedEdges.add(idx);
+    }
+  });
+
+  // 应用：相关节点/边正常，其他变灰
   var allNodes = document.querySelectorAll('#lineageWrapper .lh-node');
   allNodes.forEach(function(g) {
-    var rect = g.querySelector('.node-rect');
-    if (!rect) return;
-    if (highlightedStep) {
-      // 有点击高亮：恢复到点击高亮的边框状态
-      var nodeId = g.getAttribute('data-id');
-      var edges = REPORT_DATA.lineage.edges || [];
-      var related = new Set([highlightedStep]);
-      edges.forEach(function(e) {
-        if (e.to === highlightedStep) related.add(e.from);
-        if (e.from === highlightedStep) related.add(e.to);
-      });
-      rect.style.strokeWidth = related.has(nodeId) ? '2.5' : '1';
+    var nodeId = g.getAttribute('data-id');
+    if (relatedNodeIds.has(nodeId)) {
+      g.style.opacity = '1';
     } else {
-      // 无点击高亮：恢复默认
-      rect.style.strokeWidth = '1';
-      rect.style.stroke = '';
+      g.style.opacity = '0.12';
+    }
+  });
+
+  var allEdgeEls = document.querySelectorAll('#lineageWrapper .edge-path');
+  allEdgeEls.forEach(function(path, idx) {
+    if (relatedEdges.has(idx)) {
+      path.style.opacity = '0.6';
+    } else {
+      path.style.opacity = '0.05';
     }
   });
 }
 
-// 点击切换规则组高亮（再点取消）
-var activeRuleGroup = null;
-function toggleRuleGroupHighlight(groupName) {
-  // 重置所有标签样式
-  document.querySelectorAll('[id^="rgTag_"]').forEach(function(btn) {
-    btn.classList.remove('rg-active');
-    btn.style.background = '#f3e8ff';
-    btn.style.borderColor = '#a78bfa';
-  });
-
-  if (activeRuleGroup === groupName) {
-    // 再点同一个 → 取消
-    activeRuleGroup = null;
-    clearRuleGroupHighlight();
-    return;
+// 取消聚焦：恢复所有节点和边
+function clearRuleGroupFocus() {
+  // 如果有点击高亮，恢复到点击高亮状态
+  if (highlightedStep) {
+    highlightStep(highlightedStep);
+  } else {
+    var allNodes = document.querySelectorAll('#lineageWrapper .lh-node');
+    var allEdges = document.querySelectorAll('#lineageWrapper .edge-path');
+    allNodes.forEach(function(g) {
+      g.style.opacity = '1';
+      var rect = g.querySelector('.node-rect');
+      if (rect) { rect.style.strokeWidth = '1'; rect.style.stroke = ''; }
+    });
+    allEdges.forEach(function(path) {
+      path.style.opacity = '';
+      path.style.strokeWidth = '';
+    });
   }
-
-  activeRuleGroup = groupName;
-  // 高亮当前标签
-  var tagBtn = document.getElementById('rgTag_' + groupName.replace(/\W/g, '_'));
-  if (tagBtn) {
-    tagBtn.classList.add('rg-active');
-    tagBtn.style.background = '#7c3aed';
-    tagBtn.style.borderColor = '#7c3aed';
-    tagBtn.style.color = 'white';
-  }
-  highlightRuleGroup(groupName);
 }
 
 // ── 数据流向图缩放/拖拽 ──
