@@ -650,3 +650,46 @@ SELECT c.id, c.name FROM cte_normal c"""
         for cte in parsed.ctes:
             cte_tables.extend(t["name"] for t in cte.source_tables)
         assert any("src_a" in t for t in cte_tables), f"普通 CTE 也应能提取表: {cte_tables}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 字符串内分号（回归测试：LISTAGG + WHERE 里的分号不能截断 SQL）
+# ═══════════════════════════════════════════════════════════════
+
+class TestStringSemicolon:
+    """字符串字面量里的分号不能被 split(';') 截断。"""
+
+    def test_listagg_semicolon(self):
+        """LISTAGG(x, ';') 分隔符里的分号不截断 SQL。"""
+        sql = """SELECT a.id, b.names FROM ods.main a
+LEFT JOIN (
+    SELECT t.id, LISTAGG(t.name, ';') WITHIN GROUP (ORDER BY t.seq) AS names
+    FROM (SELECT x.id, x.name, x.seq FROM ods.detail x) t
+    GROUP BY t.id
+) b ON a.id = b.id"""
+        parsed = parse(sql)
+        assert not parsed.parse_error, f"LISTAGG分号截断: {parsed.parse_error}"
+        assert len(parsed.select_columns) == 2
+
+    def test_multiple_string_semicolons(self):
+        """多个字符串内含分号 + WHERE 条件含分号。"""
+        sql = """SELECT a.id, b.names, c.flags FROM ods.main a
+LEFT JOIN (
+    SELECT t.id, LISTAGG(t.name, ';') WITHIN GROUP (ORDER BY t.seq) AS names
+    FROM (SELECT x.id, x.name, x.seq FROM ods.detail x) t GROUP BY t.id
+) b ON a.id = b.id
+LEFT JOIN (
+    SELECT t.id, LISTAGG(t.flag, ',') WITHIN GROUP (ORDER BY t.seq) AS flags
+    FROM (SELECT x.id, x.flag, x.seq FROM ods.flag_src x) t GROUP BY t.id
+) c ON a.id = c.id
+WHERE a.status = 'A;B'"""
+        parsed = parse(sql)
+        assert not parsed.parse_error, f"多字符串分号截断: {parsed.parse_error}"
+        assert len(parsed.select_columns) == 3
+
+    def test_normal_semicolon_still_works(self):
+        """正常分号（语句结束）不受影响。"""
+        sql = "SELECT a.id FROM ods.src_a a;"
+        parsed = parse(sql)
+        assert not parsed.parse_error
+        assert len(parsed.select_columns) == 1
