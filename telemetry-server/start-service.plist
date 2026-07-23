@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Analyzer Agent 运营埋点服务端 macOS launchd 常驻服务模板。
+
+  部署步骤：
+  1. 替换下方 PATH_TO_SERVER 为本目录的绝对路径
+  2. 替换 PATH_TO_NODE 为 node 可执行文件路径（可用 which node 查）
+  3. 复制到 ~/Library/LaunchAgents/com.analyzer-agent.telemetry.plist
+  4. launchctl load ~/Library/LaunchAgents/com.analyzer-agent.telemetry.plist
+  5. 日志输出到 /tmp/analyzer-agent-telemetry.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.analyzer-agent.telemetry</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>PATH_TO_NODE</string>
+    <string>PATH_TO_SERVER/server.js</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PORT</key>
+    <string>3000</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/analyzer-agent-telemetry.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/analyzer-agent-telemetry.log</string>
+</dict>
+</plist>

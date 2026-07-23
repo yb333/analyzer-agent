@@ -14,6 +14,9 @@ import time
 from pathlib import Path
 from dataclasses import dataclass
 
+# 运营埋点用：当前批次 ID（run_batch 入口设置，_process_group finally 读取）
+_CURRENT_BATCH_ID = None
+
 
 @dataclass
 class BatchResult:
@@ -89,6 +92,10 @@ def run_batch(excel_path: str, output_dir: str, batch_size: int = 20,
     groups = _group_rules_by_code(all_rules, global_group_en)
     total = len(groups)
     results = []
+
+    # 运营埋点：生成本次批次 ID（供 _process_group finally 记录关联）
+    global _CURRENT_BATCH_ID
+    _CURRENT_BATCH_ID = f"batch_{int(time.time())}"
 
     # 主进程不再需要 raw 的大对象（target_fields/group_variables 等），主动释放。
     # 注意：_process_group 内部会按需自己读 Excel 取这些数据，主进程不必持有。
@@ -335,6 +342,7 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
         rule_group_en=group_en,
         output_dir=str(out_dir),  # 提前赋值，失败组也可定位/追踪
     )
+    _group_exc = None  # 运营埋点用：捕获异常（成功时为 None）
 
     try:
         # 目标表（取最后一个非中间表，仅用于日志/结果展示；
@@ -388,9 +396,25 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
         result.success = True
     except Exception as e:
         result.error = f"{type(e).__name__}: {e}"
+        _group_exc = e  # 供 finally 埋点记录错误类型
         # output_dir 已在对象初始化时预赋值，失败组也能定位目录（便于排查/重跑）。
         # 详细错误经 _log_group_results 写入批次日志；这里不再 print，避免 stdout 累积。
     finally:
+        # 运营埋点：记录本组分析（在清缓存前，此时 knowledge 等对象还可读）
+        try:
+            from usage import record as _record_usage, _classify_error as _cls_err
+            _record_usage({
+                "command": "analyze-batch",
+                "input_type": "xlsx",
+                "asset": group_en or code,
+                "target_table": result.target_table if result else "",
+                "batch_id": _CURRENT_BATCH_ID,
+                "rule_count": len(rules) if rules else 0,
+                "status": "error" if (result and not result.success) else "ok",
+                "error_type": _cls_err(_group_exc) if _group_exc else "",
+            })
+        except Exception:
+            pass
         # 每组分析完清缓存，防批量场景内存持续增长
         try:
             from engine import clear_sql_ast_cache, clear_ddl_dir_cache

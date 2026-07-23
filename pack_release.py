@@ -25,8 +25,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent
 
 # 用户需要的成品文件/目录（相对于 REPO_ROOT）
+# 注意：telemetry-server（运营埋点服务端）不随发布包分发，本地部署即可。
+#       客户端 usage.py 在 dws-pipeline-analyzer/references/ 下，随核心包进去。
 INCLUDE = [
-    "dws-pipeline-analyzer",   # 核心：engine/analyzer/view_generator/impact_analyzer 等
+    "dws-pipeline-analyzer",   # 核心：engine/analyzer/view_generator/impact_analyzer/usage 等
     "commands",                # 命令定义（/analyze 等）
     "README.md",               # 项目说明
     "install.sh",              # macOS/Linux 安装
@@ -43,6 +45,9 @@ EXCLUDE_PATTERNS = [
     "architecture.md", "docs",
     # 打包脚本本身
     "pack_release.py",
+    # telemetry-server 的开发产物（用户自行 npm install）
+    "node_modules", "package-lock.json",
+    "data",  # SQLite 数据库 + WAL（运行时产物，不打进包）
     # SKILL.md 是给 AI agent 读的元数据，用户不需要直接看
     # 但 install 脚本依赖它存在，所以保留——实际会随 dws-pipeline-analyzer/ 一起进去
 ]

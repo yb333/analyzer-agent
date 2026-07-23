@@ -1380,6 +1380,15 @@ def main():
                         help="资产名/规则组编码（用于报告标题）")
     args = parser.parse_args()
 
+    # ── 运营埋点：记录开始时刻 ──
+    import time as _t_usage
+    _t0_usage = _t_usage.time()
+    try:
+        from usage import flush_queue as _flush_usage
+        _flush_usage()
+    except Exception:
+        pass
+
     # 读取 knowledge
     knowledge_path = Path(args.knowledge)
     if not knowledge_path.exists():
@@ -1404,6 +1413,20 @@ def main():
     print(f"  🟢 无影响: {s.get('no_impact', 0)}")
     print(f"  ⚪ 未命中: {s.get('not_hit', 0)}")
     print(f"  表级影响: {s.get('table_level', 0)}")
+
+    # ── 运营埋点：记录本次影响分析 ──
+    try:
+        from usage import record as _record_usage
+        _record_usage({
+            "command": "impact-analysis",
+            "input_type": "impact_excel",
+            "asset": args.asset or "",
+            "target_table": knowledge.get("meta", {}).get("target_table", ""),
+            "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
+            "status": "ok",
+        })
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1739,6 +1762,15 @@ def main_cross_asset():
                         help="DDL 目录（可选，yml 场景通常自动发现）")
     args = parser.parse_args()
 
+    # ── 运营埋点：记录开始时刻 ──
+    import time as _t_usage
+    _t0_usage = _t_usage.time()
+    try:
+        from usage import flush_queue as _flush_usage
+        _flush_usage()
+    except Exception:
+        pass
+
     # 读受影响表清单（Sheet3）
     affected_tables = _read_affected_tables(args.changes)
     if not affected_tables:
@@ -1754,6 +1786,19 @@ def main_cross_asset():
         sys.exit(1)
 
     run_cross_asset(args.changes, affected_tables, args.repo_root, args.output, args.ddl_dir)
+
+    # ── 运营埋点：记录本次跨资产分析 ──
+    try:
+        from usage import record as _record_usage
+        _record_usage({
+            "command": "impact-analysis-cross",
+            "input_type": "impact_excel",
+            "asset": f"{len(affected_tables)}tables",
+            "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
+            "status": "ok",
+        })
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

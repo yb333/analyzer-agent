@@ -1082,6 +1082,16 @@ def main():
     parser.add_argument("--ddl-dir", default="", help="DDL 文件目录（可选，用于补充字段类型）")
     args = parser.parse_args()
 
+    # ── 运营埋点：记录开始时刻 + 预备上下文 ──
+    import time as _t_usage
+    _t0_usage = _t_usage.time()
+    try:
+        from usage import flush_queue as _flush_usage
+        _flush_usage()
+    except Exception:
+        pass
+    _usage_exc = None  # 捕获异常类型（成功时为 None）
+
     input_path = Path(args.input)
     base_output_dir = Path(args.output)
 
@@ -1336,6 +1346,24 @@ def main():
 
     print(f"\n下一步: AI 读 knowledge_summary.md，输出自然语言补充，保存为 knowledge_ai.md")
     print(f"        然后: python run.py view_generator --input knowledge_draft.json --ai-input knowledge_ai.md ...")
+
+    # ── 运营埋点：记录本次命令执行（在所有产出落盘之后） ──
+    try:
+        from usage import record as _record_usage, _classify_error as _cls_err
+        _record_usage({
+            "command": "analyze",
+            "input_type": "yml_dir" if is_yml_mode else "xlsx",
+            "asset": safe_group_en,
+            "target_table": target_name,
+            "rule_count": len(rules),
+            "field_count": stats.get("total_in_sql", 0) if isinstance(stats, dict) else 0,
+            "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
+            "status": "error" if _usage_exc is not None else "ok",
+            "error_type": _cls_err(_usage_exc),
+            "quality_issues": len(quality["issues"]) if isinstance(quality, dict) and "issues" in quality else 0,
+        })
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1667,6 +1695,15 @@ def main_chain():
                         help="DDL 文件目录（可选）")
     args = parser.parse_args()
 
+    # ── 运营埋点：记录开始时刻 ──
+    import time as _t_usage
+    _t0_usage = _t_usage.time()
+    try:
+        from usage import flush_queue as _flush_usage
+        _flush_usage()
+    except Exception:
+        pass
+
     input_path = Path(args.input)
 
     # 定位代码仓根
@@ -1741,6 +1778,8 @@ def main_chain():
     output_dir = Path(args.output) / safe_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # 在 pop 前读 _timings（运营埋点用）
+    _chain_timings = knowledge.get("meta", {}).get("_timings", {})
     knowledge["meta"].pop("_timings", None)
     output_file = output_dir / "knowledge_draft.json"
     output_file.write_text(
@@ -1780,6 +1819,23 @@ def main_chain():
     print(f"  - asset_report.html")
     print(f"  - tech_design.md")
 
+    # ── 运营埋点：记录本次链路分析 ──
+    try:
+        from usage import record as _record_usage
+        _record_usage({
+            "command": "analyze-chain",
+            "input_type": "yml_dir" if input_path.is_dir() else "table_name",
+            "asset": final_group_dir.name,
+            "target_table": target_table,
+            "rule_count": len(result["groups"]),
+            "field_count": stats.get("total_in_sql", 0) if isinstance(stats, dict) else 0,
+            "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
+            "status": "ok",
+            "quality_issues": len(knowledge.get("quality", {}).get("issues", [])),
+        })
+    except Exception:
+        pass
+
 
 # ═══════════════════════════════════════════════════════════════
 # 兼容层：re-export engine 的符号
@@ -1803,8 +1859,22 @@ from engine import (  # noqa: E402,F401
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--chain":
+    _is_chain = len(sys.argv) > 1 and sys.argv[1] == "--chain"
+    if _is_chain:
         sys.argv.pop(1)
-        main_chain()
-    else:
-        main()
+    try:
+        main_chain() if _is_chain else main()
+    except SystemExit:
+        raise  # sys.exit 不当异常处理
+    except Exception as _main_exc:
+        # 崩溃时也记一条埋点（细节可能不全，但有 command + error_type）
+        try:
+            from usage import record as _record_usage, _classify_error as _cls_err
+            _record_usage({
+                "command": "analyze-chain" if _is_chain else "analyze",
+                "status": "error",
+                "error_type": _cls_err(_main_exc),
+            })
+        except Exception:
+            pass
+        raise

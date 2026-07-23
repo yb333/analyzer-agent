@@ -1,0 +1,13 @@
+{
+  "name": "analyzer-agent-telemetry-server",
+  "version": "1.0.0",
+  "description": "Analyzer Agent 运营埋点接收服务端",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "setup": "npm install"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0"
+  }
+}

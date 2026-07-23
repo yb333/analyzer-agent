@@ -555,6 +555,15 @@ def main():
     parser.add_argument("--output", required=True, help="输出 Excel 路径")
     args = parser.parse_args()
 
+    # ── 运营埋点：记录开始时刻 ──
+    import time as _t_usage
+    _t0_usage = _t_usage.time()
+    try:
+        from usage import flush_queue as _flush_usage
+        _flush_usage()
+    except Exception:
+        pass
+
     input_path = Path(args.input)
     if not input_path.exists():
         print(f"错误: 文件不存在: {input_path}", file=sys.stderr)
@@ -581,6 +590,18 @@ def main():
     if ok:
         print(f"  [OK] {output_path}")
         print(f"\n=== 完成 ===")
+        # ── 运营埋点：记录本次字段检索 ──
+        try:
+            from usage import record as _record_usage
+            _record_usage({
+                "command": "field-search",
+                "input_type": "field_list",
+                "asset": ",".join(keywords),
+                "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
+                "status": "ok",
+            })
+        except Exception:
+            pass
     else:
         print(f"\n=== 失败 ===", file=sys.stderr)
         sys.exit(1)
