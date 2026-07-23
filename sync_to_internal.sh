@@ -71,34 +71,20 @@ EXTERNAL_VERSION=$(cd "$TEMP_DIR" && git log --oneline -1)
 echo "  最新提交: $EXTERNAL_VERSION"
 echo ""
 
-# ── Step 2: 全量同步（排除开发文件）──
-# 策略：默认全部同步，只排除已知开发文件。
-#       新增不传内网的文件时，记得加到排除列表。
-echo "[Step 2] 全量同步到内网仓库（排除开发文件）..."
+# ── Step 2: 同步外网代码到内网仓（以外网为准）──
+# 策略：rsync --delete 镜像同步（以外网为准，内网多余的删掉），保留 .git
+echo "[Step 2] 同步到内网仓库（以外网为准）..."
 
 # 排除列表（这些文件/目录不给用户）
 EXCLUDES="tests docs release __pycache__ .pytest_cache .git .gitignore architecture.md sync_to_internal.sh sync_to_internal.bat start_telemetry.sh start_telemetry.bat stop_telemetry.bat telemetry-server sample_rule.yml"
 
-# 先清空内网仓库（保留 .git），再全部复制（排除开发文件）
-cd "$INTERNAL_REPO"
-find . -not -path './.git/*' -not -path './.git' -not -name '.' -delete 2>/dev/null || true
+# rsync --delete 镜像同步：以外网为准，内网多余的删除（保留 .git）
+rsync -a --delete \
+    --exclude='.git' \
+    $(for ex in $EXCLUDES; do echo "--exclude='$ex'"; done) \
+    "$TEMP_DIR/" "$INTERNAL_REPO/"
 
-cd "$TEMP_DIR"
-for item in *; do
-    skip=false
-    for ex in $EXCLUDES; do
-        if [ "$item" = "$ex" ]; then
-            skip=true
-            break
-        fi
-    done
-    if $skip; then
-        echo "  - $item（开发文件，跳过）"
-        continue
-    fi
-    cp -r "$item" "$INTERNAL_REPO/"
-    echo "  + $item"
-done
+echo "  + 同步完成（以外网为准）"
 
 # 清理垃圾文件
 find "$INTERNAL_REPO" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
@@ -110,6 +96,10 @@ echo ""
 # ── Step 3: git commit + push ──
 echo "[Step 3] 提交到内网 git..."
 cd "$INTERNAL_REPO"
+
+# 强制以外网内容为准（丢弃内网仓的本地修改）
+git checkout -- . 2>/dev/null || true
+
 git add -A
 
 # 检查有没有变更
