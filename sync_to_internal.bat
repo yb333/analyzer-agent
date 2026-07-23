@@ -54,9 +54,9 @@ if not exist "!INTERNAL_REPO!\.git" (
     goto :eof
 )
 
-echo ═══════════════════════════════════════════════
-echo   同步外网代码 → 内网 git 仓库
-echo ═══════════════════════════════════════════════
+echo ============================================================
+echo   同步外网代码 - 内网 git 仓库
+echo ============================================================
 echo 外网仓库: %EXTERNAL_REPO%
 echo 内网仓库: !INTERNAL_REPO!
 echo.
@@ -74,6 +74,12 @@ echo.
 REM ── Step 2: 删掉不该给用户的文件 ──
 echo [Step 2] 清理开发文件...
 pushd "%TEMP_DIR%"
+
+REM 先取外网原始 commit 信息（在 commit 清理之前取，否则会被覆盖）
+for /f "delims=" %%H in ('git log -1 --format^="%%s"') do set "COMMIT_MSG=%%H"
+for /f "delims=" %%H in ('git rev-parse --short HEAD') do set "COMMIT_HASH=%%H"
+echo   外网最新: !COMMIT_HASH! !COMMIT_MSG!
+
 for /d %%D in (tests docs release telemetry-server) do (
     if exist "%%D" rmdir /s /q "%%D" 2>nul
 )
@@ -95,10 +101,6 @@ REM 提交这些删除（让 git 记录变化）
 git add -A
 git commit -m "清理开发文件（同步前预处理）" --allow-empty 2>nul
 
-REM 取外网最新 commit 信息（用于显示）
-for /f "delims=" %%H in ('git log -1 --format^="%%s"') do set "COMMIT_MSG=%%H"
-for /f "delims=" %%H in ('git rev-parse --short HEAD') do set "COMMIT_HASH=%%H"
-echo   外网最新: !COMMIT_HASH! !COMMIT_MSG!
 popd
 echo.
 
@@ -135,10 +137,10 @@ if !errorlevel! neq 0 (
 
 popd
 echo.
-echo ═══════════════════════════════════════════════
+echo ============================================================
 echo   同步完成
 echo   !COMMIT_HASH! !COMMIT_MSG!
-echo ═══════════════════════════════════════════════
+echo ============================================================
 
 :cleanup
 if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%" 2>nul
