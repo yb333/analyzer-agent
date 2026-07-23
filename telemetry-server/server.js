@@ -46,6 +46,7 @@ db.exec('PRAGMA busy_timeout = 5000');
 db.exec(`
   CREATE TABLE IF NOT EXISTS usage_records (
     run_id TEXT PRIMARY KEY,
+    trace_id TEXT,
     timestamp TEXT NOT NULL,
     install_id TEXT NOT NULL,
     user_name TEXT,
@@ -76,17 +77,22 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_usage_status ON usage_records(status);
 `);
 
-// ── 自动迁移：旧库升级时补 elapsed_detail 列（幂等，已有则跳过）──
+// ── 自动迁移：旧库升级时补新列（幂等，已有则跳过）──
 try {
   const cols = db.prepare("PRAGMA table_info(usage_records)").all();
-  if (!cols.some(c => c.name === 'elapsed_detail')) {
+  const colNames = cols.map(c => c.name);
+  if (!colNames.includes('elapsed_detail')) {
     db.exec('ALTER TABLE usage_records ADD COLUMN elapsed_detail TEXT');
     console.log('[Migration] Added column elapsed_detail');
+  }
+  if (!colNames.includes('trace_id')) {
+    db.exec('ALTER TABLE usage_records ADD COLUMN trace_id TEXT');
+    console.log('[Migration] Added column trace_id');
   }
 } catch (e) { /* 首次建表无此列检测可忽略 */ }
 
 const INSERT_COLS = [
-  'run_id', 'timestamp', 'install_id', 'user_name', 'command', 'input_type',
+  'run_id', 'trace_id', 'timestamp', 'install_id', 'user_name', 'command', 'input_type',
   'asset', 'target_table', 'batch_id', 'rule_count', 'field_count',
   'source_count', 'elapsed_sec', 'elapsed_detail', 'status', 'error_type',
   'quality_issues', 'agent_version', 'python_version', 'os'
@@ -159,7 +165,7 @@ function handlePostUsage(payload) {
     for (const r of records) {
       if (!r || !r.run_id || !r.command) continue;
       const result = insertStmt.run(
-        toStr(r.run_id), toStr(r.timestamp), toStr(r.install_id), toStr(r.user_name),
+        toStr(r.run_id), toStr(r.trace_id), toStr(r.timestamp), toStr(r.install_id), toStr(r.user_name),
         toStr(r.command), toStr(r.input_type), toStr(r.asset), toStr(r.target_table),
         toStr(r.batch_id), toInt(r.rule_count), toInt(r.field_count), toInt(r.source_count),
         toFloat(r.elapsed_sec), toStr(r.elapsed_detail), toStr(r.status) || 'unknown',
@@ -287,6 +293,27 @@ function handleStats() {
     FROM usage_records GROUP BY os ORDER BY count DESC
   `).all();
 
+  // 10. 完整分析链路（按 trace_id 关联解析+视图，算 AI 推理耗时）
+  // 自连接：同 trace_id 下，analyze 的解析结束 vs view-generator 的视图开始
+  // AI推理耗时 = json_extract(view.elapsed_detail, '$.ai_inference')
+  result.trace_analysis = db.prepare(`
+    SELECT
+      v.trace_id,
+      v.target_table,
+      v.user_name,
+      a.elapsed_sec AS parse_sec,
+      v.elapsed_sec AS view_sec,
+      json_extract(v.elapsed_detail, '$.ai_inference') AS ai_inference_sec,
+      (a.elapsed_sec + CAST(json_extract(v.elapsed_detail, '$.ai_inference') AS REAL) + v.elapsed_sec) AS total_sec,
+      v.timestamp
+    FROM usage_records v
+    JOIN usage_records a ON v.trace_id = a.trace_id AND a.command LIKE 'analyze%'
+    WHERE v.command = 'view-generator'
+      AND v.trace_id IS NOT NULL AND v.trace_id != ''
+    ORDER BY v.timestamp DESC
+    LIMIT 20
+  `).all();
+
   return result;
 }
 
@@ -371,6 +398,15 @@ function handleDashboard() {
     </div>
   </div>
 
+  <div class="section">
+    <h2>完整分析链路（解析 → AI推理 → 视图生成）</h2>
+    <table><thead><tr>
+      <th>资产</th><th>用户</th>
+      <th>解析(s)</th><th>AI推理(s)</th><th>视图(s)</th><th>总耗时(s)</th>
+      <th>时间</th>
+    </tr></thead><tbody id="traceTable"></tbody></table>
+  </div>
+
 </div>
 
 <script>
@@ -378,6 +414,7 @@ var COMMAND_NAMES = {
   'analyze': '资产文档化',
   'analyze-chain': '多规则组链路分析',
   'analyze-batch': '批量文档化',
+  'view-generator': '视图生成',
   'impact-analysis': '关联影响分析',
   'impact-analysis-cross': '跨资产影响分析',
   'field-search': '字段使用检索'
@@ -500,6 +537,19 @@ function render(data) {
   });
   renderPie('inputChart', data.input_types || [], inputLabel);
   renderErrorBar(data.error_types || []);
+  renderTable('traceTable', data.trace_analysis || [], function(r) {
+    var ai = r.ai_inference_sec ? (parseFloat(r.ai_inference_sec)).toFixed(1) : '-';
+    var total = r.total_sec ? (parseFloat(r.total_sec)).toFixed(1) : '-';
+    return [
+      r.target_table || '-',
+      r.user_name || '-',
+      r.parse_sec || '-',
+      ai,
+      r.view_sec || '-',
+      total,
+      fmtTime(r.timestamp).substring(0, 16)
+    ];
+  });
 }
 
 function refresh() {

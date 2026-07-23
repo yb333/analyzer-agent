@@ -46,10 +46,10 @@ CONFIG_PATH = USAGE_DIR / "config.json"
 CSV_PATH = USAGE_DIR / "usage.csv"
 QUEUE_PATH = USAGE_DIR / "usage_queue.jsonl"
 
-# 数据字典 —— 17 字段，分 5 组（顺序即 CSV 列顺序，勿改）
+# 数据字典 —— 18 字段，分 5 组（顺序即 CSV 列顺序，勿改）
 FIELD_NAMES = [
     # A. 标识与上下文
-    "run_id", "timestamp", "install_id", "user",
+    "run_id", "trace_id", "timestamp", "install_id", "user",
     # B. 命令与输入
     "command", "input_type", "asset", "target_table", "batch_id",
     # C. 规模指标

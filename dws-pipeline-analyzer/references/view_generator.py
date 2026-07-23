@@ -2259,6 +2259,27 @@ def main():
 
     args = parser.parse_args()
 
+    # ── 运营埋点：记录开始时刻 + 读 trace_id（关联同一次分析的解析阶段）──
+    import time as _t_usage
+    _t0_usage = _t_usage.time()
+    _trace_id = ""
+    _parse_end_ts = None
+    try:
+        from usage import flush_queue as _flush_usage
+        _flush_usage()
+    except Exception:
+        pass
+    # 从 output_dir 读 .trace_id（analyze 写的，关联两次命令）
+    try:
+        import json as _json_usage
+        _trace_path = Path(args.output) / ".trace_id"
+        if _trace_path.exists():
+            _trace_info = _json_usage.loads(_trace_path.read_text(encoding="utf-8"))
+            _trace_id = _trace_info.get("trace_id", "")
+            _parse_end_ts = _trace_info.get("parse_end_ts")
+    except Exception:
+        pass
+
     # 读取 knowledge
     input_path = Path(args.input)
     if not input_path.exists():
@@ -2308,6 +2329,30 @@ def main():
     success = sum(1 for v in results.values() if v)
     total = len(results)
     print(f"=== 完成: {success}/{total} 视图生成成功 ===")
+
+    # ── 运营埋点：记录视图生成 ──
+    # AI 推理耗时 = 本次启动时刻 - 解析阶段结束时刻（两段埋点的时间差）
+    try:
+        from usage import record as _record_usage
+        _view_elapsed = round(_t_usage.time() - _t0_usage, 2)
+        _ai_inference_sec = None
+        if _parse_end_ts is not None:
+            _ai_inference_sec = round(_t0_usage - _parse_end_ts, 2)
+        _record_usage({
+            "command": "view-generator",
+            "input_type": "knowledge_json",
+            "asset": knowledge.get("meta", {}).get("rule_group_code", ""),
+            "trace_id": _trace_id,
+            "target_table": knowledge.get("meta", {}).get("target_table", ""),
+            "elapsed_sec": _view_elapsed,
+            "elapsed_detail": {
+                "view_generation": _view_elapsed,
+                "ai_inference": _ai_inference_sec,
+            },
+            "status": "ok" if success == total else "partial",
+        })
+    except Exception:
+        pass
 
     if success < total:
         sys.exit(1)

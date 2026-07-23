@@ -1084,7 +1084,9 @@ def main():
 
     # ── 运营埋点：记录开始时刻 + 预备上下文 ──
     import time as _t_usage
+    import uuid as _uuid_usage
     _t0_usage = _t_usage.time()
+    _trace_id = f"trace_{int(_t0_usage)}_{_uuid_usage.uuid4().hex[:8]}"
     try:
         from usage import flush_queue as _flush_usage
         _flush_usage()
@@ -1331,6 +1333,20 @@ def main():
     summary_file.write_text(summary_text, encoding="utf-8", newline="\n")
     _t_json_summary = round(_t_usage.time() - _t_json0, 2)
 
+    # 写 .trace_id 文件（供 view_generator 读取，关联同一次分析的两次命令）
+    # 内容：trace_id + 解析阶段结束时间戳，用于算 AI 推理耗时
+    try:
+        import json as _json_usage
+        (output_dir / ".trace_id").write_text(
+            _json_usage.dumps({
+                "trace_id": _trace_id,
+                "parse_end_ts": _t_usage.time(),
+                "parse_elapsed": round(_t_usage.time() - _t0_usage, 2),
+            }), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
     print(f"\n=== 完成 ===")
     print(f"输出: {output_file}")
     print(f"摘要: {summary_file}")
@@ -1358,6 +1374,7 @@ def main():
             "command": "analyze",
             "input_type": "yml_dir" if is_yml_mode else "xlsx",
             "asset": safe_group_en,
+            "trace_id": _trace_id,
             "target_table": target_name,
             "rule_count": len(rules),
             "field_count": stats.get("total_in_sql", 0) if isinstance(stats, dict) else 0,
@@ -1705,7 +1722,9 @@ def main_chain():
 
     # ── 运营埋点：记录开始时刻 ──
     import time as _t_usage
+    import uuid as _uuid_usage
     _t0_usage = _t_usage.time()
+    _trace_id = f"trace_{int(_t0_usage)}_{_uuid_usage.uuid4().hex[:8]}"
     try:
         from usage import flush_queue as _flush_usage
         _flush_usage()
@@ -1840,6 +1859,7 @@ def main_chain():
             "command": "analyze-chain",
             "input_type": "yml_dir" if input_path.is_dir() else "table_name",
             "asset": final_group_dir.name,
+            "trace_id": _trace_id,
             "target_table": target_table,
             "rule_count": len(result["groups"]),
             "field_count": stats.get("total_in_sql", 0) if isinstance(stats, dict) else 0,
