@@ -1,74 +1,84 @@
 @echo off
-setlocal enabledelayedexpansion
 chcp 65001 >nul 2>&1
+setlocal enabledelayedexpansion
 
 REM ============================================================
-REM start_telemetry.bat — Analyzer Agent 运营埋点服务端一键启动
+REM start_telemetry.bat - Analyzer Agent Telemetry Server
 REM
-REM 双击即可运行。自动完成：
-REM   1. 检测 Node.js 是否安装
-REM   2. 首次运行自动 npm install 装依赖
-REM   3. 启动服务端（监听 3000 端口）
-REM   4. 浏览器自动打开看板
-REM
-REM 服务端代码在 telemetry-server/ 目录下，不随内网同步分发。
+REM Double-click to run. Auto:
+REM   1. Check Node.js
+REM   2. npm install (fallback: copy from ETL_opencode_ai if compile fails)
+REM   3. Start server on port 3000
+REM   4. Open browser
 REM ============================================================
 
-REM 切到本脚本所在目录的 telemetry-server 子目录
 cd /d "%~dp0telemetry-server"
 
-echo ═══════════════════════════════════════════════
-echo   Analyzer Agent 运营埋点服务端
-echo ═══════════════════════════════════════════════
+echo ==========================================
+echo   Analyzer Agent Telemetry Server
+echo ==========================================
 echo.
 
-REM ── 检测 Node.js ──
+REM --- Check Node.js ---
 where node >nul 2>&1
 if !errorlevel! neq 0 (
-    echo [ERROR] 未检测到 Node.js，请先安装：https://nodejs.org/
-    echo         装完重开命令行再双击本脚本。
+    echo [ERROR] Node.js not found. Install from https://nodejs.org/
     echo.
     pause
     exit /b 1
 )
 for /f "delims=" %%v in ('node -v') do set "NODE_VER=%%v"
-echo [OK] Node.js 版本: !NODE_VER!
+echo [OK] Node.js: !NODE_VER!
 echo.
 
-REM ── 检测依赖是否已装 ──
+REM --- Install deps if missing ---
 if not exist "node_modules" (
-    echo 首次运行，安装依赖（better-sqlite3）...
+    echo Installing dependencies...
     echo.
-    call npm install
-    if !errorlevel! neq 0 (
+    call npm install 2>&1
+    if not exist "node_modules" (
         echo.
-        echo [ERROR] 依赖安装失败。请手动在 telemetry-server 目录执行 npm install
-        echo.
-        pause
-        exit /b 1
+        echo [WARN] npm install failed. Trying to copy from ETL_opencode_ai...
+        if exist "%USERPROFILE%\ETL_opencode_ai\telemetry-server\node_modules" (
+            xcopy "%USERPROFILE%\ETL_opencode_ai\telemetry-server\node_modules" "node_modules\" /E /I /Q /Y >nul 2>&1
+            if exist "node_modules\better-sqlite3" (
+                echo [OK] Copied node_modules from ETL_opencode_ai
+            ) else (
+                echo [ERROR] Copy failed. Please manually run: npm install
+                echo.
+                pause
+                exit /b 1
+            )
+        ) else (
+            echo [ERROR] ETL_opencode_ai node_modules not found either.
+            echo Please manually run in telemetry-server: npm install
+            echo.
+            pause
+            exit /b 1
+        )
     )
     echo.
-    echo [OK] 依赖安装完成
+    echo [OK] Dependencies ready
     echo.
 )
 
-REM ── 启动服务 ──
-echo 启动服务端（端口 3000）...
+REM --- Start server ---
+echo Starting server on port 3000...
 echo.
-echo   看板地址: http://localhost:3000/
-echo   上报地址: http://本机IP:3000/api/usage
-echo   统计接口: http://localhost:3000/api/stats
+echo   Dashboard: http://localhost:3000/
+echo   Endpoint:  http://YOUR_IP:3000/api/usage
+echo   Stats:     http://localhost:3000/api/stats
 echo.
-echo   按 Ctrl+C 停止服务。
-echo ═══════════════════════════════════════════════
+echo   Press Ctrl+C to stop.
+echo ==========================================
 echo.
 
-REM 3 秒后自动打开浏览器（后台启动，不阻塞 node）
+REM Open browser after 3s (background, non-blocking)
 start "" /b cmd /c "timeout /t 3 /nobreak >nul && start http://localhost:3000/"
 
-REM 启动 node（前台，Ctrl+C 退出）
+REM Start node (foreground)
 node server.js
 
 echo.
-echo 服务已停止。
+echo Server stopped.
 pause

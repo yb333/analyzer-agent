@@ -1,46 +1,61 @@
 #!/bin/bash
 # ============================================================
-# start_telemetry.sh — Analyzer Agent 运营埋点服务端一键启动（macOS/Linux）
+# start_telemetry.sh - Analyzer Agent Telemetry Server (macOS/Linux)
 #
-# 用法: bash start_telemetry.sh
-# 双击或终端运行。自动装依赖 + 启动 + 打开浏览器。
+# Usage: bash start_telemetry.sh
+# Auto: check node -> npm install (fallback copy) -> start -> open browser
 # ============================================================
 
 set -e
 cd "$(dirname "$0")/telemetry-server"
 
 echo "═══════════════════════════════════════════════"
-echo "  Analyzer Agent 运营埋点服务端"
+echo "  Analyzer Agent Telemetry Server"
 echo "═══════════════════════════════════════════════"
 echo
 
-# 检测 Node.js
+# --- Check Node.js ---
 if ! command -v node &>/dev/null; then
-    echo "[ERROR] 未检测到 Node.js，请先安装：https://nodejs.org/"
+    echo "[ERROR] Node.js not found. Install from https://nodejs.org/"
     exit 1
 fi
-echo "[OK] Node.js 版本: $(node -v)"
+echo "[OK] Node.js: $(node -v)"
 echo
 
-# 装依赖
+# --- Install deps if missing ---
 if [ ! -d node_modules ]; then
-    echo "首次运行，安装依赖（better-sqlite3）..."
-    npm install
-    echo "[OK] 依赖安装完成"
+    echo "Installing dependencies..."
+    npm install 2>&1 || true
+    if [ ! -d node_modules/better-sqlite3 ]; then
+        echo
+        echo "[WARN] npm install failed. Trying to copy from ETL_opencode_ai..."
+        REF="$HOME/ETL_opencode_ai/telemetry-server/node_modules"
+        if [ -d "$REF/better-sqlite3" ]; then
+            cp -R "$REF" ./node_modules
+            echo "[OK] Copied node_modules from ETL_opencode_ai"
+        else
+            echo "[ERROR] Cannot find prebuilt node_modules."
+            echo "Please manually run in telemetry-server: npm install"
+            exit 1
+        fi
+    fi
+    echo
+    echo "[OK] Dependencies ready"
     echo
 fi
 
-# 启动
-echo "启动服务端（端口 3000）..."
+# --- Start server ---
+echo "Starting server on port 3000..."
 echo
-echo "  看板地址: http://localhost:3000/"
-echo "  上报地址: http://本机IP:3000/api/usage"
+echo "  Dashboard: http://localhost:3000/"
+echo "  Endpoint:  http://YOUR_IP:3000/api/usage"
+echo "  Stats:     http://localhost:3000/api/stats"
 echo
-echo "  按 Ctrl+C 停止服务。"
+echo "  Press Ctrl+C to stop."
 echo "═══════════════════════════════════════════════"
 echo
 
-# 3 秒后打开浏览器
+# Open browser after 3s (background)
 (sleep 3 && (open http://localhost:3000/ 2>/dev/null || xdg-open http://localhost:3000/ 2>/dev/null)) &
 
 node server.js
