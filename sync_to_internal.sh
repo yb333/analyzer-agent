@@ -2,9 +2,6 @@
 # ============================================================
 # sync_to_internal.sh — 一键同步外网代码到内网 git 仓库
 #
-# 原理：clone 外网仓 → 删掉开发文件 → git push --force 到内网仓
-# 用 git 自己处理 diff，不用 rsync，不会"看不出变化"
-#
 # 用法（在内网电脑上运行）：
 #   ./sync_to_internal.sh
 #   ./sync_to_internal.sh /path/to/internal/repo
@@ -13,102 +10,89 @@
 
 set -e
 
-# ── 配置 ──
 EXTERNAL_REPO="${EXTERNAL_REPO:-https://github.com/yb333/analyzer-agent.git}"
 CONFIG_FILE="$HOME/.analyzer-agent-sync.conf"
 
-# 读取配置文件（记住上次设置的内网仓库路径）
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 fi
 
-# 命令行参数处理
 if [ "$1" = "--config" ] && [ -n "$2" ]; then
     INTERNAL_REPO="$2"
     echo "INTERNAL_REPO=\"$INTERNAL_REPO\"" > "$CONFIG_FILE"
     echo "[OK] 已保存内网仓库路径: $INTERNAL_REPO"
-    echo "以后直接运行 ./sync_to_internal.sh 即可，不用再指定路径。"
     exit 0
 fi
 
-# 覆盖默认路径
 if [ -n "$1" ]; then
     INTERNAL_REPO="$1"
 fi
 
-# 检查内网仓库路径
 if [ -z "$INTERNAL_REPO" ]; then
     echo "[ERROR] 未指定内网 git 仓库路径"
-    echo ""
-    echo "用法："
-    echo "  首次使用先配置：./sync_to_internal.sh --config /path/to/internal/repo"
-    echo "  后续直接运行：./sync_to_internal.sh"
     exit 1
 fi
 
 if [ ! -d "$INTERNAL_REPO/.git" ]; then
     echo "[ERROR] 不是 git 仓库: $INTERNAL_REPO"
-    echo "请确认路径正确，且该目录已 git init 或 clone 自内网远端"
     exit 1
 fi
 
-echo "═══════════════════════════════════════════════"
-echo "  同步外网代码 → 内网 git 仓库"
-echo "═══════════════════════════════════════════════"
+echo "============================================================"
+echo "  同步外网代码 - 内网 git 仓库"
+echo "============================================================"
 echo "外网仓库: $EXTERNAL_REPO"
 echo "内网仓库: $INTERNAL_REPO"
 echo ""
 
-# ── Step 1: 从外网 clone 最新代码（完整克隆，不用 --depth 1）──
+# ── Step 1: clone 外网最新代码 ──
 TEMP_DIR=$(mktemp -d)
 echo "[Step 1] 拉取外网最新代码..."
-git clone "$EXTERNAL_REPO" "$TEMP_DIR" 2>&1 | tail -3
+git clone --depth 1 "$EXTERNAL_REPO" "$TEMP_DIR" 2>&1 | tail -3
 COMMIT_SUBJECT=$(cd "$TEMP_DIR" && git log -1 --format="%s")
 COMMIT_HASH=$(cd "$TEMP_DIR" && git rev-parse --short HEAD)
 echo "  最新提交: $COMMIT_HASH $COMMIT_SUBJECT"
 echo ""
 
-# ── Step 2: 删掉不该给用户的文件 ──
-echo "[Step 2] 清理开发文件..."
-cd "$TEMP_DIR"
-rm -rf tests docs release telemetry-server
-rm -f architecture.md sync_to_internal.sh sync_to_internal.bat
-rm -f start_telemetry.sh start_telemetry.bat stop_telemetry.bat
-rm -f sample_rule.yml .gitignore
-find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-find . -name "*.pyc" -delete 2>/dev/null || true
-find . -name ".DS_Store" -delete 2>/dev/null || true
+# ── Step 2: rsync 同步到内网仓（排除开发文件，保留 .git）──
+echo "[Step 2] 同步到内网仓库..."
+rsync -a --delete \
+    --exclude='.git' \
+    --exclude='tests' --exclude='docs' --exclude='release' \
+    --exclude='__pycache__' --exclude='.pytest_cache' \
+    --exclude='telemetry-server' \
+    --exclude='architecture.md' \
+    --exclude='sync_to_internal.*' \
+    --exclude='start_telemetry.*' --exclude='stop_telemetry.*' \
+    --exclude='sample_rule.yml' \
+    --exclude='.gitignore' --exclude='.DS_Store' \
+    "$TEMP_DIR/" "$INTERNAL_REPO/"
+echo "  + 同步完成"
 
-# 提交这些删除
+# 清理垃圾
+find "$INTERNAL_REPO" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find "$INTERNAL_REPO" -name "*.pyc" -delete 2>/dev/null || true
+find "$INTERNAL_REPO" -name ".DS_Store" -delete 2>/dev/null || true
+echo ""
+
+# ── Step 3: 在内网仓 git commit + push ──
+echo "[Step 3] 提交到内网 git..."
+cd "$INTERNAL_REPO"
 git add -A
-git commit -m "清理开发文件（同步前预处理）" --allow-empty 2>&1 | tail -1
-echo "  已清理"
-echo ""
 
-# ── Step 3: 直接 git push 到内网仓 ──
-echo "[Step 3] 推送到内网仓库..."
-
-# 添加内网仓为 remote
-git remote add internal "$INTERNAL_REPO" 2>/dev/null || git remote set-url internal "$INTERNAL_REPO"
-
-# 检测分支（外网是 main，内网可能是 master）
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
-echo "  外网分支: $BRANCH"
-
-# 检测内网仓的分支名
-INTERNAL_BRANCH=$(cd "$INTERNAL_REPO" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")
-echo "  内网分支: $INTERNAL_BRANCH"
-echo ""
-
-# 直接 force push（以外网为准，不 pull 不 merge，避免冲突）
-# 注意：内网仓需手动设一次 git config receive.denyCurrentBranch updateInstead
-git push --force internal "$BRANCH:$INTERNAL_BRANCH" 2>&1 | tail -3
-
-echo ""
-echo "═══════════════════════════════════════════════"
-echo "  ✅ 同步完成"
-echo "  $COMMIT_HASH $COMMIT_SUBJECT"
-echo "═══════════════════════════════════════════════"
+if git diff --cached --quiet; then
+    echo "  无变更，内容已是最新。"
+else
+    echo "  提交信息: $COMMIT_SUBJECT"
+    git commit -m "$COMMIT_SUBJECT ($COMMIT_HASH)" 2>&1 | tail -3
+    echo ""
+    echo "[Step 4] 推送到内网远端..."
+    git push 2>&1 | tail -3
+    echo ""
+    echo "============================================================"
+    echo "  ✅ 同步完成: $COMMIT_HASH $COMMIT_SUBJECT"
+    echo "============================================================"
+fi
 
 # 清理临时目录
 rm -rf "$TEMP_DIR"
