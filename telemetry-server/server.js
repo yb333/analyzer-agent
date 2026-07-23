@@ -204,10 +204,12 @@ function handleStats() {
   const result = {};
 
   // 1. 概览
+  // 用户行为数 = 按 trace_id 去重（一次完整分析算1次）；无 trace_id 的按 run_id 算
+  // 各阶段调用次数 = 全部记录数（解析和视图各自计次）
   result.overview = db.prepare(`
     SELECT
       COUNT(DISTINCT install_id) AS total_users,
-      COUNT(DISTINCT user_name) AS total_user_names,
+      COUNT(DISTINCT CASE WHEN trace_id IS NOT NULL AND trace_id != '' THEN trace_id ELSE run_id END) AS total_actions,
       COUNT(*) AS total_records,
       COUNT(DISTINCT CASE WHEN status='ok' THEN run_id END) AS total_ok,
       COUNT(DISTINCT CASE WHEN status='error' THEN run_id END) AS total_error,
@@ -218,38 +220,40 @@ function handleStats() {
   `).get();
 
   // 2. 日活趋势（近 30 天，按天）
+  // users = 安装实例数，actions = 用户行为数（去重）
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
   result.daily_active = db.prepare(`
     SELECT
       substr(timestamp, 1, 10) AS date,
       COUNT(DISTINCT install_id) AS users,
-      COUNT(*) AS records
+      COUNT(DISTINCT CASE WHEN trace_id IS NOT NULL AND trace_id != '' THEN trace_id ELSE run_id END) AS actions
     FROM usage_records
     WHERE timestamp >= ?
     GROUP BY date
     ORDER BY date DESC
   `).all(thirtyDaysAgo);
 
-  // 3. 命令热度
+  // 3. 命令热度（各阶段各自计次 —— 看脚本被调多少次）
   result.command_usage = db.prepare(`
     SELECT command, COUNT(*) AS count, MAX(timestamp) AS last_used
     FROM usage_records GROUP BY command ORDER BY count DESC
   `).all();
 
-  // 4. 用户活跃度
-  result.user_activity = db.prepare(`
+  // 4. 安装实例活跃度（不显示人名，按 install_id 统计）
+  result.instance_activity = db.prepare(`
     SELECT
-      COALESCE(user_name, '(unknown)') AS user_name,
-      COUNT(*) AS count,
+      install_id,
+      COUNT(DISTINCT CASE WHEN trace_id IS NOT NULL AND trace_id != '' THEN trace_id ELSE run_id END) AS actions,
+      COUNT(*) AS records,
       MAX(timestamp) AS last_active
-    FROM usage_records GROUP BY user_name ORDER BY count DESC LIMIT 50
+    FROM usage_records GROUP BY install_id ORDER BY actions DESC LIMIT 50
   `).all();
 
-  // 5. 资产分析 Top10
+  // 5. 资产分析 Top10（按 trace_id 去重 —— 一次完整分析算1次）
   result.top_assets = db.prepare(`
     SELECT
       COALESCE(target_table, asset, '(unknown)') AS asset,
-      COUNT(*) AS count,
+      COUNT(DISTINCT CASE WHEN trace_id IS NOT NULL AND trace_id != '' THEN trace_id ELSE run_id END) AS count,
       MAX(timestamp) AS last_analyzed
     FROM usage_records
     WHERE target_table IS NOT NULL OR asset IS NOT NULL
@@ -294,13 +298,11 @@ function handleStats() {
   `).all();
 
   // 10. 完整分析链路（按 trace_id 关联解析+视图，算 AI 推理耗时）
-  // 自连接：同 trace_id 下，analyze 的解析结束 vs view-generator 的视图开始
-  // AI推理耗时 = json_extract(view.elapsed_detail, '$.ai_inference')
   result.trace_analysis = db.prepare(`
     SELECT
       v.trace_id,
       v.target_table,
-      v.user_name,
+      v.install_id,
       a.elapsed_sec AS parse_sec,
       v.elapsed_sec AS view_sec,
       json_extract(v.elapsed_detail, '$.ai_inference') AS ai_inference_sec,
@@ -378,11 +380,11 @@ function handleDashboard() {
 
   <div class="grid-2">
     <div class="section">
-      <h2>用户活跃度</h2>
-      <table><thead><tr><th>用户</th><th>次数</th><th>最后活跃</th></tr></thead><tbody id="userTable"></tbody></table>
+      <h2>安装实例活跃度</h2>
+      <table><thead><tr><th>实例</th><th>行为数</th><th>调用次数</th><th>最后活跃</th></tr></thead><tbody id="instanceTable"></tbody></table>
     </div>
     <div class="section">
-      <h2>资产分析 Top10</h2>
+      <h2>资产分析 Top10（去重）</h2>
       <table><thead><tr><th>资产</th><th>分析次数</th><th>最后分析</th></tr></thead><tbody id="assetTable"></tbody></table>
     </div>
   </div>
@@ -401,7 +403,7 @@ function handleDashboard() {
   <div class="section">
     <h2>完整分析链路（解析 → AI推理 → 视图生成）</h2>
     <table><thead><tr>
-      <th>资产</th><th>用户</th>
+      <th>资产</th><th>实例</th>
       <th>解析(s)</th><th>AI推理(s)</th><th>视图(s)</th><th>总耗时(s)</th>
       <th>时间</th>
     </tr></thead><tbody id="traceTable"></tbody></table>
@@ -441,8 +443,9 @@ function inputLabel(i) { return INPUT_NAMES[i] || i || '(unknown)'; }
 
 function renderOverview(o) {
   var html = '';
-  html += card('总用户数', o.total_users || 0, '按 install_id 去重');
-  html += card('总记录数', o.total_records || 0,
+  html += card('安装实例', o.total_users || 0, '按 install_id 去重');
+  html += card('分析行为数', o.total_actions || 0, '一次完整分析=1次（去重）');
+  html += card('脚本调用数', o.total_records || 0,
     '成功 ' + (o.total_ok||0) + ' / 失败 ' + (o.total_error||0));
   html += card('平均耗时', (o.avg_elapsed_sec || 0) + 's', '每条平均');
   html += card('最后活跃', fmtTime(o.last_event).substring(0, 16), '');
@@ -459,20 +462,20 @@ function renderDaily(da) {
   var chart = echarts.init(el);
   var dates = da.map(function(r){return r.date;}).reverse();
   var users = da.map(function(r){return r.users;}).reverse();
-  var records = da.map(function(r){return r.records;}).reverse();
+  var actions = da.map(function(r){return r.actions;}).reverse();
   chart.setOption({
     tooltip: { trigger: 'axis' },
-    legend: { data: ['用户数', '记录数'] },
+    legend: { data: ['实例数', '行为数'] },
     grid: { left: 40, right: 40, bottom: 40, top: 40 },
     xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45, fontSize: 10 } },
     yAxis: [
-      { type: 'value', name: '用户数', position: 'left' },
-      { type: 'value', name: '记录数', position: 'right' }
+      { type: 'value', name: '实例数', position: 'left' },
+      { type: 'value', name: '行为数', position: 'right' }
     ],
     series: [
-      { name: '用户数', type: 'line', smooth: true, data: users,
+      { name: '实例数', type: 'line', smooth: true, data: users,
         itemStyle: { color: '#1a73e8' }, areaStyle: { opacity: 0.1 } },
-      { name: '记录数', type: 'line', smooth: true, yAxisIndex: 1, data: records,
+      { name: '行为数', type: 'line', smooth: true, yAxisIndex: 1, data: actions,
         itemStyle: { color: '#34a853' }, areaStyle: { opacity: 0.1 } }
     ]
   });
@@ -526,8 +529,9 @@ function render(data) {
   renderTable('cmdTable', data.command_usage || [], function(r) {
     return [cmdLabel(r.command), r.count, fmtTime(r.last_used)];
   });
-  renderTable('userTable', data.user_activity || [], function(r) {
-    return [r.user_name, r.count, fmtTime(r.last_active)];
+  renderTable('instanceTable', data.instance_activity || [], function(r) {
+    var sid = r.install_id ? r.install_id.substring(0, 8) : '-';
+    return [sid, r.actions, r.records, fmtTime(r.last_active)];
   });
   renderTable('assetTable', data.top_assets || [], function(r) {
     return [r.asset, r.count, fmtTime(r.last_analyzed)];
@@ -540,9 +544,10 @@ function render(data) {
   renderTable('traceTable', data.trace_analysis || [], function(r) {
     var ai = r.ai_inference_sec ? (parseFloat(r.ai_inference_sec)).toFixed(1) : '-';
     var total = r.total_sec ? (parseFloat(r.total_sec)).toFixed(1) : '-';
+    var sid = r.install_id ? r.install_id.substring(0, 8) : '-';
     return [
       r.target_table || '-',
-      r.user_name || '-',
+      sid,
       r.parse_sec || '-',
       ai,
       r.view_sec || '-',
