@@ -280,6 +280,37 @@ class TestEndToEnd:
         # HTML 含辅助字段板块
         assert "auxFieldsTable" in html, "HTML 应含辅助字段表格"
 
+    def test_field_usage_join_after_where_no_keyerror(self, tmp_output):
+        """回归: 同字段先出现在 WHERE/GROUP BY 后出现在 JOIN，build_report_data 不报 KeyError。
+
+        根因：field_usage_map 的 where/groupby 分支初始化时没加 _join_seen，
+        后续 join 分支访问 _join_seen 时 KeyError，导致 HTML 生成失败。
+        """
+        from _build_xlsx import build_xlsx
+        xlsx = Path(tmp_output) / "join_where.xlsx"
+        build_xlsx(str(xlsx), rules=[
+            {"rule_code": "R001", "rule_type": 1, "exec_sequence": 1,
+             "target_schema": "dws", "target_table": "dwb_test_f",
+             "delete_mode": "1",
+             "query_sql": "SELECT a.order_id, a.amount FROM ods.orders a "
+                          "LEFT JOIN ods.customers b ON a.order_id = b.order_id "
+                          "WHERE a.order_id > 0 GROUP BY a.order_id",
+             "rule_name": "test", "rule_group_code": "GR_TEST",
+             "rule_group_en": "DWB_TEST_F"},
+        ])
+        knowledge, results = run_full_analysis(xlsx, tmp_output)
+
+        # build_report_data 不应抛 KeyError
+        from view_generator import build_report_data
+        data = build_report_data(knowledge)
+
+        # order_id 同时出现在 join/where/groupby
+        fum = data.get("field_usage_map", {})
+        assert "order_id" in fum, "order_id 应在 field_usage_map 里"
+        oid = fum["order_id"]
+        assert len(oid.get("join", [])) > 0, "order_id 应有 join usage"
+        assert "_join_seen" not in oid, "_join_seen 不应出现在最终数据里"
+
     def test_subquery_filtered_from_tables(self, tmp_output):
         """回归: data_flow.tables 过滤子查询假名，但保留内部物理表（真实数据血缘）。
 

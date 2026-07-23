@@ -1002,7 +1002,8 @@ def build_report_data(knowledge):
             if not fname:
                 continue
             if fname not in field_usage_map:
-                field_usage_map[fname] = {"join": [], "where": [], "groupby": []}
+                field_usage_map[fname] = {"join": [], "where": [], "groupby": [],
+                                          "_join_seen": set()}
             field_usage_map[fname]["where"].append({
                 "step_id": sid, "step_name": sname, "scenario": scenario,
                 "condition": wu.get("condition", ""),
@@ -1013,7 +1014,8 @@ def build_report_data(knowledge):
             if not fname:
                 continue
             if fname not in field_usage_map:
-                field_usage_map[fname] = {"join": [], "where": [], "groupby": []}
+                field_usage_map[fname] = {"join": [], "where": [], "groupby": [],
+                                          "_join_seen": set()}
             field_usage_map[fname]["groupby"].append({
                 "step_id": sid, "step_name": sname, "scenario": scenario,
             })
