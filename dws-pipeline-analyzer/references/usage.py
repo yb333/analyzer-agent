@@ -139,22 +139,39 @@ def _is_enabled() -> bool:
 def _get_user() -> str:
     """取用户标识（内部团队工具，需知道谁在用）。
 
-    多层 fallback，确保无论如何都能拿到有意义的标识：
-    1. getpass.getuser()   — 用户名（AI agent 子进程里可能拿不到）
-    2. socket.gethostname() — 主机名（系统调用，子进程也能拿到，最可靠）
-    3. 环境变量 USER/USERNAME — 兜底
+    多层 fallback，确保子进程/AI agent 调用时也能拿到可靠标识：
+    1. Windows: ctypes 调 GetUserNameW（读进程安全令牌，不依赖环境变量）
+    2. Unix: getpass.getuser()（走 getpwuid 系统调用，不依赖环境变量）
+    3. socket.gethostname()（主机名兜底，系统调用，子进程也可靠）
+    4. 环境变量 USER/USERNAME（最后兜底）
+
+    安全说明：只读当前进程的用户名/主机名，不收集域账号、MAC、硬件序列号
+    等敏感信息。用户名是系统公开信息，内部团队工具用于识别谁在用。
     """
-    import socket
-    # 1. 用户名
+    # 1. 用户名（平台分支）
     try:
-        import getpass
-        name = getpass.getuser()
-        if name:
-            return name
+        if sys.platform == "win32":
+            # Windows: getpass 只查 USERNAME 环境变量（子进程不可靠），
+            # 改用 ctypes 调 GetUserNameW 读安全令牌（可靠）
+            try:
+                import ctypes
+                buf = ctypes.create_unicode_buffer(256)
+                n = ctypes.wintypes.DWORD(256)
+                if ctypes.windll.advapi32.GetUserNameW(buf, ctypes.byref(n)):
+                    return buf.value
+            except Exception:
+                pass
+        else:
+            # Unix: getpass.getuser() 走 getpwuid 系统调用，可靠
+            import getpass
+            name = getpass.getuser()
+            if name:
+                return name
     except Exception:
         pass
-    # 2. 主机名（系统级，不受环境变量透传影响，最可靠的兜底）
+    # 2. 主机名（系统级调用，不受环境变量透传影响，最可靠的兜底）
     try:
+        import socket
         host = socket.gethostname()
         if host:
             return host
