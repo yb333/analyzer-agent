@@ -706,16 +706,35 @@ def _auto_discover_ddl_from_repo(yml_dir: Path, rules: list) -> str:
 def _parse_lts_task(yml_path: Path) -> dict | None:
     """解析一个 LTS 任务 yml，提取关键调度信息。
 
-    容错解析：yml 损坏或格式不符返回 None。
+    两级容错：
+    1. 先尝试标准 yaml.safe_load（理想情况，格式规范的 yml）
+    2. 失败则用文本解析（真实 yml 从 Excel 转来，格式常不规范：
+       冒号无空格、block scalar 吞掉子表等）
     """
+    import re
+    raw_text = yml_path.read_text(encoding="utf-8")
+
+    # 先尝试标准 YAML 解析
     import yaml
     try:
-        data = yaml.safe_load(yml_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return None
+        data = yaml.safe_load(raw_text)
+        if isinstance(data, dict) and (data.get("*任务名称") or data.get("任务名称")):
+            result = _parse_lts_from_dict(data)
+            if result:
+                result["lts_file"] = str(yml_path)
+            return result
     except Exception:
-        return None
+        pass
 
+    # 标准 YAML 失败，用文本解析兜底
+    result = _parse_lts_from_text(raw_text)
+    if result:
+        result["lts_file"] = str(yml_path)
+    return result
+
+
+def _parse_lts_from_dict(data: dict) -> dict | None:
+    """从标准 YAML dict 解析 LTS 任务信息。"""
     # 任务名（key 带星号前缀 '*任务名称'）
     task_name = (data.get("*任务名称") or data.get("任务名称") or "").strip()
 
@@ -749,6 +768,109 @@ def _parse_lts_task(yml_path: Path) -> dict | None:
                 "timeout": str(j.get("job超时时间") or ""),
                 "error_handler": str(j.get("job异常处理方式") or ""),
             })
+
+    return _build_lts_result(data, task_name, group_code, params, jobs)
+
+
+def _parse_lts_from_text(text: str) -> dict | None:
+    """从非标准 yml 文本解析 LTS 任务信息（容错）。
+
+    真实 yml 从 Excel 转来，格式常不规范（冒号无空格、block scalar 吞掉子表）。
+    用正则按字段名提取关键信息。
+    """
+    import re
+
+    def _find(pattern, default=""):
+        m = re.search(pattern, text)
+        return m.group(1).strip() if m else default
+
+    # 顶层任务字段
+    task_name = _find(r"\*?任务名称['\"]?\s*[:：]\s*(\S+)")
+    if not task_name:
+        return None
+    task_type = _find(r"\*?任务类型['\"]?\s*[:：]\s*(.+)")
+    schedule_cron = _find(r"调度周期\s*[:：]\s*(.+)")
+    owner = _find(r"\*?责任人['\"]?\s*[:：]\s*(\S+)")
+    start_time = _find(r"开始时间\s*[:：]\s*(.+)")
+    depends_prev = _find(r"依赖上一周期\s*[:：]\s*(\S+)")
+    multi_day = _find(r"是否一天多调\s*[:：]\s*(\S+)")
+    task_group = _find(r"\*?任务组名称['\"]?\s*[:：]\s*(\S+)")
+    project = _find(r"\*?项目名称['\"]?\s*[:：]\s*(\S+)")
+
+    # 任务参数：找 V_GROUP_CODE
+    group_code = ""
+    params = []
+    # 参数值行：参数值:XXX
+    for m in re.finditer(r"\*?参数名称['\"]?\s*[:：]\s*(\S+)", text):
+        pname = m.group(1).strip()
+        # 找紧跟的参数值（同一块里下一行的 参数值:XXX）
+        pos = m.end()
+        val_match = re.search(r"参数值\s*[:：]\s*(\S+)", text[pos:pos + 200])
+        pval = val_match.group(1).strip() if val_match else ""
+        params.append({"name": pname, "value": pval})
+        if pname == "V_GROUP_CODE":
+            group_code = pval
+
+    # Jobs：按 *job名称 分块提取
+    jobs = []
+    # 找所有 job 名称位置
+    job_starts = [(m.start(), m.group(1).strip())
+                  for m in re.finditer(r"\*?job名称['\"]?\s*[:：]\s*(\S+)", text)]
+    for i, (start, name) in enumerate(job_starts):
+        # job 块范围：从当前 job 到下一个 job（或文件末尾）
+        end = job_starts[i + 1][0] if i + 1 < len(job_starts) else len(text)
+        block = text[start:end]
+        jobs.append({
+            "name": name,
+            "type": _find_block(block, r"\*?job类型['\"]?\s*[:：]\s*(\S+)"),
+            "parent": _find_block(block, r"\*?job的父节点名称['\"]?\s*[:：]\s*(\S+)"),
+            "retry_count": _find_block(block, r"job重试次数\s*[:：]\s*'?(\d+)"),
+            "retry_interval": _find_block(block, r"job重试间隔\s*[:：]\s*'?(\d+)"),
+            "timeout": _find_block(block, r"job超时时间\s*[:：]\s*'?(\d+)"),
+            "error_handler": _find_block(block, r"job异常处理方式\s*[:：]\s*(\S+)"),
+        })
+
+    return {
+        "task_name": task_name,
+        "task_type": task_type,
+        "schedule_cron": schedule_cron,
+        "owner": owner,
+        "start_time": start_time,
+        "depends_prev_cycle": depends_prev,
+        "multi_day": multi_day,
+        "task_group": task_group,
+        "project": project,
+        "group_code": group_code,
+        "jobs": jobs,
+        "params": params,
+        "lts_file": "",  # 调用方会填充
+    }
+
+
+def _find_block(text, pattern, default=""):
+    """在文本块里找第一个匹配。"""
+    import re
+    m = re.search(pattern, text)
+    return m.group(1).strip() if m else default
+
+
+def _build_lts_result(data, task_name, group_code, params, jobs):
+    """组装标准 YAML 解析的 LTS 结果。"""
+    return {
+        "task_name": task_name,
+        "task_type": str(data.get("*任务类型") or data.get("任务类型") or ""),
+        "schedule_cron": str(data.get("调度周期") or ""),
+        "owner": str(data.get("*责任人") or data.get("责任人") or ""),
+        "start_time": str(data.get("开始时间") or ""),
+        "depends_prev_cycle": str(data.get("依赖上一周期") or ""),
+        "multi_day": str(data.get("是否一天多调") or ""),
+        "task_group": str(data.get("*任务组名称") or data.get("任务组名称") or ""),
+        "project": str(data.get("*项目名称") or data.get("项目名称") or ""),
+        "group_code": group_code,
+        "jobs": jobs,
+        "params": params,
+        "lts_file": "",
+    }
 
     return {
         "task_name": task_name,
