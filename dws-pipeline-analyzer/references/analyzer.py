@@ -928,6 +928,18 @@ def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
             _lts_debug.append(f"  FAIL: {yml_path.name}")
             continue
         _lts_debug.append(f"  OK: {yml_path.name} task={task['task_name']} gc={task['group_code']}")
+        # 如果 gc 为空，记录原始文本的 taskParams 部分（排查 V_GROUP_CODE 提取）
+        if not task['group_code']:
+            raw = yml_path.read_text(encoding="utf-8")
+            # 找 taskParams 或 参数名称 附近的文本
+            import re as _re
+            param_section = ""
+            for keyword in ["taskParams", "参数名称", "V_GROUP_CODE"]:
+                idx = raw.find(keyword)
+                if idx >= 0:
+                    param_section = raw[max(0,idx-20):idx+200]
+                    break
+            _lts_debug.append(f"    PARAM_RAW: {repr(param_section[:300])}")
         by_task_name[task["task_name"]] = task
         if task["group_code"]:
             by_group_code[task["group_code"]] = task
