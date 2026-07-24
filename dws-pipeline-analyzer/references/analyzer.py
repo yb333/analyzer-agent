@@ -900,46 +900,48 @@ def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
     Returns: {"f_task": {...}, "i_task": {...} 或 None} 或 None
     """
     if not rule_group_code:
-        print(f"  [LTS-DEBUG] rule_group_code 为空，跳过")
         return None
 
     repo_root = _find_repo_root(yml_dir)
     if not repo_root:
-        print(f"  [LTS-DEBUG] 未找到代码仓根（需含 BFT/ + DDL/），yml_dir={yml_dir}")
         return None
-    print(f"  [LTS-DEBUG] 代码仓根: {repo_root}")
 
     lts_root = repo_root / "LTS"
     if not lts_root.is_dir():
-        print(f"  [LTS-DEBUG] LTS 目录不存在: {lts_root}")
         return None
-    print(f"  [LTS-DEBUG] LTS 目录: {lts_root}")
 
     # 扫所有 LTS yml，建索引：按 V_GROUP_CODE 和 task_name
     import yaml
     by_group_code = {}   # V_GROUP_CODE → task dict
     by_task_name = {}    # task_name → task dict
 
+    # 调试日志写到文件（不刷屏）
+    _lts_debug = []
+    _lts_debug.append(f"rule_group_code={rule_group_code}")
+    _lts_debug.append(f"repo_root={repo_root}")
+    _lts_debug.append(f"lts_root={lts_root}")
     yml_files = list(lts_root.rglob("*.yml"))
-    print(f"  [LTS-DEBUG] 扫到 {len(yml_files)} 个 yml 文件")
+    _lts_debug.append(f"yml_count={len(yml_files)}")
     for yml_path in yml_files:
         task = _parse_lts_task(yml_path)
         if not task or not task["task_name"]:
-            print(f"  [LTS-DEBUG]   解析失败: {yml_path.name}")
+            _lts_debug.append(f"  FAIL: {yml_path.name}")
             continue
-        print(f"  [LTS-DEBUG]   解析成功: {yml_path.name} → task={task['task_name']} group_code={task['group_code']}")
+        _lts_debug.append(f"  OK: {yml_path.name} task={task['task_name']} gc={task['group_code']}")
         by_task_name[task["task_name"]] = task
         if task["group_code"]:
             by_group_code[task["group_code"]] = task
+    _lts_debug.append(f"known_group_codes={list(by_group_code.keys())}")
+    _lts_debug.append(f"match={'YES' if rule_group_code in by_group_code else 'NO'}")
+    try:
+        (repo_root / "lts_debug.log").write_text("\n".join(_lts_debug), encoding="utf-8")
+    except Exception:
+        pass
 
     # 1. 按 rule_group_code 找 F 任务
-    print(f"  [LTS-DEBUG] 查找 rule_group_code={rule_group_code}")
-    print(f"  [LTS-DEBUG] 已知 group_codes: {list(by_group_code.keys())}")
     f_task = by_group_code.get(rule_group_code)
     if not f_task:
-        print(f"  [LTS-DEBUG] 未匹配到 F 任务！")
         return None
-    print(f"  [LTS-DEBUG] 匹配到 F 任务: {f_task['task_name']}")
 
     # 2. 从 F 任务名推导 I 任务名（_F → _I），找 I 任务
     i_task = None
