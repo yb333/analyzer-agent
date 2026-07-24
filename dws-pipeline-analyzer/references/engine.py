@@ -5220,9 +5220,10 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
         sql_files = []
         for ext in ("*.sql", "*.ddl", "*.txt", "*.SQL", "*.DDL", "*.TXT"):
             sql_files.extend(ddl_path.rglob(ext))
-        # 预读所有文件内容（去重）
+        # 预读所有文件内容（去重）+ 建表名→文件索引（避免每张表遍历所有文件）
         seen = set()
         files_content = []
+        table_index = {}  # 表名(小写) → [(sql_file, content, content_lower), ...]
         for sql_file in sql_files:
             real = str(sql_file.resolve())
             if real in seen:
@@ -5230,17 +5231,29 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
             seen.add(real)
             try:
                 content = sql_file.read_text(encoding="utf-8", errors="ignore")
-                files_content.append((sql_file, content, content.lower()))
             except Exception:
                 continue
-        cached = files_content
+            content_lower = content.lower()
+            entry = (sql_file, content, content_lower)
+            files_content.append(entry)
+            # 从文件内容提取表名建索引（CREATE TABLE xxx / CREATE TABLE schema.xxx）
+            for m in re.finditer(r'create\s+table\s+(?:if\s+not\s+exists\s+)?[\w.]*?(\w+)\s*[(\[cC]', content_lower):
+                tbl = m.group(1)
+                if tbl and tbl not in ('table', 'view', 'if'):
+                    table_index.setdefault(tbl, []).append(entry)
+        cached = (files_content, table_index)
         _DDL_DIR_CACHE[cache_key] = cached
 
-    for sql_file, content, content_lower in cached:
-        if target_lower not in content_lower:
-            continue
-        if "create table" not in content_lower:
-            continue
+    files_content, table_index = cached
+
+    # 先按表名索引精准定位（O(1)），没命中再遍历所有文件（兜底）
+    candidate_files = table_index.get(target_lower)
+    if candidate_files is None:
+        # 索引没命中（表名在文件里但不是 CREATE TABLE 后第一个词），遍历兜底
+        candidate_files = [(f, c, cl) for f, c, cl in files_content
+                           if target_lower in cl and "create table" in cl]
+
+    for sql_file, content, content_lower in candidate_files:
 
         # ── 1. 提取字段名+类型+约束 ──
         # 用括号配平提取 CREATE TABLE 的字段定义块，比贪婪正则健壮：
