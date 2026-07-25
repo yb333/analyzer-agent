@@ -2654,7 +2654,8 @@ function renderQuality() {
 function renderSchedule() {
   var s = REPORT_DATA.schedule;
   if (!s || (!s.f_tasks && !s.i_tasks && !s.all_tasks)) {
-    document.getElementById('scheduleSection').style.display = 'none';
+    document.getElementById('scheduleContent').innerHTML =
+      '<div class="no-results">未找到调度信息（非代码仓 yml 模式，或代码仓 LTS 目录无匹配任务）</div>';
     return;
   }
 
@@ -2826,7 +2827,8 @@ function renderSchedule() {
 function renderDq() {
   var rules = REPORT_DATA.dq_rules;
   if (!rules || !rules.length) {
-    document.getElementById('dqSection').style.display = 'none';
+    document.getElementById('dqContent').innerHTML =
+      '<div class="no-results">未找到 DQ 质量检查规则（非代码仓 yml 模式，或代码仓 DQ 目录无匹配规则）</div>';
     return;
   }
 
