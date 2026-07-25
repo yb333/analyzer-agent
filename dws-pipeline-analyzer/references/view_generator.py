@@ -2169,10 +2169,12 @@ def generate_tech_design(knowledge, output_dir):
         lines.append("| # | 目标字段 | 物理源表 | 物理源字段 | 转换类型 | 映射表达式 |")
         lines.append("|---|---------|---------|-----------|---------|-----------|")
         for i, f in enumerate(step_fields, 1):
-            # CTE 穿透获取物理源
-            phys_sources = _resolve_physical_sources(
-                f.get("lineage", []), cte_index, cte_names_upper, set()
-            )
+            # 优先用跨步骤穿透的 physical_source，回退到 CTE 穿透
+            phys_sources = f.get("physical_source", [])
+            if not phys_sources:
+                phys_sources = _resolve_physical_sources(
+                    f.get("lineage", []), cte_index, cte_names_upper, set()
+                )
             tt = f.get('transform_type', '')
             raw_sql = ""
             if f.get("lineage"):
