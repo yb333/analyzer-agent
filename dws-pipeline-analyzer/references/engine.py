@@ -193,6 +193,7 @@ def clear_sql_ast_cache():
 # key: 目录绝对路径; value: [(sql_file, content, content_lower), ...]
 _DDL_DIR_CACHE: dict = {}
 _DDL_RESULT_CACHE: dict = {}  # 表名(小写) → 解析结果，避免重复解析同一张表
+_STEP_TO_RULE_CACHE: dict = {}  # step_id → rule_code 缓存（build_join_key_lineage 用）
 
 
 def clear_ddl_dir_cache():
@@ -4617,8 +4618,12 @@ def build_join_key_lineage(
 
     # 3. 在 field_mappings 找该步骤该字段的 lineage
     fields_list = field_mappings.get("fields", [])
-    step_to_rule = {s["step_id"]: s.get("rule_code", "") for s in steps_list}
-    rule_code = step_to_rule.get(step_id, "")
+    # step_to_rule 缓存（避免每次递归重建）
+    global _STEP_TO_RULE_CACHE
+    if _STEP_TO_RULE_CACHE.get("_steps_id") != id(steps_list):
+        _STEP_TO_RULE_CACHE = {s["step_id"]: s.get("rule_code", "") for s in steps_list}
+        _STEP_TO_RULE_CACHE["_steps_id"] = id(steps_list)
+    rule_code = _STEP_TO_RULE_CACHE.get(step_id, "")
 
     node = {
         "step_id": step_id,
@@ -4938,6 +4943,10 @@ def enrich_field_physical_sources(
                 amap[j["alias"].upper()] = j["source_table"]
         step_alias_maps[sid] = amap
 
+    # 结果缓存：相同的 (step_id, src_field, src_alias) 只追溯一次
+    # 多个字段引用同一个来源时（如多个字段都从 tmp3.order_id 来），避免重复递归
+    _phys_cache = {}
+
     for f in field_mappings.get("fields", []):
         step_id = f.get("producing_step", "")
         fname = f.get("target_field", "")
@@ -4950,15 +4959,19 @@ def enrich_field_physical_sources(
             continue
         first_src = lineages[0]
         src_alias = first_src.get("source_table", "")
-        # 追溯用 source_field（加工前的字段名），不是 target_field
-        # 因为加工后字段名可能变了（如 SUM(amount) AS total_amount），
-        # 上游步骤里存的是 amount 不是 total_amount
         src_field = first_src.get("source_field", "") or fname
 
-        chain = build_join_key_lineage(
-            step_id, src_field, src_alias, rules, parsed_map,
-            topology, data_flow, field_mappings,
-        )
+        # 缓存命中：相同的追溯起点直接复用结果
+        cache_key = (step_id, src_field.lower(), (src_alias or "").upper())
+        if cache_key in _phys_cache:
+            chain = _phys_cache[cache_key]
+        else:
+            chain = build_join_key_lineage(
+                step_id, src_field, src_alias, rules, parsed_map,
+                topology, data_flow, field_mappings,
+            )
+            _phys_cache[cache_key] = chain
+
         if not chain:
             continue
 
