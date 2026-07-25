@@ -2879,6 +2879,11 @@ function renderDq() {
 
   document.getElementById('dqContent').innerHTML = html;
 }
+
+// ================================================================
+// Detail Panel
+// ================================================================
+function openDetail(fieldName, scenario) {
   // 从 fields 列表找指定场景的字段
   var fieldEntry = (REPORT_DATA.fields || []).find(function(f) {
     return f.target_field === fieldName && (!scenario || f.scenario === scenario);
@@ -3141,6 +3146,7 @@ function renderDq() {
             s += '</details>';
           });
         });
+      }
       } else if (tt === 'direct' && c.sources.length === 0) {
         s += '<div style="font-size:10px;color:var(--text-muted);">无来源</div>';
       } else {
