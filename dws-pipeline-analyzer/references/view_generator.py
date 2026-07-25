@@ -851,9 +851,23 @@ def build_report_data(knowledge):
             if chain_priority.get(cc_tt, 0) > chain_priority.get(best_tt, 0):
                 best_tt = cc_tt
 
-        # 取最初来源（seq 最小步骤的 sources，穿透到物理源表）
+        # 取最初来源（优先用跨步骤穿透的 physical_source，回退到 chain 的单步 sources）
         origin_sources = []
-        if chain_for_field:
+        phys_src = f.get("physical_source", [])
+        if phys_src:
+            # physical_source 已经是跨步骤穿透到物理源表的结果（JSON 里正确）
+            seen_origin = set()
+            for ps in phys_src:
+                key = f"{ps.get('table','')}.{ps.get('field','')}"
+                if key not in seen_origin and ps.get("table"):
+                    seen_origin.add(key)
+                    origin_sources.append({
+                        "table": ps.get("table", ""),
+                        "field": ps.get("field", ""),
+                        "alias": ps.get("alias", ""),
+                    })
+        elif chain_for_field:
+            # 回退：用 chain 里 seq 最小步骤的 sources（单步，可能不穿透改名）
             min_seq = min(c.get("exec_sequence", 0) for c in chain_for_field)
             origin_chains = [c for c in chain_for_field if c.get("exec_sequence", 0) == min_seq]
             seen_origin = set()
