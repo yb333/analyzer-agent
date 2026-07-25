@@ -915,7 +915,10 @@ def build_report_data(knowledge):
 
     # ── field_chain_map (字段 → 完整链路树，供详情面板用) ──
     # 每个 field 收集它在所有步骤+所有场景中的来源
+    # 关键：沿 lineage.source_field 串联跨步骤改名的字段（a→b 要在同一链路树里）
     field_chain_map = {}
+
+    # 第一遍：按 target_field 建基础链路
     for f in fields_list:
         fname = f.get("target_field", "")
         fname_lower = fname.lower()
@@ -947,6 +950,30 @@ def build_report_data(knowledge):
             "join_paths": si.get("join_paths", {}),
             "join_key_lineage": si.get("join_key_lineage", {}),
         })
+
+    # 第二遍：沿 lineage.source_field 串联跨步骤改名的字段
+    # 例如：step1 target=a，step2 改名 target=b（lineage.source_field=a），
+    # 这时 b 的链路树应该包含 step1 的 a 的链路。
+    # 策略：对每个字段，看它的 lineage.source_field 是否在别的步骤里是 target_field，
+    # 如果是，把那个步骤的 chain 合并进来。
+    _merged = set()  # 避免重复合并
+    for fname_lower, fmap in list(field_chain_map.items()):
+        all_source_fields = set()
+        for chain in fmap["chains"]:
+            for src in chain.get("sources", []):
+                sf = (src.get("field") or "").lower()
+                if sf and sf != fname_lower:
+                    all_source_fields.add(sf)
+        # 找这些 source_field 是否在别的步骤里是 target_field
+        for sf in all_source_fields:
+            if sf in field_chain_map and sf not in _merged:
+                # 把 sf 的 chains 合并到当前字段的 chains 里（去重）
+                existing_steps = {c["step_id"] for c in fmap["chains"]}
+                for chain in field_chain_map[sf]["chains"]:
+                    if chain["step_id"] not in existing_steps:
+                        fmap["chains"].append(chain)
+                        existing_steps.add(chain["step_id"])
+                _merged.add(sf)
 
     # ── field_details (CTE 穿透血缘链) ──
     field_details = {}
