@@ -5005,8 +5005,11 @@ def _extract_physical_sources_from_chain(chain: dict) -> list:
             processing = node
             break
 
-    # 收集叶节点
-    leaves = [n for n in _walk_chain_for_extract(chain) if not n.get("children")]
+    # 收集叶节点（排除中间表：追溯断了的中间表不应作为物理源表）
+    leaves = [n for n in _walk_chain_for_extract(chain)
+              if not n.get("children")
+              and not _is_intermediate_table(n.get("table", ""))
+              and not n.get("table", "").startswith("(subquery:")]
     for leaf in leaves:
         result.append({
             "table": leaf.get("table", ""),
