@@ -4953,32 +4953,42 @@ def enrich_field_physical_sources(
         if not step_id or not fname:
             continue
 
-        # 从该字段的 lineage 取第一个来源的别名，作为追溯起点
+        # 遍历所有 lineage 追溯（多来源字段如 COALESCE(a.x, b.y) 要追溯全部）
         lineages = f.get("lineage", [])
         if not lineages:
             continue
-        first_src = lineages[0]
-        src_alias = first_src.get("source_table", "")
-        src_field = first_src.get("source_field", "") or fname
 
-        # 缓存命中：相同的追溯起点直接复用结果
-        cache_key = (step_id, src_field.lower(), (src_alias or "").upper())
-        if cache_key in _phys_cache:
-            chain = _phys_cache[cache_key]
-        else:
-            chain = build_join_key_lineage(
-                step_id, src_field, src_alias, rules, parsed_map,
-                topology, data_flow, field_mappings,
-            )
-            _phys_cache[cache_key] = chain
+        all_physical_sources = []
+        seen_ps = set()
+        for src in lineages:
+            src_alias = src.get("source_table", "")
+            src_field = src.get("source_field", "") or fname
+            if not src_alias or src_alias.upper() in ("NULL", "NONE"):
+                continue
 
-        if not chain:
-            continue
+            # 缓存命中：相同的追溯起点直接复用结果
+            cache_key = (step_id, src_field.lower(), (src_alias or "").upper())
+            if cache_key in _phys_cache:
+                chain = _phys_cache[cache_key]
+            else:
+                chain = build_join_key_lineage(
+                    step_id, src_field, src_alias, rules, parsed_map,
+                    topology, data_flow, field_mappings,
+                )
+                _phys_cache[cache_key] = chain
 
-        # 提取叶节点（物理源表）+ 链上最重加工
-        physical_sources = _extract_physical_sources_from_chain(chain)
-        if physical_sources:
-            f["physical_source"] = physical_sources
+            if not chain:
+                continue
+
+            physical_sources = _extract_physical_sources_from_chain(chain)
+            for ps in physical_sources:
+                key = f"{ps.get('table','')}.{ps.get('field','')}"
+                if key not in seen_ps:
+                    seen_ps.add(key)
+                    all_physical_sources.append(ps)
+
+        if all_physical_sources:
+            f["physical_source"] = all_physical_sources
 
 
 def _extract_physical_sources_from_chain(chain: dict) -> list:
