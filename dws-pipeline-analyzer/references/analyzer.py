@@ -1962,7 +1962,8 @@ def trace_upstream_rule_groups(
         {
             "groups": [{dir, rule_group_en, target_table, source_tables, depth}],
             "not_found": [表名列表],  # 源表找不到写入者（可能是 ods 源表）
-            "cycle_detected": bool,
+            "cycle_detected": bool,   # 是否发现环（A读B、B读A 这类循环依赖）
+            "truncated": bool,        # 是否因超过 max_depth 而提前截断（被截断的上游未追溯）
         }
     """
     from engine import analyze_pipeline, _norm_table
@@ -1980,97 +1981,111 @@ def trace_upstream_rule_groups(
 
     groups = []
     visited_dirs = set()
+    pending_dirs = set()  # 当前递归栈中的目录（用于真正的环检测）
     not_found_tables = set()
+    cycle_detected = [False]  # 用 list 包裹，便于闭包内赋值
+    truncated = [False]       # 是否因 max_depth 截断
 
     def _trace(group_dir, depth):
         group_dir_resolved = str(Path(group_dir).resolve())
+        if group_dir_resolved in pending_dirs:
+            # 命中当前递归栈 → 真实环（A读B、B读A）
+            cycle_detected[0] = True
+            return
         if group_dir_resolved in visited_dirs:
-            return  # 环检测
+            return  # 已被其他路径访问过（菱形依赖等，非环）
         if depth > max_depth:
+            # 超过最大深度，记录截断但不中断整体追溯
+            truncated[0] = True
             return
         visited_dirs.add(group_dir_resolved)
+        pending_dirs.add(group_dir_resolved)
+        try:
+            # 读规则组
+            raw = read_yml(group_dir)
+            if not raw.get("rules"):
+                return
 
-        # 读规则组
-        raw = read_yml(group_dir)
-        if not raw.get("rules"):
-            return
+            rules = raw["rules"]
+            rule_group_en = raw.get("rule_group_en", "")
+            dialect = detect_dialect(rules)
 
-        rules = raw["rules"]
-        rule_group_en = raw.get("rule_group_en", "")
-        dialect = detect_dialect(rules)
+            # 分析 → 取穿透后的源表
+            target_fields = raw.get("target_fields", {})
+            group_variables = raw.get("group_variables", {})
+            _, parsed_map = analyze_pipeline(rules, target_fields, group_variables, dialect)
 
-        # 分析 → 取穿透后的源表
-        target_fields = raw.get("target_fields", {})
-        group_variables = raw.get("group_variables", {})
-        _, parsed_map = analyze_pipeline(rules, target_fields, group_variables, dialect)
-
-        # 收集所有步骤的穿透源表
-        source_tables = set()
-        for rule in rules:
-            parsed = parsed_map.get(rule.rule_code)
-            if not parsed:
-                continue
-            for j in parsed.source_tables:
-                if not j.source_table or j.source_table.startswith("(subquery:"):
+            # 收集所有步骤的穿透源表
+            source_tables = set()
+            for rule in rules:
+                parsed = parsed_map.get(rule.rule_code)
+                if not parsed:
                     continue
-                source_tables.add(j.source_table)
-            # CTE 内部表也要收
-            for cte in parsed.ctes:
-                for t in cte.source_tables:
-                    tname = t.get("name", "")
-                    if tname:
-                        source_tables.add(tname)
+                for j in parsed.source_tables:
+                    if not j.source_table or j.source_table.startswith("(subquery:"):
+                        continue
+                    source_tables.add(j.source_table)
+                # CTE 内部表也要收
+                for cte in parsed.ctes:
+                    for t in cte.source_tables:
+                        tname = t.get("name", "")
+                        if tname:
+                            source_tables.add(tname)
 
-        # 目标表（这个规则组写的）
-        target_table = ""
-        all_target_tables = set()
-        if rules:
-            max_seq_rule = max(rules, key=lambda r: r.exec_sequence)
-            target_table = max_seq_rule.target_table
-            for r in rules:
-                if r.target_table:
-                    all_target_tables.add(r.target_table.lower())
+            # 目标表（这个规则组写的）
+            target_table = ""
+            all_target_tables = set()
+            if rules:
+                max_seq_rule = max(rules, key=lambda r: r.exec_sequence)
+                target_table = max_seq_rule.target_table
+                for r in rules:
+                    if r.target_table:
+                        all_target_tables.add(r.target_table.lower())
 
-        groups.append({
-            "dir": str(group_dir),
-            "rule_group_en": rule_group_en,
-            "target_table": target_table,
-            "all_target_tables": sorted(all_target_tables),
-            "source_tables": list(source_tables),
-            "depth": depth,
-        })
+            groups.append({
+                "dir": str(group_dir),
+                "rule_group_en": rule_group_en,
+                "target_table": target_table,
+                "all_target_tables": sorted(all_target_tables),
+                "source_tables": list(source_tables),
+                "depth": depth,
+            })
 
-        # 对每个源表，找写入者
-        for src_table in source_tables:
-            # 归一化：去 schema 前缀（dws.dwb_trade_mid_f → dwb_trade_mid_f）
-            # 索引 key 是 _norm_table(target_table)，yml 里 target_table 不带 schema
-            table_part = src_table.split(".")[-1] if "." in src_table else src_table
-            key = _norm_table(table_part)
-            writers = sub_index.get(key, [])
-            if not writers:
-                # 子项目找不到，试项目级
-                if not hasattr(_trace, "_project_index"):
-                    _trace._project_index = build_target_index(repo_root, project_dir)
-                writers = _trace._project_index.get(key, [])
+            # 对每个源表，找写入者
+            for src_table in source_tables:
+                # 归一化：去 schema 前缀（dws.dwb_trade_mid_f → dwb_trade_mid_f）
+                # 索引 key 是 _norm_table(target_table)，yml 里 target_table 不带 schema
+                table_part = src_table.split(".")[-1] if "." in src_table else src_table
+                key = _norm_table(table_part)
+                writers = sub_index.get(key, [])
+                if not writers:
+                    # 子项目找不到，试项目级
+                    if not hasattr(_trace, "_project_index"):
+                        _trace._project_index = build_target_index(repo_root, project_dir)
+                    writers = _trace._project_index.get(key, [])
 
-            if not writers:
-                not_found_tables.add(src_table)
-                continue
-
-            for writer in writers:
-                # 跳过 _init 规则组（初始化数据，不属于日常加工链路）
-                writer_name = writer.get("rule_group_en", "")
-                writer_dir_name = Path(writer["dir"]).name
-                if writer_name.lower().endswith("_init") or writer_dir_name.lower().endswith("_init"):
+                if not writers:
+                    not_found_tables.add(src_table)
                     continue
-                _trace(writer["dir"], depth + 1)
+
+                for writer in writers:
+                    # 跳过 _init 规则组（初始化数据，不属于日常加工链路）
+                    writer_name = writer.get("rule_group_en", "")
+                    writer_dir_name = Path(writer["dir"]).name
+                    if writer_name.lower().endswith("_init") or writer_dir_name.lower().endswith("_init"):
+                        continue
+                    _trace(writer["dir"], depth + 1)
+        finally:
+            # 弹出当前栈帧：保证 pending_dirs 准确反映"正在递归中"的路径
+            pending_dirs.discard(group_dir_resolved)
 
     _trace(final_group_dir, 0)
 
     return {
         "groups": groups,
         "not_found": sorted(not_found_tables),
-        "cycle_detected": len(visited_dirs) < len(groups),
+        "cycle_detected": cycle_detected[0],
+        "truncated": truncated[0],
     }
 
 
@@ -2101,13 +2116,18 @@ def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
         group_tf_cache[g["dir"]] = raw.get("target_fields", {})
         group_gv_cache[g["dir"]] = raw.get("group_variables", {})
 
-    # 算每个规则组的 target_table（归一化）
-    group_target = {}  # {group_dir: norm_target_table}
+    # 算每个规则组写过的所有 target_table（归一化）
+    # 用 set 收集：一个规则组可能多步写多张表（step1 写 mid、step2 写 final），
+    # 下游若读早期步骤写的 mid 表，依赖也必须建立（不能只看 max_seq 的那张表）
+    group_targets = {}  # {group_dir: set(norm_target_table)}
     for g in groups:
         rules = group_rules_cache.get(g["dir"], [])
-        if rules:
-            max_seq_rule = max(rules, key=lambda r: r.exec_sequence)
-            group_target[g["dir"]] = _norm_table(max_seq_rule.target_table)
+        targets = set()
+        for r in rules:
+            if r.target_table:
+                targets.add(_norm_table(r.target_table))
+        if targets:
+            group_targets[g["dir"]] = targets
 
     # 算组间依赖关系：A 写的表被 B 的源表引用 → B 依赖 A
     # group_deps[dir] = set(被依赖的 dir)
@@ -2116,9 +2136,9 @@ def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
         for src_table in g.get("source_tables", []):
             table_part = src_table.split(".")[-1] if "." in src_table else src_table
             src_key = _norm_table(table_part)
-            # 找哪个规则组写了这张表
-            for other_dir, other_target in group_target.items():
-                if other_target == src_key and other_dir != g["dir"]:
+            # 找哪个规则组写过这张表（任意一步写过即算）
+            for other_dir, other_targets in group_targets.items():
+                if src_key in other_targets and other_dir != g["dir"]:
                     group_deps[g["dir"]].add(other_dir)
 
     # 按依赖拓扑排序（被依赖的先处理）
