@@ -4590,13 +4590,16 @@ def build_join_key_lineage(
             alias_map[j["alias"].upper()] = j["source_table"]
     resolved_table = alias_map.get((table_alias or "").upper(), table_alias or "")
 
-    # 2. 判断是否物理源表（ods/dim 层或非中间表，子查询假名不算物理表）
-    norm_table = _norm_table(resolved_table)
-    is_physical = (not _is_intermediate_table(resolved_table)
-                   and not resolved_table.startswith("(subquery:"))
-
-    # steps_list 提前定义（子查询穿透和 lineage 查找都要用）
+    # steps_list 提前定义（is_physical 判断和后面都要用）
     steps_list = topology.get("steps", [])
+
+    # 2. 判断是否物理源表
+    # 按命名规则 + 按是否有产出步骤（多规则组场景，另一个规则组的最终表是本规则组的中间表）
+    norm_table = _norm_table(resolved_table)
+    _has_producing = bool(_find_producing_step(resolved_table, "", steps_list, []))
+    is_physical = (not _is_intermediate_table(resolved_table)
+                   and not _has_producing
+                   and not resolved_table.startswith("(subquery:"))
 
     # 2b. 子查询穿透：resolved_table 是 (subquery:xxx) 时，解析子查询内部找物理来源
     if resolved_table.startswith("(subquery:"):
@@ -4695,7 +4698,11 @@ def build_join_key_lineage(
         # 解析 src_table_alias（用产出步骤的 alias 映射）
         src_resolved = producing_alias_map.get(src_table_alias.upper(), src_table_alias)
         src_norm = _norm_table(src_resolved)
+        # 判断是否物理源表：按命名规则 + 按是否有产出步骤（多规则组场景，
+        # 另一个规则组的最终表如 dwb_trade_f 是本规则组的中间表）
+        _has_producing = bool(_find_producing_step(src_resolved, "", steps_list, []))
         src_is_physical = (not _is_intermediate_table(src_resolved)
+                          and not _has_producing
                           and not src_resolved.startswith("(subquery:"))
 
         child_node = {
