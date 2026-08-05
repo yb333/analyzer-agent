@@ -91,7 +91,8 @@ RULE_TYPE_MAP = {
 }
 
 # SELECT 类规则（需要完整解析 SQL + 字段映射 + 血缘）
-SELECT_RULE_TYPES = {1, 14}
+# 8=UPDATE 也纳入（更新语句也有 SQL 需要解析）
+SELECT_RULE_TYPES = {1, 8, 14}
 
 # 记录类规则（不解析 SQL，但记录操作信息）
 RECORD_RULE_TYPES = {2, 9}
