@@ -402,7 +402,7 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
     finally:
         # 运营埋点：记录本组分析（在清缓存前，此时 knowledge 等对象还可读）
         try:
-            from usage import record as _record_usage, _classify_error as _cls_err
+            from usage import record as _record_usage, _classify_error as _cls_err, _error_message as _msg_err
             _record_usage({
                 "command": "analyze-batch",
                 "input_type": "xlsx",
@@ -412,6 +412,7 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
                 "rule_count": len(rules) if rules else 0,
                 "status": "error" if (result and not result.success) else "ok",
                 "error_type": _cls_err(_group_exc) if _group_exc else "",
+                "error_message": _msg_err(_group_exc),
             })
         except Exception:
             pass

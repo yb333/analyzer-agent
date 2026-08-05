@@ -2467,7 +2467,7 @@ def main():
     # ── 运营埋点：记录视图生成 ──
     # AI 推理耗时 = 本次启动时刻 - 解析阶段结束时刻（两段埋点的时间差）
     try:
-        from usage import record as _record_usage
+        from usage import record as _record_usage, _error_message as _msg_err
         _view_elapsed = round(_t_usage.time() - _t0_usage, 2)
         _ai_inference_sec = None
         if _parse_end_ts is not None:

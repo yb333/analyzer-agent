@@ -63,6 +63,7 @@ db.exec(`
     status TEXT NOT NULL,
     error_type TEXT,
     quality_issues INTEGER,
+    error_message TEXT,
     agent_version TEXT,
     python_version TEXT,
     os TEXT,
@@ -94,13 +95,17 @@ try {
     db.exec('ALTER TABLE usage_records ADD COLUMN extra TEXT');
     console.log('[Migration] Added column extra');
   }
+  if (!colNames.includes('error_message')) {
+    db.exec('ALTER TABLE usage_records ADD COLUMN error_message TEXT');
+    console.log('[Migration] Added column error_message');
+  }
 } catch (e) { /* 首次建表无此列检测可忽略 */ }
 
 const INSERT_COLS = [
   'run_id', 'trace_id', 'timestamp', 'install_id', 'user_name', 'command', 'input_type',
   'asset', 'target_table', 'batch_id', 'rule_count', 'field_count',
   'source_count', 'elapsed_sec', 'elapsed_detail', 'status', 'error_type',
-  'quality_issues', 'agent_version', 'python_version', 'os', 'extra'
+  'quality_issues', 'error_message', 'agent_version', 'python_version', 'os', 'extra'
 ];
 
 const insertStmt = db.prepare(
@@ -186,7 +191,7 @@ function handlePostUsage(payload) {
         toStr(r.command), toStr(r.input_type), toStr(r.asset), toStr(r.target_table),
         toStr(r.batch_id), toInt(r.rule_count), toInt(r.field_count), toInt(r.source_count),
         toFloat(r.elapsed_sec), toStr(r.elapsed_detail), toStr(r.status) || 'unknown',
-        toStr(r.error_type), toInt(r.quality_issues), toStr(r.agent_version),
+        toStr(r.error_type), toStr(r.error_message), toInt(r.quality_issues), toStr(r.agent_version),
         toStr(r.python_version), toStr(r.os),
         Object.keys(extra).length ? JSON.stringify(extra) : null, now
       );
@@ -288,6 +293,21 @@ function handleStats() {
     FROM usage_records
     WHERE status = 'error'
     GROUP BY error_type ORDER BY count DESC
+  `).all();
+
+  // 错误详情（最近 20 条含 error_message 的错误记录）
+  result.error_details = db.prepare(`
+    SELECT
+      error_type,
+      error_message,
+      command,
+      target_table,
+      user_name,
+      timestamp
+    FROM usage_records
+    WHERE status = 'error' AND error_message IS NOT NULL AND error_message != ''
+    ORDER BY timestamp DESC
+    LIMIT 20
   `).all();
 
   // 7. 输入类型占比（只统计有用户输入的命令，排除 view-generator）
@@ -420,6 +440,13 @@ function handleDashboard() {
       <h2>环境分布</h2>
       <table><thead><tr><th>OS</th><th>用户数</th><th>记录数</th></tr></thead><tbody id="osTable"></tbody></table>
     </div>
+  </div>
+
+  <div class="section">
+    <h2>错误详情（最近 20 条）</h2>
+    <table><thead><tr>
+      <th>时间</th><th>类型</th><th>命令</th><th>资产</th><th>用户</th><th>错误信息</th>
+    </tr></thead><tbody id="errorDetailTable"></tbody></table>
   </div>
 
   <div class="section">
@@ -565,6 +592,16 @@ function render(data) {
   });
   renderPie('inputChart', data.input_types || [], inputLabel);
   renderErrorBar(data.error_types || []);
+  renderTable('errorDetailTable', data.error_details || [], function(r) {
+    return [
+      fmtTime(r.timestamp).substring(0, 16),
+      r.error_type || '-',
+      r.command || '-',
+      (r.target_table || '-').substring(0, 25),
+      r.user_name || '-',
+      '<span style="font-size:11px;color:#e53935;">' + esc(r.error_message || '-') + '</span>'
+    ];
+  });
   renderTable('traceTable', data.trace_analysis || [], function(r) {
     var ai = r.ai_inference_sec ? (parseFloat(r.ai_inference_sec)).toFixed(1) : '-';
     var total = r.total_sec ? (parseFloat(r.total_sec)).toFixed(1) : '-';

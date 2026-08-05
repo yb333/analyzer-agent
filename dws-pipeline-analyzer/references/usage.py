@@ -55,7 +55,7 @@ FIELD_NAMES = [
     # C. 规模指标
     "rule_count", "field_count", "source_count",
     # D. 执行结果
-    "elapsed_sec", "elapsed_detail", "status", "error_type",
+    "elapsed_sec", "elapsed_detail", "status", "error_type", "error_message",
     # E. 质量与环境
     "quality_issues", "agent_version", "python_version", "os",
     # F. 扩展（未知字段自动收入，JSON 字符串）
@@ -198,6 +198,17 @@ def _classify_error(exc) -> str:
         return "unknown"
     except Exception:
         return "unknown"
+
+
+def _error_message(exc, max_len=200) -> str:
+    """提取异常详情（截取前 max_len 字符，避免太长）。"""
+    if exc is None:
+        return ""
+    try:
+        msg = f"{type(exc).__name__}: {exc}"
+        return msg[:max_len]
+    except Exception:
+        return ""
 
 
 # ── 本地存档（JSONL） ────────────────────────────────────────────────────

@@ -1416,7 +1416,7 @@ def main():
 
     # ── 运营埋点：记录本次影响分析 ──
     try:
-        from usage import record as _record_usage
+        from usage import record as _record_usage, _error_message as _msg_err
         _record_usage({
             "command": "impact-analysis",
             "input_type": "impact_excel",
@@ -1789,7 +1789,7 @@ def main_cross_asset():
 
     # ── 运营埋点：记录本次跨资产分析 ──
     try:
-        from usage import record as _record_usage
+        from usage import record as _record_usage, _error_message as _msg_err
         _record_usage({
             "command": "impact-analysis-cross",
             "input_type": "impact_excel",

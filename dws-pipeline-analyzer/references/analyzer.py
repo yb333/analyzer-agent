@@ -1860,7 +1860,7 @@ def main():
 
     # ── 运营埋点：记录本次命令执行（在所有产出落盘之后） ──
     try:
-        from usage import record as _record_usage, _classify_error as _cls_err
+        from usage import record as _record_usage, _classify_error as _cls_err, _error_message as _msg_err
         _record_usage({
             "command": "analyze",
             "input_type": "yml_dir" if is_yml_mode else "xlsx",
@@ -1878,6 +1878,7 @@ def main():
             },
             "status": "error" if _usage_exc is not None else "ok",
             "error_type": _cls_err(_usage_exc),
+            "error_message": _msg_err(_usage_exc),
             "quality_issues": len(quality["issues"]) if isinstance(quality, dict) and "issues" in quality else 0,
         })
     except Exception:
@@ -2427,6 +2428,7 @@ def main_chain():
             },
             "status": "partial" if _view_exc else "ok",
             "error_type": "view_generation_error" if _view_exc else "",
+            "error_message": _msg_err(_view_exc),
             "quality_issues": len(knowledge.get("quality", {}).get("issues", [])),
         })
     except Exception:
@@ -2465,11 +2467,12 @@ if __name__ == "__main__":
     except Exception as _main_exc:
         # 崩溃时也记一条埋点（细节可能不全，但有 command + error_type）
         try:
-            from usage import record as _record_usage, _classify_error as _cls_err
+            from usage import record as _record_usage, _classify_error as _cls_err, _error_message as _msg_err
             _record_usage({
                 "command": "analyze-chain" if _is_chain else "analyze",
                 "status": "error",
                 "error_type": _cls_err(_main_exc),
+                "error_message": _msg_err(_main_exc),
             })
         except Exception:
             pass
