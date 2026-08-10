@@ -284,17 +284,6 @@ function handleStats() {
     GROUP BY asset ORDER BY count DESC LIMIT 10
   `).all();
 
-  // 6. 错误类型分布
-  result.error_types = db.prepare(`
-    SELECT
-      COALESCE(error_type, '(none)') AS error_type,
-      COUNT(*) AS count,
-      MAX(timestamp) AS last_seen
-    FROM usage_records
-    WHERE status = 'error'
-    GROUP BY error_type ORDER BY count DESC
-  `).all();
-
   // 错误详情（最近 20 条含 error_message 的错误记录）
   result.error_details = db.prepare(`
     SELECT
@@ -327,35 +316,6 @@ function handleStats() {
       COUNT(DISTINCT install_id) AS users,
       COUNT(*) AS count
     FROM usage_records GROUP BY agent_version ORDER BY count DESC
-  `).all();
-
-  // 9. OS 分布
-  result.os_distribution = db.prepare(`
-    SELECT
-      COALESCE(os, '(unknown)') AS os,
-      COUNT(DISTINCT install_id) AS users,
-      COUNT(*) AS count
-    FROM usage_records GROUP BY os ORDER BY count DESC
-  `).all();
-
-  // 10. 完整分析链路（按 trace_id 关联解析+视图，算 AI 推理耗时）
-  result.trace_analysis = db.prepare(`
-    SELECT
-      v.trace_id,
-      v.target_table,
-      v.install_id,
-      v.user_name,
-      a.elapsed_sec AS parse_sec,
-      v.elapsed_sec AS view_sec,
-      json_extract(v.elapsed_detail, '$.ai_inference') AS ai_inference_sec,
-      (a.elapsed_sec + CAST(json_extract(v.elapsed_detail, '$.ai_inference') AS REAL) + v.elapsed_sec) AS total_sec,
-      v.timestamp
-    FROM usage_records v
-    JOIN usage_records a ON v.trace_id = a.trace_id AND a.command LIKE 'analyze%'
-    WHERE v.command = 'view-generator'
-      AND v.trace_id IS NOT NULL AND v.trace_id != ''
-    ORDER BY v.timestamp DESC
-    LIMIT 20
   `).all();
 
   return result;
@@ -423,22 +383,11 @@ function handleDashboard() {
   <div class="grid-2">
     <div class="section">
       <h2>用户活跃度</h2>
-      <table><thead><tr><th>工号</th><th>行为数</th><th>调用次数</th><th>最后活跃</th></tr></thead><tbody id="instanceTable"></tbody></table>
+      <div id="userActivityChart" class="chart"></div>
     </div>
     <div class="section">
       <h2>资产分析 Top10（去重）</h2>
       <table><thead><tr><th>资产</th><th>分析次数</th><th>最后分析</th></tr></thead><tbody id="assetTable"></tbody></table>
-    </div>
-  </div>
-
-  <div class="grid-2">
-    <div class="section">
-      <h2>错误类型分布</h2>
-      <div id="errorChart" class="chart" style="height:260px"></div>
-    </div>
-    <div class="section">
-      <h2>环境分布</h2>
-      <table><thead><tr><th>OS</th><th>用户数</th><th>记录数</th></tr></thead><tbody id="osTable"></tbody></table>
     </div>
   </div>
 
@@ -447,15 +396,6 @@ function handleDashboard() {
     <table><thead><tr>
       <th>时间</th><th>类型</th><th>命令</th><th>资产</th><th>用户</th><th>错误信息</th>
     </tr></thead><tbody id="errorDetailTable"></tbody></table>
-  </div>
-
-  <div class="section">
-    <h2>完整分析链路（解析 → AI推理 → 视图生成）</h2>
-    <table><thead><tr>
-      <th>资产</th><th>实例</th>
-      <th>解析(s)</th><th>AI推理(s)</th><th>视图(s)</th><th>总耗时(s)</th>
-      <th>时间</th>
-    </tr></thead><tbody id="traceTable"></tbody></table>
   </div>
 
 </div>
@@ -535,10 +475,12 @@ function renderDaily(da) {
 }
 
 function renderTable(id, rows, mapper) {
+  var el = document.getElementById(id);
+  if (!el) return;
   var html = rows.map(function(r) {
     return '<tr>' + mapper(r).map(function(c){return '<td>'+esc(c)+'</td>';}).join('') + '</tr>';
   }).join('');
-  document.getElementById(id).innerHTML = html;
+  el.innerHTML = html;
 }
 
 function renderPie(id, data, nameMapper) {
@@ -558,19 +500,26 @@ function renderPie(id, data, nameMapper) {
   window.addEventListener('resize', function(){ chart.resize(); });
 }
 
-function renderErrorBar(errors) {
-  var el = document.getElementById('errorChart');
-  if (!errors.length) { el.innerHTML = '<div style="color:#34a853;padding:20px;text-align:center">🎉 无错误记录</div>'; return; }
+function renderUserActivity(instances) {
+  var el = document.getElementById('userActivityChart');
+  if (!el) return;
+  if (!instances.length) { el.innerHTML = '<div style="color:#aaa;padding:20px;text-align:center">暂无数据</div>'; return; }
+  // 取 Top10，横向柱状图：行为数 + 调用次数 双系列
+  var top = instances.slice(0, 10);
+  var names = top.map(function(r){ return r.user_name || '(未识别)'; });
   var chart = echarts.init(el);
   chart.setOption({
-    tooltip: { trigger: 'axis' },
-    grid: { left: 100, right: 20, top: 10, bottom: 20 },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { data: ['行为数', '调用次数'] },
+    grid: { left: 90, right: 30, top: 40, bottom: 20 },
     xAxis: { type: 'value' },
-    yAxis: { type: 'category', data: errors.map(function(e){return e.error_type;}) },
-    series: [{
-      type: 'bar', data: errors.map(function(e){return e.count;}),
-      itemStyle: { color: '#ea4335' }
-    }]
+    yAxis: { type: 'category', data: names, inverse: true, axisLabel: { fontSize: 11 } },
+    series: [
+      { name: '行为数', type: 'bar', data: top.map(function(r){return r.actions;}),
+        itemStyle: { color: '#1a73e8' }, barGap: '10%' },
+      { name: '调用次数', type: 'bar', data: top.map(function(r){return r.records;}),
+        itemStyle: { color: '#34a853' } }
+    ]
   });
   window.addEventListener('resize', function(){ chart.resize(); });
 }
@@ -581,17 +530,11 @@ function render(data) {
   renderTable('cmdTable', data.command_usage || [], function(r) {
     return [cmdLabel(r.command), r.count, fmtTime(r.last_used)];
   });
-  renderTable('instanceTable', data.instance_activity || [], function(r) {
-    return [r.user_name || '(未识别)', r.actions, r.records, fmtTime(r.last_active)];
-  });
   renderTable('assetTable', data.top_assets || [], function(r) {
     return [r.asset, r.count, fmtTime(r.last_analyzed)];
   });
-  renderTable('osTable', data.os_distribution || [], function(r) {
-    return [r.os, r.users, r.count];
-  });
   renderPie('inputChart', data.input_types || [], inputLabel);
-  renderErrorBar(data.error_types || []);
+  renderUserActivity(data.instance_activity || []);
   renderTable('errorDetailTable', data.error_details || [], function(r) {
     return [
       fmtTime(r.timestamp).substring(0, 16),
@@ -600,20 +543,6 @@ function render(data) {
       (r.target_table || '-').substring(0, 25),
       r.user_name || '-',
       '<span style="font-size:11px;color:#e53935;">' + esc(r.error_message || '-') + '</span>'
-    ];
-  });
-  renderTable('traceTable', data.trace_analysis || [], function(r) {
-    var ai = r.ai_inference_sec ? (parseFloat(r.ai_inference_sec)).toFixed(1) : '-';
-    var total = r.total_sec ? (parseFloat(r.total_sec)).toFixed(1) : '-';
-    var sid = r.install_id ? r.install_id.substring(0, 8) : '-';
-    return [
-      r.target_table || '-',
-      r.user_name || sid,
-      r.parse_sec || '-',
-      ai,
-      r.view_sec || '-',
-      total,
-      fmtTime(r.timestamp).substring(0, 16)
     ];
   });
 }
