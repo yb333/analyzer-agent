@@ -1049,9 +1049,7 @@ def _parse_select(tree, select_node, sqlglot_dialect: str, comment_alias_map: di
         result.having_clause = having_node.sql(dialect=sqlglot_dialect)
 
     # ── CTE ──
-    # INSERT OVERWRITE 场景：with_ 挂在 Select 节点上而非 Insert(tree) 节点上，
-    # 所以优先从 select_node 找 with_，找不到再从 tree 找
-    result.ctes = _extract_ctes(select_node, sqlglot_dialect) or _extract_ctes(tree, sqlglot_dialect)
+    result.ctes = _extract_ctes(tree, sqlglot_dialect)
 
     # ── 构建 CTE 别名映射 ──
     cte_alias_map = _build_cte_alias_map(select_node, result.ctes)
@@ -2225,9 +2223,22 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
 
     每个 CTE field 含 transform_type 和 source_fields，用于主查询穿透传播。
     CTE 内的源表只取直接 FROM/JOIN（不递归进入嵌套子查询）。
+
+    tree 可能是 Insert / Select / Union 等任意节点：
+    INSERT OVERWRITE 语法下 WITH 挂在 Select 子节点上而非 Insert 上，
+    所以本节点找不到时向下搜子节点。
     """
     ctes = []
     with_clause = tree.args.get("with_")
+    if not with_clause:
+        # Insert 节点上没有 with_，向下找 Select/Union 子节点上的 with_
+        for child in tree.walk():
+            if child is tree:
+                continue
+            cw = child.args.get("with_") if hasattr(child, 'args') else None
+            if cw:
+                with_clause = cw
+                break
     if not with_clause:
         return ctes
 
