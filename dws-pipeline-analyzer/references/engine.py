@@ -1049,7 +1049,9 @@ def _parse_select(tree, select_node, sqlglot_dialect: str, comment_alias_map: di
         result.having_clause = having_node.sql(dialect=sqlglot_dialect)
 
     # ── CTE ──
-    result.ctes = _extract_ctes(tree, sqlglot_dialect)
+    # INSERT OVERWRITE 场景：with_ 挂在 Select 节点上而非 Insert(tree) 节点上，
+    # 所以优先从 select_node 找 with_，找不到再从 tree 找
+    result.ctes = _extract_ctes(select_node, sqlglot_dialect) or _extract_ctes(tree, sqlglot_dialect)
 
     # ── 构建 CTE 别名映射 ──
     cte_alias_map = _build_cte_alias_map(select_node, result.ctes)
@@ -4712,6 +4714,70 @@ def build_join_key_lineage(
         # 解析 src_table_alias（用产出步骤的 alias 映射）
         src_resolved = producing_alias_map.get(src_table_alias.upper(), src_table_alias)
         src_norm = _norm_table(src_resolved)
+
+        # CTE 穿透：如果 lineage 带 cte_source_fields，说明字段来自 CTE（如 WITH po_tmp AS ...），
+        # 需要展开 CTE 内部的真实源字段（如 po.a, po.b）替代 CTE 别名
+        cte_sources = l.get("cte_source_fields", [])
+        cte_transform = l.get("cte_transform_type", "")
+        cte_expr = l.get("cte_expression", "")
+        if cte_sources:
+            # CTE 内部别名 → 物理表名映射
+            # 从 parsed_map 拿 CTE 的 source_tables（CTE 内 FROM/JOIN 的表）
+            cte_inner_alias_map = {}
+            cte_name = l.get("cte_name", "")
+            if cte_name and lookup_step:
+                # lookup_step → rule_code → parsed → ctes
+                lk_rule_code = _STEP_TO_RULE_CACHE.get(lookup_step, "")
+                if lk_rule_code:
+                    lk_parsed = parsed_map.get(lk_rule_code)
+                    if lk_parsed:
+                        for cte in (lk_parsed.ctes or []):
+                            if cte.name.upper() == cte_name.upper():
+                                for st in (cte.source_tables or []):
+                                    if st.get("alias"):
+                                        cte_inner_alias_map[st["alias"].upper()] = st.get("name", st["alias"])
+                                break
+            for cs in cte_sources:
+                cs_alias = cs.get("alias", "")
+                cs_field = cs.get("field", "")
+                if not cs_field:
+                    continue
+                # CTE 内部的别名解析：优先用 CTE source_tables 映射，再查主查询 alias_map
+                cs_resolved = cte_inner_alias_map.get(cs_alias.upper(),
+                                                       producing_alias_map.get(cs_alias.upper(), cs_alias))
+                _has_producing_cs = bool(_find_producing_step(cs_resolved, "", steps_list, []))
+                cs_is_physical = (not _is_intermediate_table(cs_resolved)
+                                  and not _has_producing_cs
+                                  and not cs_resolved.startswith("(subquery:"))
+
+                cs_child = {
+                    "step_id": lookup_step,
+                    "field": cs_field,
+                    "table": cs_resolved,
+                    "alias": cs_alias,
+                    "transform": cte_transform or transform,
+                    "raw_sql": cte_expr or raw_sql,
+                    "is_physical": cs_is_physical,
+                    "children": [],
+                }
+
+                if not cs_is_physical and cs_field:
+                    # CTE 内部字段来自中间表/目标表 → 继续向上追溯
+                    upstream_step = _find_producing_step(cs_resolved, cs_field, steps_list, rules,
+                                                         from_step=lookup_step)
+                    if upstream_step:
+                        child = build_join_key_lineage(
+                            upstream_step, cs_field, cs_resolved, rules, parsed_map,
+                            topology, data_flow, field_mappings, visited.copy(), depth + 1,
+                        )
+                        if child:
+                            cs_child = child
+                            cs_child["transform"] = cte_transform or transform
+                            cs_child["raw_sql"] = cte_expr or raw_sql
+
+                node["children"].append(cs_child)
+            continue  # CTE 穿透已处理，跳过下面的普通追溯
+
         # 判断是否物理源表：按命名规则 + 按是否有产出步骤（多规则组场景，
         # 另一个规则组的最终表如 dwb_trade_f 是本规则组的中间表）
         _has_producing = bool(_find_producing_step(src_resolved, "", steps_list, []))

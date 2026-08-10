@@ -198,6 +198,66 @@ def _collect_leaves(chain):
     return [node for node in _walk_chain(chain) if not node.get("children")]
 
 
+# ── CTE 自引用场景（WITH po_tmp AS ... 自引用 UPDATE）──
+
+CTE_SELF_REF_SCENARIO = [
+    {"name": "规则8: ods加工a,b,c写入f", "target": "f",
+     "sql": "INSERT OVERWRITE TABLE dws.f SELECT x.col_a AS a, x.col_b AS b, y.col_c AS c "
+            "FROM ods.orders x LEFT JOIN ods.items y ON x.item_id = y.item_id"},
+    {"name": "规则9: CTE加工d UPDATE回f", "target": "f",
+     "sql": "INSERT OVERWRITE TABLE dws.f "
+            "WITH po_tmp AS (SELECT nvl((po.a - po.b) * po.c, 0) AS d FROM dws.f po) "
+            "SELECT t.a, t.b, t.c, sub.d FROM dws.f t LEFT JOIN po_tmp sub ON 1=1"},
+    {"name": "规则10: CTE加工e UPDATE回f", "target": "f",
+     "sql": "INSERT OVERWRITE TABLE dws.f "
+            "WITH po_tmp AS (SELECT h FROM dws.f WHERE xxx = 1 GROUP BY h) "
+            "SELECT po.a, po.b, po.c, po.d, sum(decode(po.g, 'Y', 0, po.d)) AS e "
+            "FROM dws.f po INNER JOIN po_tmp tmp ON po.h = tmp.h GROUP BY tmp.h"},
+]
+
+
+class TestCTESelfReferenceLineage:
+    """CTE + 自引用场景：WITH 内加工字段，UPDATE 回目标表。"""
+
+    def test_cte_field_traces_through_to_physical(self):
+        """d 字段通过 CTE 加工，应穿透到 ods.orders / ods.items"""
+        from analyzer import build_join_key_lineage
+        rules, pm, topo, df, fm = _run_analysis(CTE_SELF_REF_SCENARIO)
+        chain = build_join_key_lineage("step_2", "d", "sub", rules, pm, topo, df, fm)
+        assert chain, "追溯结果不应为空"
+        leaf_tables = _collect_leaf_tables(chain)
+        assert any("orders" in t for t in leaf_tables), \
+            f"d 应追到 ods.orders，实际: {leaf_tables}"
+        assert any("items" in t for t in leaf_tables), \
+            f"d 应追到 ods.items，实际: {leaf_tables}"
+
+    def test_cte_field_shows_expression(self):
+        """链路应体现 CTE 内的加工表达式（NVL((po.a-po.b)*po.c,0)）"""
+        from analyzer import build_join_key_lineage
+        rules, pm, topo, df, fm = _run_analysis(CTE_SELF_REF_SCENARIO)
+        chain = build_join_key_lineage("step_2", "d", "sub", rules, pm, topo, df, fm)
+        raw_sqls = [n.get("raw_sql", "") for n in _walk_chain(chain)]
+        assert any("NVL" in r or "nvl" in r for r in raw_sqls), \
+            f"链路应含 CTE 内的 NVL 表达式，实际: {raw_sqls}"
+
+    def test_cte_multi_hop_e_traces_to_physical(self):
+        """e 字段（基于 d 加工）应穿透 CTE + 自引用追到 ods 源表"""
+        from analyzer import build_join_key_lineage
+        rules, pm, topo, df, fm = _run_analysis(CTE_SELF_REF_SCENARIO)
+        chain = build_join_key_lineage("step_3", "e", "po", rules, pm, topo, df, fm)
+        assert chain, "追溯结果不应为空"
+        leaf_tables = _collect_leaf_tables(chain)
+        assert any("orders" in t for t in leaf_tables), \
+            f"e 应追到 ods.orders，实际: {leaf_tables}"
+
+    def test_cte_no_infinite_loop(self):
+        """CTE 自引用不应导致无限递归"""
+        from analyzer import build_join_key_lineage
+        rules, pm, topo, df, fm = _run_analysis(CTE_SELF_REF_SCENARIO)
+        chain = build_join_key_lineage("step_3", "e", "po", rules, pm, topo, df, fm)
+        assert chain, "应正常返回，不应卡死"
+
+
 # ═══════════════════════════════════════════════════════════════
 # 多场景覆盖
 # ═══════════════════════════════════════════════════════════════
