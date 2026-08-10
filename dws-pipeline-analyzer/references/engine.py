@@ -4596,6 +4596,8 @@ def build_join_key_lineage(
     if depth > 15:
         return None
 
+    global _STEP_TO_RULE_CACHE
+
     # 1. 解析 table_alias → 物理表名（用 data_flow 的 joins）
     df_steps = data_flow.get("steps", [])
     df_step = next((s for s in df_steps if s.get("step_id") == step_id), {})
@@ -4605,16 +4607,44 @@ def build_join_key_lineage(
             alias_map[j["alias"].upper()] = j["source_table"]
     resolved_table = alias_map.get((table_alias or "").upper(), table_alias or "")
 
-    # steps_list 提前定义（is_physical 判断和后面都要用）
+    # steps_list 和 _STEP_TO_RULE_CACHE 提前初始化（后续多处复用）
     steps_list = topology.get("steps", [])
+    if _STEP_TO_RULE_CACHE.get("_steps_id") != id(steps_list):
+        _STEP_TO_RULE_CACHE = {s["step_id"]: s.get("rule_code", "") for s in steps_list}
+        _STEP_TO_RULE_CACHE["_steps_id"] = id(steps_list)
+    rt_rule_code = _STEP_TO_RULE_CACHE.get(step_id, "")
+
+    # CTE 别名可能不在 joins 里（_extract_joins 过滤了 CTE 引用），
+    # 从 field_mappings 的 lineage 里反查：如果 lineage 的 source_table == table_alias
+    # 且带 cte_name，说明该别名是 CTE 引用（如 sub → po_tmp）
+    if resolved_table == (table_alias or "") and table_alias:
+        _fm_fields = field_mappings.get("fields", [])
+        for _f in _fm_fields:
+            if _f.get("producing_step") != step_id:
+                continue
+            for _l in _f.get("lineage", []):
+                if (_l.get("source_table", "").upper() == table_alias.upper()
+                        and _l.get("cte_name")):
+                    resolved_table = _l["cte_name"].lower()
+                    break
+            if resolved_table != table_alias:
+                break
 
     # 2. 判断是否物理源表
-    # 按命名规则 + 按是否有产出步骤（多规则组场景，另一个规则组的最终表是本规则组的中间表）
     norm_table = _norm_table(resolved_table)
     _has_producing = bool(_find_producing_step(resolved_table, "", steps_list, []))
+
+    # CTE 名检测：resolved_table 是 CTE 名时不能判为物理源表（需穿透 CTE 内部）
+    _is_cte = False
+    if rt_rule_code and resolved_table:
+        rt_parsed = parsed_map.get(rt_rule_code)
+        if rt_parsed and rt_parsed.ctes:
+            _is_cte = any(_c.name.upper() == resolved_table.upper() for _c in rt_parsed.ctes)
+
     is_physical = (not _is_intermediate_table(resolved_table)
                    and not _has_producing
-                   and not resolved_table.startswith("(subquery:"))
+                   and not resolved_table.startswith("(subquery:")
+                   and not _is_cte)
 
     # 2b. 子查询穿透：resolved_table 是 (subquery:xxx) 时，解析子查询内部找物理来源
     if resolved_table.startswith("(subquery:"):
@@ -4636,12 +4666,8 @@ def build_join_key_lineage(
 
     # 3. 在 field_mappings 找该步骤该字段的 lineage
     fields_list = field_mappings.get("fields", [])
-    # step_to_rule 缓存（避免每次递归重建）
-    global _STEP_TO_RULE_CACHE
-    if _STEP_TO_RULE_CACHE.get("_steps_id") != id(steps_list):
-        _STEP_TO_RULE_CACHE = {s["step_id"]: s.get("rule_code", "") for s in steps_list}
-        _STEP_TO_RULE_CACHE["_steps_id"] = id(steps_list)
-    rule_code = _STEP_TO_RULE_CACHE.get(step_id, "")
+    # _STEP_TO_RULE_CACHE 已在上方第 2 步初始化，直接复用
+    rule_code = rt_rule_code
 
     node = {
         "step_id": step_id,
