@@ -373,6 +373,9 @@ class TestSddExcel:
         assert len(src_tables) == 2, f"应有 2 张源表，实际 {src_tables}"
         assert any("tbl_a" in t for t in src_tables)
         assert any("tbl_b" in t for t in src_tables)
+        # 源表只填表名（不含 schema，不含 数据库类型//数据库/ 前缀）
+        assert all("//" not in t for t in src_tables), f"不应含数据库前缀：{src_tables}"
+        assert all("." not in t for t in src_tables), f"不应含 schema：{src_tables}"
 
     def test_sdd_joins(self, tmp_path):
         """Sheet 3 表关联：多 JOIN 场景应有左/右表 + 关联方式。"""
@@ -466,6 +469,8 @@ class TestSddExcel:
         src_tables = [str(r[0]) for r in rows if r[0]]
         assert all("tmp1" not in t for t in src_tables), f"不应出现中间表 tmp1：{src_tables}"
         assert any("tbl_a" in t for t in src_tables), f"应穿透到 tbl_a：{src_tables}"
+        # 源表只填表名（不含 schema）
+        assert all("." not in t for t in src_tables), f"源表不应含 schema：{src_tables}"
         # total 字段应是加工字段
         total_row = next((r for r in rows if r[8] and "total" in str(r[8]).lower()), None)
         assert total_row is not None, "应有 total 字段"
@@ -474,6 +479,10 @@ class TestSddExcel:
         id_row = next((r for r in rows if r[8] and str(r[8]).lower() == "id"), None)
         assert id_row is not None, "应有 id 字段"
         assert str(id_row[2]) == "直取字段", f"id 应为直取字段，实际 {id_row[2]}"
+        # 资产设计参考列（F）应为空
+        assert all(r[5] in (None, "") for r in rows), "资产设计参考列应留空"
+        # 资产中文名（H）应取 DDL 表级注释（测试中 table_comment='测试'）
+        assert all(str(r[7]) == "测试" for r in rows), f"资产中文名应取表注释'测试'，实际 {[r[7] for r in rows]}"
 
     def test_sdd_sample_data_empty(self, tmp_path):
         """Sheet 5 业务样例数据：应为空 Sheet。"""
@@ -492,6 +501,35 @@ class TestSddExcel:
         rows = [r for r in ws5.iter_rows(min_row=1, values_only=True) if any(v is not None for v in r)]
         wb.close()
         assert rows == [], "业务样例数据应为空"
+
+    def test_sdd_asset_name_from_table_comment(self, tmp_path):
+        """资产中文名取 DDL 表级注释；无注释时留空（不回退英文表名）。"""
+        try:
+            import openpyxl
+        except ImportError:
+            pytest.skip("缺少 openpyxl")
+        from view_generator import generate_sdd
+
+        # _build_knowledge 设了 table_comment='测试宽表'
+        knowledge = self._build_knowledge("SELECT a.id FROM ods.tbl_a a")
+        # 验证有注释时取注释
+        out = str(tmp_path / "sdd_out")
+        generate_sdd(knowledge, out)
+        wb = openpyxl.load_workbook(Path(out) / "sdd.xlsx", read_only=True)
+        ws4 = wb["4需求字段"]
+        cn_values = [r[7] for r in ws4.iter_rows(min_row=2, values_only=True) if r and r[8]]
+        wb.close()
+        assert all(v == "测试宽表" for v in cn_values), f"有注释时应取注释，实际 {cn_values}"
+
+        # 验证无注释时留空（不回退英文表名）
+        knowledge["meta"]["table_comment"] = ""
+        out2 = str(tmp_path / "sdd_out2")
+        generate_sdd(knowledge, out2)
+        wb2 = openpyxl.load_workbook(Path(out2) / "sdd.xlsx", read_only=True)
+        ws4b = wb2["4需求字段"]
+        cn_values2 = [r[7] for r in ws4b.iter_rows(min_row=2, values_only=True) if r and r[8]]
+        wb2.close()
+        assert all(v in (None, "") for v in cn_values2), f"无注释时应留空，实际 {cn_values2}"
 
 
 class TestAssetReportData:

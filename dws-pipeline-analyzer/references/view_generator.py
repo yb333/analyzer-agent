@@ -2008,7 +2008,8 @@ def generate_sdd(knowledge, output_dir):
             target_schema = _max_steps[0].get("target_schema", "")
             target_table = _max_steps[0].get("target_table", "") or target_table
     target_table_full = _schema_table(target_schema, target_table)
-    target_cn = meta.get("table_comment", "") or target_table
+    # 资产中文名只取 DDL 表级注释（COMMENT ON TABLE），拿不到则留空（不回退英文表名）
+    target_cn = meta.get("table_comment", "") or ""
     dialect = meta.get("dialect", "")
 
     # ════════════════════════════════════════════════════════════
@@ -2098,10 +2099,8 @@ def generate_sdd(knowledge, output_dir):
             sch, tbl = _split_schema_table(src_full)
             # 源系统：用 schema 大写作为系统标识
             src_system = sch.upper() if sch else ""
-            # 源表格式：数据库类型//schema/表名（数据库类型用 dialect，缺失留空）
-            db_type = dialect if dialect else ""
-            src_table_str = f"{db_type}//{sch}/{tbl}" if sch else f"{db_type}//{tbl}"
-            ws2.append([src_system, src_table_str, "", "", "", "", "", "", "", "", "", "", ""])
+            # 源表：只填表名（数据库类型/数据库/schema 拿不到，按模板格式不强行编造）
+            ws2.append([src_system, tbl, "", "", "", "", "", "", "", "", "", "", ""])
 
         # 主查询 JOIN 的物理表
         for j in joins:
@@ -2228,17 +2227,18 @@ def generate_sdd(knowledge, output_dir):
             logic = logic if tt != "direct" else ""
             ws4.append([
                 "", "", type_label, logic, "",
-                "优化", target_table_full, target_cn, target_field_name,
+                "", target_table_full, target_cn, target_field_name,
             ])
         else:
             for ps in phys_sources:
-                ps_table = ps.get("table", "")
+                # 源表只取表名（不含 schema）
+                _, ps_table = _split_schema_table(ps.get("table", ""))
                 ps_field = ps.get("field", target_field_name)
                 ps_raw = ps.get("raw_sql", "")
                 logic = ps_raw if tt != "direct" else ""
                 ws4.append([
                     ps_table, ps_field, type_label, logic, "",
-                    "优化", target_table_full, target_cn, target_field_name,
+                    "", target_table_full, target_cn, target_field_name,
                 ])
 
     _set_widths(ws4, [28, 20, 22, 40, 12, 22, 28, 18, 20])
