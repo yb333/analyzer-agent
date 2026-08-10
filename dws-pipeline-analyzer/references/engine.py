@@ -109,6 +109,7 @@ DELETE_MODE_MAP = {
     "5": "TRUNCATE PARTITION",
     "6": "MERGE INTO",
     "7": "RPT_ITEM",
+    "8": "UPDATE",
 }
 
 # 分区级删除模式（有分区场景标识）
