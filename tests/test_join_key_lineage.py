@@ -137,6 +137,62 @@ def _collect_steps(chain):
     return list({node.get("step_id", "") for node in _walk_chain(chain) if node.get("step_id")})
 
 
+# ── 自引用 UPDATE/INSERT 场景（同表多步骤读写）──
+
+SELF_REF_SCENARIO = [
+    {"name": "规则1: 从ods建mid表", "target": "mid",
+     "sql": "INSERT OVERWRITE TABLE dws.mid SELECT a.order_id, a.orig_amount FROM ods.orders a"},
+    {"name": "规则2: mid自引用加工", "target": "mid",
+     "sql": "INSERT OVERWRITE TABLE dws.mid SELECT t.order_id, t.orig_amount * 10 AS amount_v2 FROM dws.mid t"},
+    {"name": "规则3: mid自引用再加工改名", "target": "mid",
+     "sql": "INSERT OVERWRITE TABLE dws.mid SELECT t.order_id, (t.amount_v2 + 1) AS amount_v3 FROM dws.mid t"},
+]
+
+
+class TestSelfReferenceLineage:
+    """自引用场景：同一张表被多个规则反复 UPDATE/INSERT。"""
+
+    def test_self_ref_traces_to_physical_source(self):
+        """规则3的自引用字段 amount_v3 应追到 ods.orders.orig_amount"""
+        from analyzer import build_join_key_lineage
+        rules, pm, topo, df, fm = _run_analysis(SELF_REF_SCENARIO)
+        chain = build_join_key_lineage("step_3", "amount_v3", "t", rules, pm, topo, df, fm)
+        assert chain, "追溯结果不应为空"
+        leaf_tables = _collect_leaf_tables(chain)
+        assert any("orders" in t for t in leaf_tables), \
+            f"应追到 ods.orders，实际叶节点: {leaf_tables}"
+
+    def test_self_ref_passes_through_all_steps(self):
+        """关联键 order_id 应穿过所有中间步骤（step_3→step_2→step_1）"""
+        from analyzer import build_join_key_lineage
+        rules, pm, topo, df, fm = _run_analysis(SELF_REF_SCENARIO)
+        chain = build_join_key_lineage("step_3", "order_id", "t", rules, pm, topo, df, fm)
+        steps = _collect_steps(chain)
+        assert len(steps) >= 3, f"应至少追溯3跳，实际 steps: {steps}"
+
+    def test_self_ref_shows_renames(self):
+        """链路中应体现改名（amount_v3 ← amount_v2 ← orig_amount）"""
+        from analyzer import build_join_key_lineage
+        rules, pm, topo, df, fm = _run_analysis(SELF_REF_SCENARIO)
+        chain = build_join_key_lineage("step_3", "amount_v3", "t", rules, pm, topo, df, fm)
+        fields = [n.get("field", "") for n in _walk_chain(chain)]
+        # 应同时出现 amount_v3, amount_v2, orig_amount
+        assert "amount_v2" in fields, f"链路应含 amount_v2（改名），实际: {fields}"
+        assert "orig_amount" in fields, f"链路应含 orig_amount（原始名），实际: {fields}"
+
+    def test_self_ref_no_infinite_loop(self):
+        """自引用不应导致无限递归"""
+        from analyzer import build_join_key_lineage
+        rules, pm, topo, df, fm = _run_analysis(SELF_REF_SCENARIO)
+        chain = build_join_key_lineage("step_3", "amount_v3", "t", rules, pm, topo, df, fm)
+        assert chain, "应正常返回，不应卡死"
+        # 叶节点不应都是 mid（说明没追到源头）
+        leaves = [n for n in _walk_chain(chain) if not n.get("children")]
+        for leaf in leaves:
+            assert "mid" not in leaf.get("table", "").lower(), \
+                f"叶节点不应是 mid（自引用表本身），实际: {leaf.get('table')}"
+
+
 def _collect_leaves(chain):
     """收集所有叶节点。"""
     return [node for node in _walk_chain(chain) if not node.get("children")]

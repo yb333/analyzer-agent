@@ -4651,17 +4651,29 @@ def build_join_key_lineage(
     visited.add(visit_key)
 
     # 4. 找该字段的 lineage
-    # 关联键通常不在 SELECT 里，而是产出该中间表的步骤才有它的 lineage。
-    # 所以先定位产出 resolved_table 的步骤，从那个步骤查 field_mappings。
-    producing_step = _find_producing_step(resolved_table, field_name, steps_list, rules)
-    lookup_step = producing_step if producing_step else step_id
+    # 优先在当前 step_id 找（自引用场景：字段可能是当前 step 产出的），
+    # 找不到才定位产出 resolved_table 的步骤，从那个步骤查 field_mappings
+    # （关联键场景：字段来自 FROM 的表，产出该表的步骤才有 lineage）。
+    # 传入 from_step=step_id 用于自引用场景：同表多 step 写入时，找上一跳而非第一个。
 
+    # 4a. 先在当前 step_id 找 target_field
+    lookup_step = step_id
     target_field_match = None
     for f in fields_list:
         if (f.get("target_field", "").lower() == field_name.lower()
-                and f.get("producing_step", "") == lookup_step):
+                and f.get("producing_step", "") == step_id):
             target_field_match = f
             break
+
+    # 4b. 当前 step 没有 → 找产出 resolved_table 的上一跳步骤
+    if not target_field_match:
+        producing_step = _find_producing_step(resolved_table, field_name, steps_list, rules, from_step=step_id)
+        lookup_step = producing_step if producing_step else step_id
+        for f in fields_list:
+            if (f.get("target_field", "").lower() == field_name.lower()
+                    and f.get("producing_step", "") == lookup_step):
+                target_field_match = f
+                break
 
     if not target_field_match:
         # 兜底：在所有字段里找该 step 的 lineage 里含此字段的
@@ -4729,7 +4741,9 @@ def build_join_key_lineage(
                     child_node["is_physical"] = False
             else:
                 # 中间表字段 → 找它产生的步骤，继续追溯
-                upstream_step = _find_producing_step(src_resolved, src_field, steps_list, rules)
+                # 传 from_step=lookup_step 用于自引用场景
+                upstream_step = _find_producing_step(src_resolved, src_field, steps_list, rules,
+                                                     from_step=lookup_step)
                 if upstream_step:
                     child = build_join_key_lineage(
                         upstream_step, src_field, src_resolved, rules, parsed_map,
@@ -4819,7 +4833,8 @@ def _trace_subquery_sources(
         }
 
         if not src_is_physical and sf_field:
-            upstream = _find_producing_step(src_table, sf_field, steps_list, rules)
+            upstream = _find_producing_step(src_table, sf_field, steps_list, rules,
+                                             from_step=step_id)
             if upstream:
                 sub = build_join_key_lineage(
                     upstream, sf_field, src_table, rules, parsed_map,
@@ -4855,12 +4870,54 @@ def _extract_join_relations(step_id: str, df_step: dict) -> list:
     return relations
 
 
-def _find_producing_step(table_name: str, field_name: str, steps_list: list, rules: list[RawRule]) -> str:
+def _find_producing_step(table_name: str, field_name: str, steps_list: list,
+                         rules: list[RawRule], from_step: str = "") -> str:
     """找到产出某表某字段的步骤 ID。
 
     通过 data_dependencies 或 target_table 反查。
+
+    自引用场景（UPDATE/INSERT 同表读写）的关键：
+    多个 step 可能都写同一张目标表，from_step 表示"当前从哪个步骤在追"，
+    应返回 exec_sequence 比 from_step 小且最近的那一个（即上一跳）。
+    无 from_step 时退化为原始行为（返回第一个匹配）。
     """
     norm = _norm_table(table_name)
+    from_seq = -1
+    if from_step:
+        for s in steps_list:
+            if s.get("step_id") == from_step:
+                from_seq = s.get("exec_sequence", -1)
+                break
+
+    # 有 from_step 上下文时：收集所有匹配，返回 exec_sequence < from_seq 中最大的
+    if from_seq >= 0:
+        best_step = ""
+        best_seq = -1
+        for s in steps_list:
+            target_full = _norm_table(s.get("target_table_full", "") or
+                                      _normalize_table_name(s.get("target_schema", ""), s.get("target_table", "")))
+            matched = (target_full == norm
+                       or norm.endswith("." + target_full.split(".")[-1])
+                       or target_full.endswith("." + norm.split(".")[-1]))
+            if not matched:
+                continue
+            seq = s.get("exec_sequence", -1)
+            if seq < from_seq and seq > best_seq:
+                best_seq = seq
+                best_step = s.get("step_id", "")
+        if best_step:
+            return best_step
+        # 没找到上一跳（from_step 可能是第一个写此表的），退回第一个匹配
+        for s in steps_list:
+            target_full = _norm_table(s.get("target_table_full", "") or
+                                      _normalize_table_name(s.get("target_schema", ""), s.get("target_table", "")))
+            if target_full == norm:
+                return s.get("step_id", "")
+            if norm.endswith("." + target_full.split(".")[-1]) or target_full.endswith("." + norm.split(".")[-1]):
+                return s.get("step_id", "")
+        return ""
+
+    # 无 from_step：原始行为，返回第一个匹配
     for s in steps_list:
         target_full = _norm_table(s.get("target_table_full", "") or
                                   _normalize_table_name(s.get("target_schema", ""), s.get("target_table", "")))
