@@ -957,24 +957,35 @@ def build_report_data(knowledge):
     # 这时 b 的链路树应该包含 step1 的 a 的链路。
     # 策略：对每个字段，看它的 lineage.source_field 是否在别的步骤里是 target_field，
     # 如果是，把那个步骤的 chain 合并进来。
-    _merged = set()  # 避免重复合并
-    for fname_lower, fmap in list(field_chain_map.items()):
-        all_source_fields = set()
-        for chain in fmap["chains"]:
-            for src in chain.get("sources", []):
-                sf = (src.get("field") or "").lower()
-                if sf and sf != fname_lower:
-                    all_source_fields.add(sf)
-        # 找这些 source_field 是否在别的步骤里是 target_field
-        for sf in all_source_fields:
-            if sf in field_chain_map and sf not in _merged:
-                # 把 sf 的 chains 合并到当前字段的 chains 里（去重）
+    # 多轮迭代：order_amount → dist_amount → qty → ods.orders 需要多轮才能串完
+    _merged_pairs = set()  # (字段, source_field) 避免重复合并
+    changed = True
+    _round = 0
+    while changed and _round < 10:
+        changed = False
+        _round += 1
+        for fname_lower, fmap in list(field_chain_map.items()):
+            all_source_fields = set()
+            for chain in fmap["chains"]:
+                for src in chain.get("sources", []):
+                    sf = (src.get("field") or "").lower()
+                    if sf and sf != fname_lower:
+                        all_source_fields.add(sf)
+            # 找这些 source_field 是否在别的步骤里是 target_field
+            for sf in all_source_fields:
+                if sf not in field_chain_map:
+                    continue
+                merge_key = (fname_lower, sf)
+                if merge_key in _merged_pairs:
+                    continue
+                # 把 sf 的 chains 合并到当前字段的 chains 里（按 step_id 去重）
                 existing_steps = {c["step_id"] for c in fmap["chains"]}
                 for chain in field_chain_map[sf]["chains"]:
                     if chain["step_id"] not in existing_steps:
                         fmap["chains"].append(chain)
                         existing_steps.add(chain["step_id"])
-                _merged.add(sf)
+                        changed = True
+                _merged_pairs.add(merge_key)
 
     # ── field_details (CTE 穿透血缘链) ──
     field_details = {}
