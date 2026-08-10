@@ -258,6 +258,92 @@ class TestCTESelfReferenceLineage:
         assert chain, "应正常返回，不应卡死"
 
 
+# ── 多步骤写同表 + 自引用 + CTE 综合场景 ──
+# 模拟真实生产：18+ 步骤写同一张 f 表，字段链路跨步骤自引用
+
+MULTI_WRITE_SCENARIO = [
+    # step_1: order_amount 依赖 dist_amount（自引用 UPDATE）
+    {"name": "step1: order_amount依赖dist_amount", "target": "f",
+     "sql": "SELECT t.order_id, t.dist_amount * 1.0 AS order_amount FROM dws.f t "
+            "WHERE t.order_id IS NOT NULL"},
+    # step_2: dist_amount 在 CTE 里计算 = (数量-取消数量)*单价（自引用）
+    {"name": "step2: CTE计算dist_amount", "target": "f",
+     "sql": "WITH po_tmp AS (SELECT po.order_id, (po.qty - po.cancel_qty) * po.unit_price "
+            "AS dist_amount FROM dws.f po) "
+            "SELECT t.order_id, sub.dist_amount FROM dws.f t "
+            "LEFT JOIN po_tmp sub ON t.order_id = sub.order_id"},
+    # step_3: 基础字段从源表直取
+    {"name": "step3: 基础字段直取", "target": "f",
+     "sql": "SELECT a.order_id, a.qty, a.cancel_qty, a.unit_price FROM ods.orders a"},
+    # step_4-6: 其他无关步骤也写 f 表（干扰项）
+    {"name": "step4: 无关字段x1", "target": "f",
+     "sql": "SELECT t.order_id, 'N' AS flag_x1 FROM dws.f t"},
+    {"name": "step5: 无关字段x2", "target": "f",
+     "sql": "SELECT t.order_id, 'Y' AS flag_x2 FROM dws.f t"},
+    {"name": "step6: 无关字段x3", "target": "f",
+     "sql": "SELECT t.order_id, 0 AS cnt_x3 FROM dws.f t"},
+]
+
+
+class TestMultiWriteSameTable:
+    """多步骤写同一张表 + 自引用 + CTE 场景。
+
+    关键特征：4+ 步骤都写 f 表，order_amount 依赖 dist_amount，
+    dist_amount 在 CTE 里加工，基础字段来自 ods 源表。
+    _find_producing_step 必须按字段名定位正确步骤，而非返回第一个写表的。
+    """
+
+    def test_order_amount_traces_to_physical_source(self):
+        """order_amount 应穿透自引用 + CTE 追到 ods.orders 源表"""
+        from analyzer import build_join_key_lineage, enrich_field_physical_sources
+        rules, pm, topo, df, fm = _run_analysis(MULTI_WRITE_SCENARIO)
+        enrich_field_physical_sources(fm, df, rules, pm, topo)
+        for f in fm.get("fields", []):
+            if f.get("target_field") == "order_amount" and f.get("producing_step") == "step_1":
+                ps = f.get("physical_source", [])
+                tables = [p.get("table", "") for p in ps]
+                assert any("ods" in t for t in tables), \
+                    f"order_amount 应追到 ods 源表，实际: {tables}"
+                break
+
+    def test_dist_amount_traces_to_physical_source(self):
+        """dist_amount 应穿透 CTE 追到 ods.orders 的 qty/cancel_qty/unit_price"""
+        from analyzer import enrich_field_physical_sources
+        rules, pm, topo, df, fm = _run_analysis(MULTI_WRITE_SCENARIO)
+        enrich_field_physical_sources(fm, df, rules, pm, topo)
+        for f in fm.get("fields", []):
+            if f.get("target_field") == "dist_amount" and f.get("producing_step") == "step_2":
+                ps = f.get("physical_source", [])
+                fields = [p.get("field", "") for p in ps]
+                assert "qty" in fields, f"应追到 qty，实际: {fields}"
+                assert "cancel_qty" in fields, f"应追到 cancel_qty，实际: {fields}"
+                assert "unit_price" in fields, f"应追到 unit_price，实际: {fields}"
+                break
+
+    def test_find_producing_step_by_field(self):
+        """_find_producing_step 带 field_name 时应返回正确步骤"""
+        from engine import _find_producing_step
+        rules, pm, topo, df, fm = _run_analysis(MULTI_WRITE_SCENARIO)
+        steps_list = topo.get("steps", [])
+        # dist_amount 是 step_2 产出的，不是 step_1（from_step=step_1 时应返回 step_2）
+        result = _find_producing_step("dws.f", "dist_amount", steps_list, rules,
+                                       from_step="step_1", field_mappings=fm)
+        assert result == "step_2", f"应返回 step_2，实际: {result}"
+        # qty 是 step_3 产出的
+        result = _find_producing_step("dws.f", "qty", steps_list, rules,
+                                       from_step="step_2", field_mappings=fm)
+        assert result == "step_3", f"应返回 step_3，实际: {result}"
+
+    def test_chain_shows_multi_hop(self):
+        """追溯链应包含多跳：step_1 → step_2 → step_3"""
+        from analyzer import build_join_key_lineage
+        rules, pm, topo, df, fm = _run_analysis(MULTI_WRITE_SCENARIO)
+        chain = build_join_key_lineage("step_1", "order_amount", "t", rules, pm, topo, df, fm)
+        steps = _collect_steps(chain)
+        assert "step_2" in steps, f"链路应经过 step_2（dist_amount 产出步骤），实际: {steps}"
+        assert "step_3" in steps, f"链路应经过 step_3（基础字段产出步骤），实际: {steps}"
+
+
 # ═══════════════════════════════════════════════════════════════
 # 多场景覆盖
 # ═══════════════════════════════════════════════════════════════
