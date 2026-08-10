@@ -290,6 +290,210 @@ class TestMappingExcel:
         wb.close()
 
 
+class TestSddExcel:
+    """sdd.xlsx（业务需求分析）的实际单元格内容验证。"""
+
+    def _build_knowledge(self, sql):
+        """跑完整解析，返回 knowledge dict。"""
+        rule = _make_rule(sql, target="final_f")
+        pm = {rule.rule_code: parse_single_sql(sql, "dws")}
+        topo = build_topology([rule], pm)
+        df = build_data_flow([rule], pm)
+        fm = build_field_mappings([rule], pm, {})
+        enrich_join_key_lineage(df, [rule], pm, topo, fm)
+        enrich_field_physical_sources(fm, df, [rule], pm, topo)
+        q = analyze_quality(topo, df, fm, pm)
+        return {
+            "meta": {"source_type": "t", "analysis_time": "", "dialect": "dws",
+                     "total_rules": 1, "target_table": "final_f", "table_comment": "测试宽表",
+                     "patterns": [], "target_field_types": {}, "target_field_comments": {}},
+            "topology": topo, "data_flow": df, "field_mappings": fm, "quality": q,
+            "business_logic": {"summary": "", "step_descriptions": [], "key_transforms": []},
+            "source": build_source([rule], {}, {}, pm),
+        }
+
+    def test_sdd_has_five_sheets(self, tmp_path):
+        """SDD 应有 5 个固定 Sheet。"""
+        try:
+            import openpyxl
+        except ImportError:
+            pytest.skip("缺少 openpyxl")
+        from view_generator import generate_sdd
+
+        knowledge = self._build_knowledge("SELECT a.id FROM ods.tbl_a a")
+        out = str(tmp_path / "sdd_out")
+        generate_sdd(knowledge, out)
+
+        wb = openpyxl.load_workbook(Path(out) / "sdd.xlsx", read_only=True)
+        assert wb.sheetnames == ["1业务背景", "2数据源清单", "3表关联", "4需求字段", "5业务样例数据"]
+        wb.close()
+
+    def test_sdd_business_background_empty(self, tmp_path):
+        """Sheet 1 业务背景：5 行标题，值留空。"""
+        try:
+            import openpyxl
+        except ImportError:
+            pytest.skip("缺少 openpyxl")
+        from view_generator import generate_sdd
+
+        knowledge = self._build_knowledge("SELECT a.id FROM ods.tbl_a a")
+        out = str(tmp_path / "sdd_out")
+        generate_sdd(knowledge, out)
+
+        wb = openpyxl.load_workbook(Path(out) / "sdd.xlsx", read_only=True)
+        ws1 = wb["1业务背景"]
+        labels = [ws1.cell(row=r, column=1).value for r in range(1, 6)]
+        assert labels == ["业务背景", "使用场景", "使用角色", "下游消费方", "需求价值"]
+        # 值列（B）应全空
+        for r in range(1, 6):
+            assert ws1.cell(row=r, column=2).value in (None, "")
+        wb.close()
+
+    def test_sdd_source_list_physical_tables(self, tmp_path):
+        """Sheet 2 数据源清单：应收集物理源表，排除中间表。"""
+        try:
+            import openpyxl
+        except ImportError:
+            pytest.skip("缺少 openpyxl")
+        from view_generator import generate_sdd
+
+        sql = ("SELECT a.id, b.name FROM ods.tbl_a a "
+               "LEFT JOIN dim.tbl_b b ON a.id = b.id")
+        knowledge = self._build_knowledge(sql)
+        out = str(tmp_path / "sdd_out")
+        generate_sdd(knowledge, out)
+
+        wb = openpyxl.load_workbook(Path(out) / "sdd.xlsx", read_only=True)
+        ws2 = wb["2数据源清单"]
+        src_tables = []
+        for row in ws2.iter_rows(min_row=2, values_only=True):
+            if row and row[1]:
+                src_tables.append(str(row[1]))
+        wb.close()
+        assert len(src_tables) == 2, f"应有 2 张源表，实际 {src_tables}"
+        assert any("tbl_a" in t for t in src_tables)
+        assert any("tbl_b" in t for t in src_tables)
+
+    def test_sdd_joins(self, tmp_path):
+        """Sheet 3 表关联：多 JOIN 场景应有左/右表 + 关联方式。"""
+        try:
+            import openpyxl
+        except ImportError:
+            pytest.skip("缺少 openpyxl")
+        from view_generator import generate_sdd
+
+        sql = ("SELECT a.id, b.name, c.flag FROM ods.tbl_a a "
+               "LEFT JOIN dim.tbl_b b ON a.id = b.id "
+               "INNER JOIN dim.tbl_c c ON a.id = c.cid")
+        knowledge = self._build_knowledge(sql)
+        out = str(tmp_path / "sdd_out")
+        generate_sdd(knowledge, out)
+
+        wb = openpyxl.load_workbook(Path(out) / "sdd.xlsx", read_only=True)
+        ws3 = wb["3表关联"]
+        rows = [r for r in ws3.iter_rows(min_row=2, values_only=True) if r and r[0]]
+        wb.close()
+        assert len(rows) == 2, f"应有 2 行关联，实际 {len(rows)}"
+        # 左表都是主表 tbl_a
+        assert all("tbl_a" in str(r[0]) for r in rows)
+        # 关联方式正确
+        join_types = [r[4] for r in rows]
+        assert "LEFT JOIN" in join_types
+        assert "INNER JOIN" in join_types
+        # 右表分别是 tbl_b / tbl_c
+        right_tables = [str(r[2]) for r in rows]
+        assert any("tbl_b" in t for t in right_tables)
+        assert any("tbl_c" in t for t in right_tables)
+
+    def test_sdd_single_table_no_join_rows(self, tmp_path):
+        """Sheet 3 表关联：单表 FROM（无 JOIN）不应产出关联行。"""
+        try:
+            import openpyxl
+        except ImportError:
+            pytest.skip("缺少 openpyxl")
+        from view_generator import generate_sdd
+
+        knowledge = self._build_knowledge("SELECT a.id FROM ods.tbl_a a")
+        out = str(tmp_path / "sdd_out")
+        generate_sdd(knowledge, out)
+
+        wb = openpyxl.load_workbook(Path(out) / "sdd.xlsx", read_only=True)
+        ws3 = wb["3表关联"]
+        rows = [r for r in ws3.iter_rows(min_row=2, values_only=True) if r and r[0]]
+        wb.close()
+        assert rows == [], "单表 FROM 不应有关联行"
+
+    def test_sdd_fields_physical_source_and_type(self, tmp_path):
+        """Sheet 4 需求字段：穿透到物理源表 + 直取/加工分类正确。"""
+        try:
+            import openpyxl
+        except ImportError:
+            pytest.skip("缺少 openpyxl")
+        from view_generator import generate_sdd
+
+        # 多步骤：中间表 tmp1 穿透到物理源 tbl_a
+        rules = [
+            RawRule(rule_code="R1", rule_name="s1", rule_type=1, exec_sequence=1,
+                    target_schema="dws", target_table="tmp1", delete_mode="1",
+                    query_sql="SELECT a.id, a.amount FROM ods.tbl_a a"),
+            RawRule(rule_code="R2", rule_name="s2", rule_type=1, exec_sequence=2,
+                    target_schema="dws", target_table="final_f", delete_mode="1",
+                    query_sql="SELECT t.id, SUM(t.amount) AS total FROM dws.tmp1 t GROUP BY t.id"),
+        ]
+        pm = {r.rule_code: parse_single_sql(r.query_sql, "dws") for r in rules}
+        topo = build_topology(rules, pm)
+        df = build_data_flow(rules, pm)
+        fm = build_field_mappings(rules, pm, {})
+        enrich_join_key_lineage(df, rules, pm, topo, fm)
+        enrich_field_physical_sources(fm, df, rules, pm, topo)
+        q = analyze_quality(topo, df, fm, pm)
+        knowledge = {
+            "meta": {"source_type": "t", "analysis_time": "", "dialect": "dws",
+                     "total_rules": 2, "target_table": "final_f", "table_comment": "测试",
+                     "patterns": [], "target_field_types": {}, "target_field_comments": {}},
+            "topology": topo, "data_flow": df, "field_mappings": fm, "quality": q,
+            "business_logic": {"summary": "", "step_descriptions": [], "key_transforms": []},
+            "source": build_source(rules, {}, {}, pm),
+        }
+        out = str(tmp_path / "sdd_out")
+        generate_sdd(knowledge, out)
+
+        wb = openpyxl.load_workbook(Path(out) / "sdd.xlsx", read_only=True)
+        ws4 = wb["4需求字段"]
+        rows = [r for r in ws4.iter_rows(min_row=2, values_only=True) if r and r[8]]
+        wb.close()
+        # 源表应穿透到 tbl_a（不出现中间表 tmp1）
+        src_tables = [str(r[0]) for r in rows if r[0]]
+        assert all("tmp1" not in t for t in src_tables), f"不应出现中间表 tmp1：{src_tables}"
+        assert any("tbl_a" in t for t in src_tables), f"应穿透到 tbl_a：{src_tables}"
+        # total 字段应是加工字段
+        total_row = next((r for r in rows if r[8] and "total" in str(r[8]).lower()), None)
+        assert total_row is not None, "应有 total 字段"
+        assert str(total_row[2]) == "加工字段", f"total 应为加工字段，实际 {total_row[2]}"
+        # id 字段应是直取字段
+        id_row = next((r for r in rows if r[8] and str(r[8]).lower() == "id"), None)
+        assert id_row is not None, "应有 id 字段"
+        assert str(id_row[2]) == "直取字段", f"id 应为直取字段，实际 {id_row[2]}"
+
+    def test_sdd_sample_data_empty(self, tmp_path):
+        """Sheet 5 业务样例数据：应为空 Sheet。"""
+        try:
+            import openpyxl
+        except ImportError:
+            pytest.skip("缺少 openpyxl")
+        from view_generator import generate_sdd
+
+        knowledge = self._build_knowledge("SELECT a.id FROM ods.tbl_a a")
+        out = str(tmp_path / "sdd_out")
+        generate_sdd(knowledge, out)
+
+        wb = openpyxl.load_workbook(Path(out) / "sdd.xlsx", read_only=True)
+        ws5 = wb["5业务样例数据"]
+        rows = [r for r in ws5.iter_rows(min_row=1, values_only=True) if any(v is not None for v in r)]
+        wb.close()
+        assert rows == [], "业务样例数据应为空"
+
+
 class TestAssetReportData:
     """asset_report.html 的 REPORT_DATA 验证。"""
 

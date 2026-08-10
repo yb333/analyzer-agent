@@ -8,12 +8,13 @@ Usage:
         --input knowledge_draft.json \
         --output docs/output/{target_table}/ \
         [--ai-input knowledge_ai.md] \
-        [--views mapping,asset,techspec]
+        [--views mapping,asset,techspec,sdd]
 
 支持的视图:
     mapping   → mapping.xlsx        (实体级+属性级字段映射)
     asset     → asset_report.html   (资产说明书，交互式 HTML)
     techspec  → tech_design.md      (技术设计文档)
+    sdd       → sdd.xlsx            (业务需求分析，逆向自 mapping)
 
 默认: all (生成全部视图)
 """
@@ -1957,6 +1958,304 @@ def generate_mapping(knowledge, output_dir):
     return True
 
 
+def generate_sdd(knowledge, output_dir):
+    """生成 SDD（业务需求分析）Excel — 逆向自 mapping，面向"未来优化场景"。
+
+    五个 Sheet 严格对齐模板工作簿1.xlsx：
+    - 1业务背景：5 行纵向标题（业务背景/使用场景/使用角色/下游消费方/需求价值），值留空
+    - 2数据源清单：物理源表清单（A/B/C 填，D–M 调度/主键/数据量留空）
+    - 3表关联：左/右表 + 别名 + 关联方式 + ON/WHERE 条件
+    - 4需求字段：穿透到物理源表的字段级需求（源表/源字段/直取or加工/加工逻辑/资产表/资产字段）
+    - 5业务样例数据：空 Sheet
+
+    取不到的列统一留空（静态 SQL 分析不产出：主键唯一性/数据量/空值率/源表调度/样例数据）。
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+    except ImportError:
+        print("  错误: 缺少 openpyxl，请 pip install openpyxl", file=sys.stderr)
+        return False
+
+    topo = knowledge.get("topology", {})
+    df = knowledge.get("data_flow", {})
+    fm = knowledge.get("field_mappings", {})
+    meta = knowledge.get("meta", {})
+
+    steps_list = topo.get("steps", [])
+    data_flow_steps = df.get("steps", [])
+    fields_list = fm.get("fields", [])
+    ddl_types = meta.get("target_field_types", {})
+    ddl_comments = meta.get("target_field_comments", {})
+
+    # ── CTE 索引（复用 _build_cte_index，穿透属性级字段用）──
+    cte_index = _build_cte_index(data_flow_steps)
+    cte_names_upper = set(cte_index.keys())
+
+    # ── 目标表集合（过滤用，归一化避免大小写漏匹配）──
+    target_tables_set = set()
+    for s in steps_list:
+        tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
+        target_tables_set.add(_norm(tf))
+
+    # 目标表 schema/table：取 exec_sequence 最大的步骤（最终目标表）
+    target_schema = ""
+    target_table = meta.get("target_table", "")
+    if steps_list:
+        _max_seq = max(s.get("exec_sequence", 0) for s in steps_list)
+        _max_steps = [s for s in steps_list if s.get("exec_sequence", 0) == _max_seq]
+        if _max_steps:
+            target_schema = _max_steps[0].get("target_schema", "")
+            target_table = _max_steps[0].get("target_table", "") or target_table
+    target_table_full = _schema_table(target_schema, target_table)
+    target_cn = meta.get("table_comment", "") or target_table
+    dialect = meta.get("dialect", "")
+
+    # ════════════════════════════════════════════════════════════
+    # 公共：表头样式（复用 field_search.py 的蓝色表头先例）
+    # ════════════════════════════════════════════════════════════
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True, size=11)
+
+    def _style_header(ws, headers):
+        ws.append(headers)
+        for col in range(1, len(headers) + 1):
+            cell = ws.cell(row=1, column=col)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.row_dimensions[1].height = 32
+        ws.freeze_panes = "A2"
+
+    def _set_widths(ws, widths):
+        for i, w in enumerate(widths, 1):
+            if i <= ws.max_column:
+                ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+
+    wb = Workbook()
+
+    # ════════════════════════════════════════════════════════════
+    # Sheet 1: 业务背景 — 5 行纵向标题，值留空
+    # ════════════════════════════════════════════════════════════
+    ws1 = wb.active
+    ws1.title = "1业务背景"
+    bg_labels = ["业务背景", "使用场景", "使用角色", "下游消费方", "需求价值"]
+    for label in bg_labels:
+        ws1.append([label, ""])  # A=标题, B=待填值
+    # 标题列样式（加粗左对齐）
+    label_font = Font(bold=True, size=11)
+    for r in range(1, len(bg_labels) + 1):
+        c = ws1.cell(row=r, column=1)
+        c.font = label_font
+        c.alignment = Alignment(horizontal="left", vertical="center")
+    ws1.column_dimensions["A"].width = 16
+    ws1.column_dimensions["B"].width = 60
+
+    # ════════════════════════════════════════════════════════════
+    # Sheet 2: 数据源清单 — 物理源表（A/B/C 填，余下留空）
+    # ════════════════════════════════════════════════════════════
+    ws2 = wb.create_sheet("2数据源清单")
+    headers2 = [
+        "*源系统",
+        "*源表（格式：数据库类型//数据库/schema/表名）",
+        "*源表中文说明（逻辑实体名称）",
+        "*主键字段",
+        "主键唯一性检查",
+        "源表数据量",
+        "*数据源调度任务名",
+        "*数据源调度应用",
+        "*数据源调度项目",
+        "*数据源调度任务组",
+        "*数据源调度Pjob名称",
+        "*数据源调度方式",
+        "*数据源调度频率",
+    ]
+    _style_header(ws2, headers2)
+
+    # 收集物理源表（复用 generate_mapping 实体级逻辑：遍历 joins/ctes/union_branches，
+    # 排除中间表/CTE 名/目标表自身，全局去重）
+    seen_sources = set()
+    for s in steps_list:
+        sid = s["step_id"]
+        df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
+        joins = df_step.get("joins", [])
+        ctes = df_step.get("ctes", [])
+        ub_list = df_step.get("union_branches", [])
+
+        def _collect_src(src_full):
+            """收集一个物理源表（去重+过滤）。"""
+            if not src_full or src_full.startswith("(subquery:"):
+                return
+            if _is_intermediate_tbl(src_full):
+                return
+            if _norm(src_full) in target_tables_set:
+                return
+            if src_full.upper() in cte_names_upper:
+                return
+            if _norm(src_full) in seen_sources:
+                return
+            seen_sources.add(_norm(src_full))
+            sch, tbl = _split_schema_table(src_full)
+            # 源系统：用 schema 大写作为系统标识
+            src_system = sch.upper() if sch else ""
+            # 源表格式：数据库类型//schema/表名（数据库类型用 dialect，缺失留空）
+            db_type = dialect if dialect else ""
+            src_table_str = f"{db_type}//{sch}/{tbl}" if sch else f"{db_type}//{tbl}"
+            ws2.append([src_system, src_table_str, "", "", "", "", "", "", "", "", "", "", ""])
+
+        # 主查询 JOIN 的物理表
+        for j in joins:
+            _collect_src(j.get("source_table", ""))
+        # UNION 分支内的物理表
+        for b in ub_list:
+            for j in b.get("source_tables", []):
+                _collect_src(j.get("source_table", ""))
+        # CTE 内部物理表
+        for cte in ctes:
+            for st in cte.get("source_tables", []):
+                _collect_src(st.get("name", ""))
+
+    _set_widths(ws2, [12, 42, 28, 18, 16, 12, 22, 18, 18, 18, 18, 14, 14])
+
+    # ════════════════════════════════════════════════════════════
+    # Sheet 3: 表关联 — 左/右表 + 别名 + 关联方式 + 条件
+    # ════════════════════════════════════════════════════════════
+    ws3 = wb.create_sheet("3表关联")
+    headers3 = ["*左表", "左表别名", "*右表", "右表别名", "*关联方式", "*关联条件&限制条件"]
+    _style_header(ws3, headers3)
+
+    for s in steps_list:
+        sid = s["step_id"]
+        df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
+        joins = df_step.get("joins", [])
+        if len(joins) < 2:
+            # 单表 FROM 无关联，跳过
+            continue
+        where_clause = (df_step.get("where_clause", "") or "").replace("WHERE ", "")
+
+        # 本步骤别名映射 + 关联键追溯（用于 ON 条件中间表别名替换）
+        step_alias_map = {}
+        for j in joins:
+            if j.get("alias") and j.get("source_table"):
+                step_alias_map[j["alias"].upper()] = j["source_table"]
+        step_jkl = df_step.get("join_key_lineage", {})
+
+        main_join = joins[0]
+        left_table = main_join.get("source_table", "")
+        left_alias = main_join.get("alias", "")
+        # 首个右表的限制条件附 WHERE（避免重复）
+        where_attached = False
+        for j in joins[1:]:
+            right_table = j.get("source_table", "")
+            right_alias = j.get("alias", "")
+            join_type = j.get("join_type", "")
+            raw_cond = j.get("join_condition", "")
+            rewritten_cond, transfer_note = _resolve_on_condition_aliases(
+                raw_cond, step_alias_map, step_jkl)
+            if transfer_note:
+                rewritten_cond = rewritten_cond + transfer_note
+            # 限制条件：ON 条件 + WHERE（仅附一次）
+            condition = rewritten_cond
+            if where_clause and not where_attached:
+                condition = (condition + "；" if condition else "") + f"WHERE {where_clause}"
+                where_attached = True
+            ws3.append([left_table, left_alias, right_table, right_alias, join_type, condition])
+
+    _set_widths(ws3, [28, 12, 28, 12, 16, 50])
+
+    # ════════════════════════════════════════════════════════════
+    # Sheet 4: 需求字段 — 穿透到物理源表的字段级需求
+    # ════════════════════════════════════════════════════════════
+    ws4 = wb.create_sheet("4需求字段")
+    headers4 = [
+        "*源表",
+        "*源表字段",
+        "*类型（直取字段/加工字段）",
+        "非直取字段加工逻辑",
+        "空值率分析",
+        "*资产设计参考_新增优化判断",
+        "*资产表名（schema.表名）",
+        "*资产中文名称",
+        "*资产字段",
+    ]
+    _style_header(ws4, headers4)
+
+    def _is_view_step(step_id):
+        df_step = next((d for d in data_flow_steps if d.get("step_id") == step_id), {})
+        raw_sql = (df_step.get("raw_sql", "") or "").upper()
+        return "CREATE VIEW" in raw_sql or "CREATE OR REPLACE VIEW" in raw_sql
+
+    # 按 producing_step 去重目标字段（同字段多步骤只取最终，优先加工版本）
+    scenario_fields = []
+    seen_fields = set()
+    for f in fields_list:
+        fname = f.get("target_field", "")
+        step_id = f.get("producing_step", "")
+        if _is_view_step(step_id) or not fname:
+            continue
+        # 跳过中间表步骤的字段（只展示最终目标表）
+        step_info = next((s for s in steps_list if s.get("step_id") == step_id), {})
+        step_target = step_info.get("target_table_full", "") or step_info.get("target_table", "")
+        if _is_intermediate_tbl(step_target):
+            continue
+        if fname in seen_fields:
+            # 优先保留加工版本
+            for i, existing in enumerate(scenario_fields):
+                if existing.get("target_field") == fname:
+                    existing_tt = existing.get("transform_type", "expression")
+                    new_tt = f.get("transform_type", "expression")
+                    if TRANSFORM_PRIORITY.get(new_tt, 0) > TRANSFORM_PRIORITY.get(existing_tt, 0):
+                        scenario_fields[i] = f
+                    break
+        else:
+            seen_fields.add(fname)
+            scenario_fields.append(f)
+
+    for f in scenario_fields:
+        tt = f.get("transform_type", "expression")
+        type_label = "直取字段" if tt == "direct" else "加工字段"
+        target_field_name = f.get("target_field", "")
+
+        # 优先用跨步骤穿透的 physical_source，没有则回退 CTE 穿透
+        phys_sources = f.get("physical_source", [])
+        if not phys_sources:
+            lineages = f.get("lineage", [])
+            phys_sources = _resolve_physical_sources(lineages, cte_index, cte_names_upper, set())
+
+        if not phys_sources:
+            # 无来源（常量/赋值）：源表/源字段留空
+            logic = f.get("lineage", [{}])[0].get("raw_sql", "") if f.get("lineage") else ""
+            logic = logic if tt != "direct" else ""
+            ws4.append([
+                "", "", type_label, logic, "",
+                "优化", target_table_full, target_cn, target_field_name,
+            ])
+        else:
+            for ps in phys_sources:
+                ps_table = ps.get("table", "")
+                ps_field = ps.get("field", target_field_name)
+                ps_raw = ps.get("raw_sql", "")
+                logic = ps_raw if tt != "direct" else ""
+                ws4.append([
+                    ps_table, ps_field, type_label, logic, "",
+                    "优化", target_table_full, target_cn, target_field_name,
+                ])
+
+    _set_widths(ws4, [28, 20, 22, 40, 12, 22, 28, 18, 20])
+
+    # ════════════════════════════════════════════════════════════
+    # Sheet 5: 业务样例数据 — 空 Sheet
+    # ════════════════════════════════════════════════════════════
+    ws5 = wb.create_sheet("5业务样例数据")
+
+    # 写入
+    output_path = Path(output_dir) / "sdd.xlsx"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(str(output_path))
+    print(f"  [OK] SDD Excel: {output_path}")
+    return True
+
+
 def _resolve_physical_sources(lineages, cte_index, cte_names_upper, visited, depth=0):
     """穿透 CTE 到物理源表字段。
 
@@ -2397,7 +2696,7 @@ def main():
     parser.add_argument(
         "--views",
         default="all",
-        help="要生成的视图，逗号分隔: mapping,asset,techspec (默认: all)",
+        help="要生成的视图，逗号分隔: mapping,asset,techspec,sdd (默认: all)",
     )
 
     args = parser.parse_args()
@@ -2438,7 +2737,7 @@ def main():
     views_dir.mkdir(parents=True, exist_ok=True)
     views_str = args.views.strip().lower()
     if views_str == "all":
-        views = ["mapping", "asset", "techspec"]
+        views = ["mapping", "asset", "techspec", "sdd"]
     else:
         views = [v.strip() for v in views_str.split(",") if v.strip()]
 
@@ -2456,6 +2755,8 @@ def main():
             results["asset"] = generate_asset_report(knowledge, str(views_dir))
         elif view == "techspec":
             results["techspec"] = generate_tech_design(knowledge, str(views_dir))
+        elif view == "sdd":
+            results["sdd"] = generate_sdd(knowledge, str(views_dir))
         else:
             print(f"  警告: 未知视图类型 '{view}'，跳过", file=sys.stderr)
 
