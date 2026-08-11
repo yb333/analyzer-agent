@@ -61,6 +61,7 @@ python {skill_dir}/run.py analyzer --chain \
   - asset_report.html    资产说明书（含多规则组链路标识）
   - mapping.xlsx         字段映射（完整链路，穿透mid表）
   - tech_design.md       技术设计文档
+  - sdd.xlsx             业务需求分析（SDD，逆向自 mapping）
 ```
 
 ## 产出说明

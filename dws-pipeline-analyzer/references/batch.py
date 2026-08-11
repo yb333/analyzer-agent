@@ -323,7 +323,7 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
     from analyzer import (detect_dialect, analyze_pipeline,
                           _generate_ai_summary, _is_intermediate_table)
     from view_generator import (generate_mapping, generate_asset_report,
-                                generate_tech_design)
+                                generate_tech_design, generate_sdd)
 
     rules = group["rules"]
     code = group["rule_group_code"]
@@ -379,6 +379,7 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
         generate_mapping(knowledge, str(out_dir))
         generate_asset_report(knowledge, str(out_dir))
         generate_tech_design(knowledge, str(out_dir))
+        generate_sdd(knowledge, str(out_dir))
 
         # AI 增强（可选）
         if not no_ai:

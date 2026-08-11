@@ -2384,10 +2384,12 @@ def main_chain():
     _t_view0 = _t_usage.time()
     _view_exc = None
     try:
-        from view_generator import generate_mapping, generate_asset_report, generate_tech_design
+        from view_generator import (generate_mapping, generate_asset_report,
+                                    generate_tech_design, generate_sdd)
         generate_mapping(knowledge, output_dir)
         generate_asset_report(knowledge, output_dir)
         generate_tech_design(knowledge, output_dir)
+        generate_sdd(knowledge, output_dir)
     except Exception as e:
         _view_exc = e
         print(f"  [WARN] 视图生成失败: {e}", file=sys.stderr)

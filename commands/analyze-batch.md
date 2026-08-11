@@ -1,10 +1,10 @@
 ---
-description: 批量分析多个规则组，生成全部交付件（资产说明书/字段映射/技术设计文档）
+description: 批量分析多个规则组，生成全部交付件（资产说明书/字段映射/技术设计文档/业务需求分析）
 ---
 
 # /analyze-batch — 批量分析
 
-对多个规则组批量执行分析，每个规则组生成三个交付件（asset_report.html / mapping.xlsx / tech_design.md）。
+对多个规则组批量执行分析，每个规则组生成四个交付件（asset_report.html / mapping.xlsx / tech_design.md / sdd.xlsx）。
 
 ## 触发方式
 
@@ -54,7 +54,8 @@ AI 增强分批进行（每批 5-10 个规则组），避免一次处理过多�
 │   ├── knowledge_summary.md
 │   ├── mapping.xlsx
 │   ├── asset_report.html
-│   └── tech_design.md
+│   ├── tech_design.md
+│   └── sdd.xlsx
 ├── {规则组2英文名}/
 │   └── ...
 ```
