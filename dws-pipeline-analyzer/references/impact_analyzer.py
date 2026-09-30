@@ -1383,11 +1383,6 @@ def main():
     # ── 运营埋点：记录开始时刻 ──
     import time as _t_usage
     _t0_usage = _t_usage.time()
-    try:
-        from usage import flush_queue as _flush_usage
-        _flush_usage()
-    except Exception:
-        pass
 
     # 读取 knowledge
     knowledge_path = Path(args.knowledge)
@@ -1765,11 +1760,6 @@ def main_cross_asset():
     # ── 运营埋点：记录开始时刻 ──
     import time as _t_usage
     _t0_usage = _t_usage.time()
-    try:
-        from usage import flush_queue as _flush_usage
-        _flush_usage()
-    except Exception:
-        pass
 
     # 读受影响表清单（Sheet3）
     affected_tables = _read_affected_tables(args.changes)

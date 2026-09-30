@@ -36,18 +36,21 @@ def _clean(s):
     return str(s).strip()
 
 
-def _norm(name: str) -> str:
-    """表名归一化（统一小写）。所有表名比较都必须走这个函数。"""
-    if not name:
-        return ""
-    return name.strip().lower()
-
-
-# 加工类型优先级（从轻到重）。HTML 视图和 Excel mapping 共用此口径，避免不一致。
-TRANSFORM_PRIORITY = {
-    "unknown": -1, "direct": 0, "value": 1, "fallback": 2,
-    "case_when": 3, "expression": 4, "aggregate": 5, "pivot": 6, "window": 7,
-}
+# ── 视图模型层（唯一定义见 viewmodel.py，此处别名保持历史调用点兼容）──
+# _norm/_schema_table/_split_schema_table/TRANSFORM_PRIORITY/_build_cte_index/
+# _resolve_physical_sources/_resolve_on_condition_aliases 均收编于 viewmodel。
+from viewmodel import (  # noqa: E402
+    TRANSFORM_PRIORITY,
+    build_context,
+    build_cte_index as _build_cte_index,
+    resolve_physical_sources as _resolve_physical_sources,
+    resolve_on_condition_aliases as _resolve_on_condition_aliases,
+    norm_name as _norm,
+    schema_table as _schema_table,
+    split_schema_table as _split_schema_table,
+    join_type_label,
+)
+from engine import _is_intermediate_table  # noqa: E402
 
 
 def _describe_transform(transform_type: str, expression: str = "", field: str = "") -> str:
@@ -107,18 +110,9 @@ def _describe_transform(transform_type: str, expression: str = "", field: str = 
 
 
 # 临时表/中间表判断（与 analyzer._is_intermediate_table 同款逻辑）
-_INTERMEDIATE_TBL_RE = __import__("re").compile(
-    r"(?:^tmp\d*$|_tmp\d*$|^temp\d*$|_temp\d*$|^tmp_|_tmp_|^temp_|_temp_)",
-    __import__("re").IGNORECASE,
-)
-
-
 def _is_intermediate_tbl(table_name: str) -> bool:
-    """判断表名是否为临时表/中间表。"""
-    if not table_name:
-        return False
-    short = _norm(table_name).split(".")[-1]
-    return bool(_INTERMEDIATE_TBL_RE.search(short))
+    """判断表名是否为临时表/中间表（唯一定义在 engine._is_intermediate_table）。"""
+    return _is_intermediate_table(table_name)
 
 
 # 写入方式标签
@@ -240,60 +234,6 @@ def _build_step_summary_inline(topo_step, df_step, fields_list):
     return " ".join(parts)
 
 
-def _resolve_on_condition_aliases(on_condition, alias_map, join_key_lineage):
-    """把 ON 条件里的中间表别名替换成物理源表，并标注传递路径。
-
-    例: "t.bid = d.bid"，t 是中间表(tmp1)，bid 追溯到 tbl_b
-        → "tbl_b.bid = d.bid（经tmp1传递）"
-
-    Args:
-        on_condition: ON 条件字符串（如 "t.bid = d.bid"）
-        alias_map: {别名(UPPER): 物理表名}，本步骤的 FROM/JOIN 别名映射
-        join_key_lineage: {field_lower: [追溯链]}，关联键追溯数据
-    Returns: (改写后的ON条件, 传递路径标注)
-    """
-    import re as _re
-    if not on_condition:
-        return on_condition, ""
-
-    rewritten = on_condition
-    transfers = []  # 传递路径标注
-
-    # 提取所有 alias.field 模式
-    for m in _re.finditer(r'(\w+)\.(\w+)', on_condition):
-        alias = m.group(1)
-        field = m.group(2)
-        table = alias_map.get(alias.upper(), "")
-        if not table or not _is_intermediate_tbl(table):
-            continue
-        # 这个别名是中间表，追溯它的 field 到物理源表
-        trace_chains = join_key_lineage.get(field.lower(), [])
-        if not trace_chains:
-            continue
-        chain = trace_chains[0]
-        # 找物理源表（叶节点）
-        leaves = []
-        def _find_leaves(n):
-            if not n.get("children"):
-                leaves.append(n)
-            for c in n.get("children", []):
-                _find_leaves(c)
-        _find_leaves(chain)
-        if not leaves:
-            continue
-        # 取第一个叶节点的物理表短名
-        phys_table = leaves[0].get("table", "").split(".")[-1]
-        phys_field = leaves[0].get("field", field)
-        # 替换别名：t.bid → tbl_b.bid
-        old_ref = f"{alias}.{field}"
-        new_ref = f"{phys_table}.{phys_field}"
-        rewritten = rewritten.replace(old_ref, new_ref)
-        transfers.append(f"{old_ref}经{table.split('.')[-1]}来自{new_ref}")
-
-    transfer_note = "（" + "；".join(transfers) + "）" if transfers else ""
-    return rewritten, transfer_note
-
-
 def _merge_ai_markdown(knowledge: dict, ai_text: str) -> None:
     """解析 AI 输出的自然语言 markdown，合并到 knowledge 的 business_logic。
 
@@ -405,23 +345,6 @@ def _merge_ai_markdown(knowledge: dict, ai_text: str) -> None:
                             existing["meaning"] = meaning
                         else:
                             bl["key_transforms"].append({"field": fname, "meaning": meaning})
-
-
-def _schema_table(schema, table):
-    """拼接 schema.table"""
-    s = _clean(schema)
-    t = _clean(table)
-    if s and t:
-        return f"{s}.{t}"
-    return t or s
-
-
-def _split_schema_table(full):
-    """拆分 schema.table"""
-    if "." in full:
-        parts = full.split(".", 1)
-        return parts[0].strip(), parts[1].strip()
-    return "", full.strip()
 
 
 def _layer_from_schema(schema, table=""):
@@ -1138,30 +1061,6 @@ def _format_join(join_type: str, source_table: str) -> str:
     return f"{join_type} {source_table}"
 
 
-def _build_cte_index(data_flow_steps):
-    """构建 CTE 索引用于穿透。"""
-    cte_index = {}
-    for s in data_flow_steps:
-        for cte in s.get("ctes", []):
-            cte_key = cte.get("name", "").upper()
-            alias_to_table = {}
-            for st in cte.get("source_tables", []):
-                talias = st.get("alias", "").upper()
-                tname = st.get("name", "")
-                if talias:
-                    alias_to_table[talias] = tname
-            fields_map = {}
-            for cf in cte.get("fields", []):
-                if isinstance(cf, dict) and cf.get("name"):
-                    fields_map[cf["name"].upper()] = cf
-            cte_index[cte_key] = {
-                "alias_to_table": alias_to_table,
-                "fields_map": fields_map,
-                "source_tables": cte.get("source_tables", []),
-            }
-    return cte_index
-
-
 def _build_penetration_chain(lineages, cte_index, cte_names_upper, visited=None, depth=0):
     """构建字段穿透血缘链（用于详情面板展示）。
 
@@ -1651,61 +1550,23 @@ def generate_mapping(knowledge, output_dir):
         print("  错误: 缺少 openpyxl，请 pip install openpyxl", file=sys.stderr)
         return False
 
-    topo = knowledge.get("topology", {})
-    df = knowledge.get("data_flow", {})
-    fm = knowledge.get("field_mappings", {})
-    bl = knowledge.get("business_logic", {})
-
-    steps_list = topo.get("steps", [])
-    data_flow_steps = df.get("steps", [])
-    fields_list = fm.get("fields", [])
-    tables_info = df.get("tables", [])
-
-    # ── 构建 CTE 字典：{CTE名(UPPER): {source_tables, fields_map}} ──
-    cte_index = {}
-    cte_names_upper = set()
-    for s in data_flow_steps:
-        for cte in s.get("ctes", []):
-            cte_key = cte.get("name", "").upper()
-            cte_names_upper.add(cte_key)
-            src_tables = cte.get("source_tables", [])
-            # 构建 alias → 物理表名 的映射
-            alias_to_table = {}
-            for st in src_tables:
-                talias = st.get("alias", "").upper()
-                tname = st.get("name", "")
-                if talias:
-                    alias_to_table[talias] = tname
-            # 构建 field_name → source_fields 的映射
-            fields_map = {}
-            for cf in cte.get("fields", []):
-                if isinstance(cf, dict) and cf.get("name"):
-                    fields_map[cf["name"].upper()] = cf
-            cte_index[cte_key] = {
-                "alias_to_table": alias_to_table,
-                "fields_map": fields_map,
-                "source_tables": src_tables,
-            }
-
-    # ── 构建 target table 列表（用于过滤，归一化避免大小写漏匹配）──
-    target_tables_set = set()
-    for s in steps_list:
-        tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
-        target_tables_set.add(_norm(tf))
+    # ── 视图上下文：所有口径唯一定义在 viewmodel.ViewContext ──
+    ctx = build_context(knowledge)
+    steps_list = ctx.steps_list
+    data_flow_steps = ctx.data_flow_steps
 
     wb = Workbook()
 
     # DDL 元数据（字段类型+中文名）
-    meta = knowledge.get("meta", {})
-    ddl_types = meta.get("target_field_types", {})
-    ddl_comments = meta.get("target_field_comments", {})
+    ddl_types = ctx.meta.get("target_field_types", {})
+    ddl_comments = ctx.meta.get("target_field_comments", {})
 
     # ════════════════════════════════════════════════════════════
     # Sheet 1: 实体级 mapping — 物理源表 → 目标表
     # ════════════════════════════════════════════════════════════
     ws1 = wb.active
     ws1.title = "实体级mapping"
-    # 源表别名放在源表表名后面
+    # 源表别名放在源表物理表名后面
     headers1 = [
         "源表schema", "源表物理表名", "源表别名", "源表中文名",
         "目标表schema", "目标表中文名", "目标表物理表名",
@@ -1713,126 +1574,69 @@ def generate_mapping(knowledge, output_dir):
     ]
     ws1.append(headers1)
 
-    # 目标表 schema/table 都从 exec_sequence 最大的步骤取（统一口径）
-    target_schema = ""
-    target_table = ""
-    if steps_list:
-        _max_seq = max(s.get("exec_sequence", 0) for s in steps_list)
-        _max_steps = [s for s in steps_list if s.get("exec_sequence", 0) == _max_seq]
-        if _max_steps:
-            target_schema = _max_steps[0].get("target_schema", "")
-            target_table = _max_steps[0].get("target_table", "")
-    target_cn = bl.get("summary", "").split("，")[0] if bl.get("summary") else target_table
+    # 目标表三件套 + 中文名（统一口径：见 viewmodel.ViewContext）
+    target_schema = ctx.target_schema
+    target_table = ctx.target_table
+    target_cn = ctx.target_cn
 
-    # 收集所有物理源表（含 CTE/子查询内部物理表），排除假名、CTE 名和目标表自身
-    def _join_type_label(jt, join_cond):
-        """把 join_type 翻译成友好关联描述"""
-        if jt == "FROM":
-            return "主表"
-        if jt == "FROM_SUBQUERY_MAIN":
-            return "子查询内部主表"
-        if jt == "FROM_SUBQUERY":
-            return "子查询内部从表"
-        if jt == "JOIN_SUBQUERY_INNER":
-            return "JOIN子查询内部从表"
-        if jt == "JOIN_SUBQUERY":
-            return "JOIN子查询"
-        return f"{jt} ON {join_cond}" if join_cond else jt
-
-    # 源表去重：seen_global（string key）跨步骤+跨段全局去重，
-    # seen_branches（tuple key）UNION 分支内去重。两者分离避免 key 类型混用。
-    seen_global = set()
-    seen_branches = set()
+    # 实体级源表清单（统一口径产出：UNION 分支/主查询 JOIN/CTE 内部，中间表过滤）
+    entity_sources = ctx.entity_source_tables()
     entity_rows = []
-    for s in steps_list:
-        sid = s["step_id"]
-        df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
-        joins = df_step.get("joins", [])
-        ctes = df_step.get("ctes", [])
-        ub_list = df_step.get("union_branches", [])
-        has_union = len(ub_list) >= 1
+    where_attached_step = None  # WHERE 限定每个步骤只附一次（放该步骤首个源表行备注）
+    for es in entity_sources:
+        if es.origin == "main":
+            relation = join_type_label(es.join_type, es.rewritten_condition)
+            if es.transfer_note:
+                relation += es.transfer_note
+            where_clause = ctx.step_where(es.step_id)
+            remark = where_clause if where_attached_step != es.step_id and where_clause else ""
+            if remark:
+                where_attached_step = es.step_id
+            entity_rows.append([
+                es.schema, es.table, es.alias, "",
+                target_schema, target_cn, target_table,
+                relation, remark, "", "", "",
+            ])
+        elif es.origin.startswith("union:"):
+            bidx = es.origin.split(":", 1)[1]
+            relation = join_type_label(es.join_type, es.join_condition)
+            entity_rows.append([
+                es.schema, es.table, es.alias, "",
+                target_schema, target_cn, target_table,
+                relation, "", "", f"分支{bidx}", "",
+            ])
+        else:  # cte:NAME — 条件列与 SDD 3表关联同源（viewmodel 口径）
+            cte_name = es.origin.split(":", 1)[1]
+            jt = es.join_type or "FROM"
+            is_cte_main = (jt == "FROM")
+            relation = f"CTE {cte_name} 主表" if is_cte_main else f"CTE {cte_name} 内部 {jt}"
+            # 条件 = CTE 内部 JOIN 的 ON（非主表行）/ CTE 的 WHERE 限定（主表行）/
+            # 主查询 JOIN 该 CTE 的 ON + 预处理链（该 CTE 被主查询直接引用时）
+            cond = es.join_condition or ""
+            cte_def = ctx.cte_defs.get(cte_name.lower(), {})
+            if is_cte_main:
+                cw = cte_def.get("where_clause", "")
+                if cw:
+                    cond = (cond + "；" if cond else "") + cw
+                # 主查询对 CTE 的引用（ON + 预处理原文链）挂在 CTE 主物理表行上
+                for cj in ctx.df_step(es.step_id).get("cte_joins", []):
+                    if cj.get("name", "").lower() == cte_name.lower():
+                        if cj.get("join_condition"):
+                            cond = (cond + "；" if cond else "") + \
+                                f"{cj.get('join_type', 'JOIN')} {cte_name}({cj.get('alias', '')}) ON {cj['join_condition']}"
+                        chain = ctx.cte_chain_sqls(cte_name)
+                        if chain:
+                            cond += "\n预处理（依次执行）:\n" + "\n".join(
+                                f"[CTE {c['name']}] {c['raw_sql']}" for c in chain if c["raw_sql"])
+                        break
+            full_relation = f"{relation}；{cond}" if cond else relation
+            entity_rows.append([
+                es.schema, es.table, es.alias, "",
+                target_schema, target_cn, target_table,
+                full_relation, "", "", "", "",
+            ])
 
-        if has_union:
-            # UNION 步骤：按分支收集源表（带分支归属）
-            for b in ub_list:
-                bidx = b.get("branch_index", 0)
-                for j in b.get("source_tables", []):
-                    src_full = j.get("source_table", "")
-                    if not src_full or src_full.startswith("(subquery:"):
-                        continue
-                    if _norm(src_full) in target_tables_set:
-                        continue
-                    if src_full.upper() in cte_names_upper:
-                        continue
-                    # 同表在不同分支都显示（分支+表 做去重 key）
-                    dedup_key = (bidx, _norm(src_full))
-                    if dedup_key in seen_branches:
-                        continue
-                    seen_branches.add(dedup_key)
-                    seen_global.add(_norm(src_full))
-                    sch, tbl = _split_schema_table(src_full)
-                    relation = _join_type_label(j.get("join_type", ""), j.get("join_condition", ""))
-                    entity_rows.append([
-                        sch, tbl, j.get("alias", ""), "",
-                        target_schema, target_cn, target_table,
-                        relation, "", "", f"分支{bidx}", "",
-                    ])
-        else:
-            # 非 UNION：主查询 JOIN（物理表），过滤子查询假名和中间表
-            where_clause = (df_step.get("where_clause", "") or "").replace("WHERE ", "")
-            # 本步骤的别名映射 + 关联键追溯（用于 ON 条件中间表别名替换）
-            step_alias_map = {}
-            for j in joins:
-                if j.get("alias") and j.get("source_table"):
-                    step_alias_map[j["alias"].upper()] = j["source_table"]
-            step_jkl = df_step.get("join_key_lineage", {})
-            for j in joins:
-                src_full = j.get("source_table", "")
-                if not src_full or src_full.startswith("(subquery:"):
-                    continue
-                # 过滤中间表（实体级只显示物理源表，中间表不出现）
-                if _is_intermediate_tbl(src_full):
-                    continue
-                if _norm(src_full) in seen_global or _norm(src_full) in target_tables_set:
-                    continue
-                if src_full.upper() in cte_names_upper:
-                    continue
-                seen_global.add(_norm(src_full))
-                sch, tbl = _split_schema_table(src_full)
-                # ON 条件里的中间表别名替换为物理源表
-                raw_cond = j.get("join_condition", "")
-                rewritten_cond, transfer_note = _resolve_on_condition_aliases(
-                    raw_cond, step_alias_map, step_jkl)
-                relation = _join_type_label(j.get("join_type", ""), rewritten_cond)
-                if transfer_note:
-                    relation += transfer_note
-                # WHERE 条件放在备注列（只有第一个源表行放，避免重复）
-                remark = where_clause if not entity_rows or not entity_rows[-1][8] else ""
-                entity_rows.append([
-                    sch, tbl, j.get("alias", ""), "",
-                    target_schema, target_cn, target_table,
-                    relation, remark, "", "", "",
-                ])
-
-        # CTE 内部物理表（UNION 和非 UNION 都可能有 CTE）
-        for cte in ctes:
-            for st in cte.get("source_tables", []):
-                tname = st.get("name", "")
-                if not tname or _norm(tname) in seen_global or _norm(tname) in target_tables_set:
-                    continue
-                if tname.upper() in cte_names_upper:
-                    continue
-                seen_global.add(_norm(tname))
-                sch, tbl = _split_schema_table(tname)
-                talias = st.get("alias", "")
-                jt = st.get("join_type", "FROM")
-                relation = f"CTE {cte['name']} 内部 {jt}" if jt != "FROM" else f"CTE {cte['name']} 主表"
-                entity_rows.append([
-                    sch, tbl, talias, "",
-                    target_schema, target_cn, target_table,
-                    relation, "", "", "", "",
-                ])
-
+    # （源表收集/去重/过滤口径统一在 viewmodel.entity_source_tables）
     for row in entity_rows:
         ws1.append(row)
 
@@ -1848,56 +1652,8 @@ def generate_mapping(knowledge, output_dir):
     ]
     ws2.append(headers2)
 
-    # 过滤视图步骤
-    def _is_view_step(step_id: str) -> bool:
-        df_step = next((d for d in data_flow_steps if d.get("step_id") == step_id), {})
-        raw_sql = (df_step.get("raw_sql", "") or "").upper()
-        if "CREATE VIEW" in raw_sql or "CREATE OR REPLACE VIEW" in raw_sql:
-            return True
-        return False
-
-    # 构建 step_id → scenario_name 映射
-    step_scenario = {}
-    for s in steps_list:
-        sid = s.get("step_id", "")
-        step_scenario[sid] = s.get("scenario_name", "")
-
-    # 字段按场景分组，同场景内字段去重（优先保留加工版本）
-    # 不同场景可以有相同字段名（各自独立映射）
-    scenario_fields: dict[str, list] = {}  # {scenario: [fields]}
-    seen_in_scenario: dict[str, set] = {}   # {scenario: {field_names}}
-
-    for f in fields_list:
-        fname = f.get("target_field", "")
-        step_id = f.get("producing_step", "")
-        if _is_view_step(step_id) or not fname:
-            continue
-
-        # 跳过中间表步骤的字段（只展示最终目标表，中间表靠 physical_source 穿透体现）
-        step_info = next((s for s in steps_list if s.get("step_id") == step_id), {})
-        step_target = step_info.get("target_table_full", "") or step_info.get("target_table", "")
-        if _is_intermediate_tbl(step_target):
-            continue
-
-        scenario = step_scenario.get(step_id, "默认场景")
-        if scenario not in scenario_fields:
-            scenario_fields[scenario] = []
-            seen_in_scenario[scenario] = set()
-
-        # 同场景内去重
-        if fname in seen_in_scenario[scenario]:
-            # 找到已有的，优先保留加工版本
-            for i, existing in enumerate(scenario_fields[scenario]):
-                if existing.get("target_field") == fname:
-                    existing_tt = existing.get("transform_type", "expression")
-                    new_tt = f.get("transform_type", "expression")
-                    priority = TRANSFORM_PRIORITY
-                    if priority.get(new_tt, 0) > priority.get(existing_tt, 0):
-                        scenario_fields[scenario][i] = f
-                    break
-        else:
-            seen_in_scenario[scenario].add(fname)
-            scenario_fields[scenario].append(f)
+    # 字段按场景分组，同场景内字段去重（优先保留加工版本）— 口径在 viewmodel.final_fields
+    scenario_fields = ctx.final_fields(group_by_scenario=True)
 
     # 按场景顺序输出
     for scenario, sc_fields in scenario_fields.items():
@@ -1912,11 +1668,8 @@ def generate_mapping(knowledge, output_dir):
             field_cn = f.get("field_comment", "") or ddl_comments.get(target_field_name.lower(), "")
             field_type = f.get("field_type", "") or ddl_types.get(target_field_name.lower(), "")
 
-            # 优先用跨步骤穿透的 physical_source（追到物理源表），没有则回退 CTE 穿透
-            phys_sources = f.get("physical_source", [])
-            if not phys_sources:
-                lineages = f.get("lineage", [])
-                phys_sources = _resolve_physical_sources(lineages, cte_index, cte_names_upper, set())
+            # 字段物理来源（physical_source 优先 + 递归 CTE 穿透回退）— viewmodel 统一
+            phys_sources = ctx.resolve_field_sources(f)
 
             if not phys_sources:
                 ws2.append([
@@ -1988,40 +1741,18 @@ def generate_sdd(knowledge, output_dir):
         print("  错误: 缺少 openpyxl，请 pip install openpyxl", file=sys.stderr)
         return False
 
-    topo = knowledge.get("topology", {})
-    df = knowledge.get("data_flow", {})
-    fm = knowledge.get("field_mappings", {})
-    meta = knowledge.get("meta", {})
+    # ── 视图上下文：所有口径唯一定义在 viewmodel.ViewContext ──
+    ctx = build_context(knowledge)
+    steps_list = ctx.steps_list
+    data_flow_steps = ctx.data_flow_steps
+    ddl_types = ctx.meta.get("target_field_types", {})
+    ddl_comments = ctx.meta.get("target_field_comments", {})
 
-    steps_list = topo.get("steps", [])
-    data_flow_steps = df.get("steps", [])
-    fields_list = fm.get("fields", [])
-    ddl_types = meta.get("target_field_types", {})
-    ddl_comments = meta.get("target_field_comments", {})
-
-    # ── CTE 索引（复用 _build_cte_index，穿透属性级字段用）──
-    cte_index = _build_cte_index(data_flow_steps)
-    cte_names_upper = set(cte_index.keys())
-
-    # ── 目标表集合（过滤用，归一化避免大小写漏匹配）──
-    target_tables_set = set()
-    for s in steps_list:
-        tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
-        target_tables_set.add(_norm(tf))
-
-    # 目标表 schema/table：取 exec_sequence 最大的步骤（最终目标表）
-    target_schema = ""
-    target_table = meta.get("target_table", "")
-    if steps_list:
-        _max_seq = max(s.get("exec_sequence", 0) for s in steps_list)
-        _max_steps = [s for s in steps_list if s.get("exec_sequence", 0) == _max_seq]
-        if _max_steps:
-            target_schema = _max_steps[0].get("target_schema", "")
-            target_table = _max_steps[0].get("target_table", "") or target_table
-    target_table_full = _schema_table(target_schema, target_table)
-    # 资产中文名只取 DDL 表级注释（COMMENT ON TABLE），拿不到则留空（不回退英文表名）
-    target_cn = meta.get("table_comment", "") or ""
-    dialect = meta.get("dialect", "")
+    target_schema = ctx.target_schema
+    target_table = ctx.target_table
+    target_table_full = ctx.target_table_full
+    target_cn = ctx.target_cn
+    dialect = ctx.meta.get("dialect", "")
 
     # ════════════════════════════════════════════════════════════
     # 公共：表头样式（复用 field_search.py 的蓝色表头先例）
@@ -2084,46 +1815,13 @@ def generate_sdd(knowledge, output_dir):
     ]
     _style_header(ws2, headers2)
 
-    # 收集物理源表（复用 generate_mapping 实体级逻辑：遍历 joins/ctes/union_branches，
-    # 排除中间表/CTE 名/目标表自身，全局去重）
-    seen_sources = set()
-    for s in steps_list:
-        sid = s["step_id"]
-        df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
-        joins = df_step.get("joins", [])
-        ctes = df_step.get("ctes", [])
-        ub_list = df_step.get("union_branches", [])
-
-        def _collect_src(src_full):
-            """收集一个物理源表（去重+过滤）。"""
-            if not src_full or src_full.startswith("(subquery:"):
-                return
-            if _is_intermediate_tbl(src_full):
-                return
-            if _norm(src_full) in target_tables_set:
-                return
-            if src_full.upper() in cte_names_upper:
-                return
-            if _norm(src_full) in seen_sources:
-                return
-            seen_sources.add(_norm(src_full))
-            sch, tbl = _split_schema_table(src_full)
-            # 源系统：用 schema 大写作为系统标识
-            src_system = sch.upper() if sch else ""
-            # 源表：只填表名（数据库类型/数据库/schema 拿不到，按模板格式不强行编造）
-            ws2.append([src_system, tbl, "", "", "", "", "", "", "", "", "", "", ""])
-
-        # 主查询 JOIN 的物理表
-        for j in joins:
-            _collect_src(j.get("source_table", ""))
-        # UNION 分支内的物理表
-        for b in ub_list:
-            for j in b.get("source_tables", []):
-                _collect_src(j.get("source_table", ""))
-        # CTE 内部物理表
-        for cte in ctes:
-            for st in cte.get("source_tables", []):
-                _collect_src(st.get("name", ""))
+    # 收集物理源表（口径统一在 viewmodel.entity_source_tables：
+    # UNION 分支/主查询 JOIN/CTE 内部，排除中间表/CTE 名/目标表自身，全局去重）
+    for es in ctx.entity_source_tables():
+        # 源系统：用 schema 大写作为系统标识
+        src_system = es.schema.upper() if es.schema else ""
+        # 源表：只填表名（数据库类型/数据库/schema 拿不到，按模板格式不强行编造）
+        ws2.append([src_system, es.table, "", "", "", "", "", "", "", "", "", "", ""])
 
     _set_widths(ws2, [12, 42, 28, 18, 16, 12, 22, 18, 18, 18, 18, 14, 14])
 
@@ -2134,42 +1832,25 @@ def generate_sdd(knowledge, output_dir):
     headers3 = ["*左表", "左表别名", "*右表", "右表别名", "*关联方式", "*关联条件&限制条件"]
     _style_header(ws3, headers3)
 
-    for s in steps_list:
-        sid = s["step_id"]
-        df_step = next((d for d in data_flow_steps if d.get("step_id") == sid), {})
-        joins = df_step.get("joins", [])
-        if len(joins) < 2:
-            # 单表 FROM 无关联，跳过
-            continue
-        where_clause = (df_step.get("where_clause", "") or "").replace("WHERE ", "")
-
-        # 本步骤别名映射 + 关联键追溯（用于 ON 条件中间表别名替换）
-        step_alias_map = {}
-        for j in joins:
-            if j.get("alias") and j.get("source_table"):
-                step_alias_map[j["alias"].upper()] = j["source_table"]
-        step_jkl = df_step.get("join_key_lineage", {})
-
-        main_join = joins[0]
-        left_table = main_join.get("source_table", "")
-        left_alias = main_join.get("alias", "")
-        # 首个右表的限制条件附 WHERE（避免重复）
-        where_attached = False
-        for j in joins[1:]:
-            right_table = j.get("source_table", "")
-            right_alias = j.get("alias", "")
-            join_type = j.get("join_type", "")
-            raw_cond = j.get("join_condition", "")
-            rewritten_cond, transfer_note = _resolve_on_condition_aliases(
-                raw_cond, step_alias_map, step_jkl)
+    # 逻辑关联清单（统一口径 viewmodel.logic_join_rows）：
+    # 左右表为真实物理表，CTE 坍缩为「预处理」属性（查询体原文链），
+    # 有多少个关联就有多少行 —— 拿本表可解释回原 SQL。
+    # ON 条件里的中间表别名改写（物理表关联行）仍走 join_key_lineage。
+    for row in ctx.logic_join_rows():
+        condition = row.on_condition
+        if row.origin == "main":
+            df_step = ctx.df_step(row.step_id)
+            step_alias_map = ctx.step_alias_map(row.step_id)
+            step_jkl = df_step.get("join_key_lineage", {})
+            rewritten, transfer_note = _resolve_on_condition_aliases(
+                row.on_condition, step_alias_map, step_jkl)
             if transfer_note:
-                rewritten_cond = rewritten_cond + transfer_note
-            # 限制条件：ON 条件 + WHERE（仅附一次）
-            condition = rewritten_cond
-            if where_clause and not where_attached:
-                condition = (condition + "；" if condition else "") + f"WHERE {where_clause}"
-                where_attached = True
-            ws3.append([left_table, left_alias, right_table, right_alias, join_type, condition])
+                rewritten = rewritten + transfer_note
+            condition = rewritten
+        if row.preprocess:
+            condition = (condition + "\n" if condition else "") + row.preprocess
+        ws3.append([row.left_table, row.left_alias, row.right_table, row.right_alias,
+                    row.join_type, condition])
 
     _set_widths(ws3, [28, 12, 28, 12, 16, 50])
 
@@ -2190,47 +1871,16 @@ def generate_sdd(knowledge, output_dir):
     ]
     _style_header(ws4, headers4)
 
-    def _is_view_step(step_id):
-        df_step = next((d for d in data_flow_steps if d.get("step_id") == step_id), {})
-        raw_sql = (df_step.get("raw_sql", "") or "").upper()
-        return "CREATE VIEW" in raw_sql or "CREATE OR REPLACE VIEW" in raw_sql
-
-    # 按 producing_step 去重目标字段（同字段多步骤只取最终，优先加工版本）
-    scenario_fields = []
-    seen_fields = set()
-    for f in fields_list:
-        fname = f.get("target_field", "")
-        step_id = f.get("producing_step", "")
-        if _is_view_step(step_id) or not fname:
-            continue
-        # 跳过中间表步骤的字段（只展示最终目标表）
-        step_info = next((s for s in steps_list if s.get("step_id") == step_id), {})
-        step_target = step_info.get("target_table_full", "") or step_info.get("target_table", "")
-        if _is_intermediate_tbl(step_target):
-            continue
-        if fname in seen_fields:
-            # 优先保留加工版本
-            for i, existing in enumerate(scenario_fields):
-                if existing.get("target_field") == fname:
-                    existing_tt = existing.get("transform_type", "expression")
-                    new_tt = f.get("transform_type", "expression")
-                    if TRANSFORM_PRIORITY.get(new_tt, 0) > TRANSFORM_PRIORITY.get(existing_tt, 0):
-                        scenario_fields[i] = f
-                    break
-        else:
-            seen_fields.add(fname)
-            scenario_fields.append(f)
+    # 终态目标字段（全局去重，优先加工版本）— 口径在 viewmodel.final_fields
+    scenario_fields = ctx.final_fields(group_by_scenario=False)
 
     for f in scenario_fields:
         tt = f.get("transform_type", "expression")
         type_label = "直取字段" if tt == "direct" else "加工字段"
         target_field_name = f.get("target_field", "")
 
-        # 优先用跨步骤穿透的 physical_source，没有则回退 CTE 穿透
-        phys_sources = f.get("physical_source", [])
-        if not phys_sources:
-            lineages = f.get("lineage", [])
-            phys_sources = _resolve_physical_sources(lineages, cte_index, cte_names_upper, set())
+        # 字段物理来源（physical_source 优先 + 递归 CTE 穿透回退）— viewmodel 统一
+        phys_sources = ctx.resolve_field_sources(f)
 
         if not phys_sources:
             # 无来源（常量/赋值）：源表/源字段留空
@@ -2267,117 +1917,26 @@ def generate_sdd(knowledge, output_dir):
     return True
 
 
-def _resolve_physical_sources(lineages, cte_index, cte_names_upper, visited, depth=0):
-    """穿透 CTE 到物理源表字段。
-
-    lineages: field.lineage 列表
-    cte_index: {CTE名(UPPER): {alias_to_table, fields_map, source_tables}}
-    cte_names_upper: 所有 CTE 名的大写集合
-    visited: 已访问的 CTE 名（防循环）
-    depth: 递归深度（最大 10）
-
-    返回: [{schema, table, field, alias, raw_sql}, ...]
-    """
-    if depth > 10 or not lineages:
-        return []
-
-    results = []
-    for l in lineages:
-        src_table = l.get("source_table", "")
-        src_field = l.get("source_field", "")
-        cte_name = l.get("cte_name", "")
-        raw_sql = l.get("raw_sql", "")
-
-        if cte_name and cte_name.upper() in cte_index:
-            # 来源是 CTE — 递归穿透
-            cte_info = cte_index[cte_name.upper()]
-            if cte_name.upper() in visited:
-                continue
-            visited.add(cte_name.upper())
-
-            cte_field_info = cte_info["fields_map"].get(src_field.upper(), {})
-            cte_source_fields = cte_field_info.get("source_fields", l.get("cte_source_fields", []))
-            cte_alias_to_table = cte_info["alias_to_table"]
-
-            for csf in cte_source_fields:
-                csf_alias = csf.get("alias", "").upper()
-                csf_field = csf.get("field", "")
-
-                # alias → 物理表
-                physical_table = cte_alias_to_table.get(csf_alias, "")
-
-                if physical_table:
-                    # 找到物理表
-                    sch, tbl = _split_schema_table(physical_table)
-                    results.append({
-                        "schema": sch,
-                        "table": tbl,
-                        "field": csf_field,
-                        "alias": csf.get("alias", ""),
-                        "raw_sql": raw_sql,
-                    })
-                elif csf_alias in cte_names_upper:
-                    # 嵌套 CTE — 递归穿透
-                    nested_cte = cte_index.get(csf_alias, {})
-                    nested_fields_map = nested_cte.get("fields_map", {})
-                    nested_field = nested_fields_map.get(csf_field.upper(), {})
-                    nested_sources = nested_field.get("source_fields", [])
-                    nested_alias_to_table = nested_cte.get("alias_to_table", {})
-                    for nsf in nested_sources:
-                        nsf_alias = nsf.get("alias", "").upper()
-                        nsf_table = nested_alias_to_table.get(nsf_alias, "")
-                        if nsf_table:
-                            sch, tbl = _split_schema_table(nsf_table)
-                            results.append({
-                                "schema": sch,
-                                "table": tbl,
-                                "field": nsf.get("field", ""),
-                                "alias": nsf.get("alias", ""),
-                                "raw_sql": raw_sql,
-                            })
-
-            visited.discard(cte_name.upper())
-        elif src_table and src_table.upper() not in cte_names_upper:
-            # 直接物理源表
-            sch, tbl = _split_schema_table(src_table)
-            results.append({
-                "schema": sch,
-                "table": tbl,
-                "field": src_field,
-                "alias": l.get("alias", ""),
-                "raw_sql": raw_sql,
-            })
-
-    return results
-
-
 # ── 视图生成: tech_design.md ────────────────────────────
 
 def generate_tech_design(knowledge, output_dir):
     """生成技术设计文档 Markdown"""
-    topo = knowledge.get("topology", {})
-    df = knowledge.get("data_flow", {})
-    fm = knowledge.get("field_mappings", {})
-    bl = knowledge.get("business_logic", {})
-    quality = knowledge.get("quality", {})
-    source = knowledge.get("source", {})
+    # ── 视图上下文：所有口径唯一定义在 viewmodel.ViewContext ──
+    ctx = build_context(knowledge)
+    bl = ctx.bl
+    quality = ctx.quality
+    source = ctx.source
 
-    steps_list = topo.get("steps", [])
-    data_flow_steps = df.get("steps", [])
-    fields_list = fm.get("fields", [])
-    sched_plan = topo.get("schedule_plan", [])
-    self_refs = topo.get("self_references", [])
+    steps_list = ctx.steps_list
+    data_flow_steps = ctx.data_flow_steps
+    fields_list = ctx.fields_list
+    sched_plan = ctx.topo.get("schedule_plan", [])
+    self_refs = ctx.topo.get("self_references", [])
 
-    # 目标表 schema/table 都从 exec_sequence 最大的步骤取（统一口径）
-    target_schema = ""
-    target_table = ""
-    if steps_list:
-        _max_seq = max(s.get("exec_sequence", 0) for s in steps_list)
-        _max_steps = [s for s in steps_list if s.get("exec_sequence", 0) == _max_seq]
-        if _max_steps:
-            target_schema = _max_steps[0].get("target_schema", "")
-            target_table = _max_steps[0].get("target_table", "")
-    target_full = _schema_table(target_schema, target_table)
+    # 目标表三件套（统一口径：见 viewmodel.ViewContext）
+    target_schema = ctx.target_schema
+    target_table = ctx.target_table
+    target_full = ctx.target_table_full
 
     lines = []
     lines.append(f"# {target_table} 技术设计文档")
@@ -2392,10 +1951,10 @@ def generate_tech_design(knowledge, output_dir):
     lines.append("| 项目 | 值 |")
     lines.append("|------|-----|")
     lines.append(f"| 目标表 | {target_full} |")
-    lines.append(f"| 中文名 | {bl.get('summary', '').split('，')[0] if bl.get('summary') else '-'} |")
+    lines.append(f"| 中文名 | {ctx.target_cn or '-'} |")
     lines.append(f"| 业务定位 | {bl.get('summary', '-')} |")
     lines.append(f"| 步骤数 | {len(steps_list)} |")
-    lines.append(f"| 源表数 | {len(df.get('tables', []))} |")
+    lines.append(f"| 源表数 | {len(ctx.df.get('tables', []))} |")
     lines.append(f"| 字段数 | {len(fields_list)} |")
     lines.append(f"| 方言 | {knowledge.get('meta', {}).get('dialect', 'dws')} |")
     lines.append("")
@@ -2445,31 +2004,11 @@ def generate_tech_design(knowledge, output_dir):
     lines.append("```mermaid")
     lines.append("flowchart LR")
 
-    # 构建 CTE 索引
-    cte_index = _build_cte_index(data_flow_steps)
-    cte_names_upper = set(cte_index.keys())
-    target_tables_set = set()
-    for s in steps_list:
-        tf = _schema_table(s.get("target_schema", ""), s.get("target_table", ""))
-        target_tables_set.add(_norm(tf))
-
-    # 收集所有物理源表（含 CTE 内部表），seen_src 存归一化名用于去重
-    all_phys_sources = []
-    seen_src = set()
-    for s in data_flow_steps:
-        # 主查询 JOIN
-        for j in s.get("joins", []):
-            src_tbl = j.get("source_table", "")
-            if src_tbl and src_tbl.upper() not in cte_names_upper and _norm(src_tbl) not in target_tables_set and _norm(src_tbl) not in seen_src:
-                seen_src.add(_norm(src_tbl))
-                all_phys_sources.append(src_tbl)
-        # CTE 内部物理表
-        for cte in s.get("ctes", []):
-            for st in cte.get("source_tables", []):
-                tname = st.get("name", "")
-                if tname and tname.upper() not in cte_names_upper and _norm(tname) not in target_tables_set and _norm(tname) not in seen_src:
-                    seen_src.add(_norm(tname))
-                    all_phys_sources.append(tname)
+    # 收集所有物理源表 — 口径统一在 viewmodel.entity_source_tables
+    # （修复：旧版不遍历 UNION 分支 → UNION 步骤的物理源表在血缘图丢失；
+    #   旧版不过滤中间表 → tmp 表混入血缘图，掩盖真实物理上游）
+    all_phys_sources = [_schema_table(es.schema, es.table)
+                        for es in ctx.entity_source_tables()]
 
     # 画物理源表 → 目标表
     target_safe = target_table.replace(".", "_")
@@ -2506,12 +2045,8 @@ def generate_tech_design(knowledge, output_dir):
         lines.append("| # | 目标字段 | 物理源表 | 物理源字段 | 转换类型 | 映射表达式 |")
         lines.append("|---|---------|---------|-----------|---------|-----------|")
         for i, f in enumerate(step_fields, 1):
-            # 优先用跨步骤穿透的 physical_source，回退到 CTE 穿透
-            phys_sources = f.get("physical_source", [])
-            if not phys_sources:
-                phys_sources = _resolve_physical_sources(
-                    f.get("lineage", []), cte_index, cte_names_upper, set()
-                )
+            # 字段物理来源（physical_source 优先 + 递归 CTE 穿透回退）— viewmodel 统一
+            phys_sources = ctx.resolve_field_sources(f)
             tt = f.get('transform_type', '')
             raw_sql = ""
             if f.get("lineage"):
@@ -2579,26 +2114,12 @@ def generate_tech_design(knowledge, output_dir):
     lines.append("")
     lines.append("| 源表 | 别名 | 关联方式 | CTE归属 | 调度任务 |")
     lines.append("|------|------|---------|---------|---------|")
-    seen_dep = set()
-    for s in data_flow_steps:
-        # 主查询 JOIN
-        for j in s.get("joins", []):
-            src = j.get("source_table", "")
-            if _norm(src) in seen_dep or src.upper() in cte_names_upper:
-                continue
-            seen_dep.add(_norm(src))
-            jt = j.get("join_type", "")
-            lines.append(f"| {src} | {j.get('alias', '-')} | {_format_join(jt, src)} | - | 待配置 |")
-        # CTE 内部物理表
-        for cte in s.get("ctes", []):
-            cte_name = cte.get("name", "")
-            for st in cte.get("source_tables", []):
-                tname = st.get("name", "")
-                if _norm(tname) in seen_dep or tname.upper() in cte_names_upper:
-                    continue
-                seen_dep.add(_norm(tname))
-                jt = st.get("join_type", "FROM")
-                lines.append(f"| {tname} | {st.get('alias', '-')} | {_format_join(jt, tname)} | {cte_name} | 待配置 |")
+    # 口径统一在 viewmodel.entity_source_tables（修复：旧版 UNION 分支上游缺失）
+    for es in ctx.entity_source_tables():
+        src_full = _schema_table(es.schema, es.table)
+        cte_owner = es.origin.split(":", 1)[1] if es.origin.startswith("cte:") else "-"
+        lines.append(
+            f"| {src_full} | {es.alias or '-'} | {_format_join(es.join_type, src_full)} | {cte_owner} | 待配置 |")
     lines.append("")
 
     # ── 9. 执行平台配置 ──
@@ -2717,11 +2238,6 @@ def main():
     _t0_usage = _t_usage.time()
     _trace_id = ""
     _parse_end_ts = None
-    try:
-        from usage import flush_queue as _flush_usage
-        _flush_usage()
-    except Exception:
-        pass
     # trace_id 在读完 knowledge 后再读（需要 target_table 推导 trace 文件名）
 
     # 读取 knowledge

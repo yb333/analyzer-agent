@@ -6,16 +6,16 @@
 设计三原则（不可破坏）：
 1. 用户不可感知 —— 无 stdout、无日志噪音；config.json 静默存在
 2. 不影响分析逻辑 —— record() 全程 try/except 吞异常；只在所有交付物落盘之后调用
-3. 无性能影响 —— CSV 写入 <10ms；HTTP POST 末尾调用、2s 超时；失败落队列补发
+3. 无性能影响 —— CSV 写入 <10ms；HTTP POST 末尾调用、0.5s 超时、进程内熔断
+   （本地连不上内网服务端时每个进程最多付一次超时代价）；队列 5MB 封顶防滚雪球
 
 数据流：
     命令结束(main 的 finally，交付物已落盘后)
        → 构建一行记录(record dict)
        → 写本地 usage.jsonl (完整存档，每行一个JSON)
-       → 同步 POST 到服务端 (超时 2s，失败静默)
-           ├ 成功 → 结束
-           └ 失败 → 追加 usage_queue.jsonl
-                      → 下次启动 flush_queue 补发 → 成功则删
+       → 同步 POST 到服务端 (超时 0.5s，失败静默)
+           ├ 成功 → 网络通，顺手 flush_queue 补发积压 → 成功则删
+           └ 失败 → 置 _NET_DOWN 熔断（本进程不再尝试网络）→ 追加 usage_queue.jsonl
 """
 
 import json
@@ -36,8 +36,19 @@ __version__ = "1.0"
 # 内网服务端默认地址（端口与参考项目一致，路径用 /api/usage 区分）
 DEFAULT_ENDPOINT = "http://10.96.160.123:3000/api/usage"
 
-# HTTP 上报超时（秒）—— LAN 内网通常 30-50ms，2s 足够兜底
-HTTP_TIMEOUT = 2.0
+# HTTP 上报超时（秒）—— LAN 内网通常 30-50ms；0.5s 兜底足够。
+# 不设 2s：本地/外网开发时（服务端不可达）每个子进程都会等满超时，
+# 走 CLI 子进程的测试会被成倍拖慢。
+HTTP_TIMEOUT = 0.5
+
+# 补发队列文件上限（字节）。超出后新失败记录直接丢弃 —— 埋点是 best-effort，
+# 队列滚雪球（曾积到 848MB）比丢数据危害大得多。
+QUEUE_MAX_BYTES = 5 * 1024 * 1024
+
+# 进程内网络熔断：_post_one 失败一次后置 True，本进程内不再尝试任何网络 IO。
+# 作用：本地开发（连不上内网服务端）时，每个 CLI 子进程最多付一次超时代价，
+# 而不是每条记录/每次补发都等满超时。
+_NET_DOWN = False
 
 # 本地存档目录（与 opencode 运行时隔离，是 analyzer-agent 自己的数据）
 USAGE_DIR = Path.home() / ".analyzer-agent"
@@ -233,8 +244,12 @@ def _post_one(row: dict, endpoint: str = None) -> bool:
     """同步 POST 一条记录到服务端，返回是否成功。
 
     用 urllib（不引入 requests 依赖）。超时 HTTP_TIMEOUT 秒。
+    失败置 _NET_DOWN（本进程内熔断，后续不再尝试网络）。
     任何异常返回 False，由调用方决定是否落队列。
     """
+    global _NET_DOWN
+    if _NET_DOWN:
+        return False
     try:
         url = endpoint or _detect_endpoint()
         payload = json.dumps(row, ensure_ascii=False).encode("utf-8")
@@ -245,13 +260,19 @@ def _post_one(row: dict, endpoint: str = None) -> bool:
         with urllib_request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             return 200 <= resp.status < 300
     except Exception:
+        _NET_DOWN = True
         return False
 
 
 def _enqueue(row: dict) -> None:
-    """失败记录追加到本地队列（每行一个 JSON）。"""
+    """失败记录追加到本地队列（每行一个 JSON）。超上限丢弃（防滚雪球）。"""
     try:
         _ensure_dir()
+        try:
+            if QUEUE_PATH.exists() and QUEUE_PATH.stat().st_size > QUEUE_MAX_BYTES:
+                return
+        except Exception:
+            pass
         with open(QUEUE_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     except Exception:
@@ -296,15 +317,21 @@ def _clear_queue() -> None:
         pass
 
 
-def flush_queue(max_attempts: int = 20) -> int:
+def flush_queue(max_attempts: int = 3) -> int:
     """补发队列里的失败记录，成功补发的从队列移除。
 
     每条最多尝试一次（按队列顺序），最多发 max_attempts 条避免启动卡太久。
+    网络失败（熔断触发）立即停止 —— 继续试下一条毫无意义，只会白等超时。
     返回成功补发条数。fire-and-forget，任何异常静默。
     """
-    if not _is_enabled():
+    if not _is_enabled() or _NET_DOWN:
         return 0
     try:
+        # 队列超限直接清空：陈年积压没有补发价值，且整读大文件会吃掉
+        # 数百 MB 内存（多 CLI 子进程并存时成倍放大）
+        if QUEUE_PATH.exists() and QUEUE_PATH.stat().st_size > QUEUE_MAX_BYTES:
+            _clear_queue()
+            return 0
         rows = _read_queue()
         if not rows:
             return 0
@@ -318,6 +345,8 @@ def flush_queue(max_attempts: int = 20) -> int:
             if _post_one(row, endpoint):
                 ok_ids.add(rid)
                 sent += 1
+            elif _NET_DOWN:
+                break  # 网络不通，继续试只会白等超时
         # 只保留未成功的（含去重）
         remaining = [r for r in rows if r.get("run_id") not in ok_ids]
         _clear_queue()
@@ -374,8 +403,12 @@ def record(data: dict) -> None:
             row["elapsed_detail"] = json.dumps(detail, ensure_ascii=False)
         # CSV 先落（本地永远有完整存档）
         _write_log(row)
-        # 同步上报（失败落队列，不抛）
-        if not _post_one(row):
+        # 同步上报（失败落队列，不抛）。补发时机：POST 成功说明网络通，
+        # 顺手补发队列积压（此时补发很快）；网络不通则熔断、零重试。
+        if _post_one(row):
+            if QUEUE_PATH.exists():
+                flush_queue()
+        else:
             _enqueue(row)
     except Exception:
         pass

@@ -277,6 +277,10 @@ class ParsedCTE:
     name: str = ""
     source_tables: list = field(default_factory=list)
     fields: list = field(default_factory=list)
+    # CTE 查询体原文（还原预处理逻辑用 — 视图层「预处理」列直接放原文，保真优先）
+    raw_sql: str = ""
+    # CTE 的 WHERE 限定（原文）
+    where_clause: str = ""
 
 
 @dataclass
@@ -288,6 +292,10 @@ class ParsedSQL:
     group_by: list = field(default_factory=list)
     having_clause: str = ""
     ctes: list = field(default_factory=list)  # list[ParsedCTE]
+    # 主查询对 CTE 的直接引用（FROM/JOIN，含 ON 条件）。这些引用被
+    # _extract_joins 有意排除（避免污染物理 source_tables），视图层
+    # 用它还原「主表如何关联各 CTE 逻辑块」。[{name, alias, join_type, join_condition}]
+    cte_joins: list = field(default_factory=list)
     raw_sql: str = ""
     clean_sql: str = ""  # 预处理后的 SQL（strip + replace_placeholders），供 build_data_blocks 复用
     parse_error: str = ""
@@ -478,6 +486,11 @@ def _is_intermediate_table(table_name: str) -> bool:
     # 去掉 schema 前缀，只判断表名部分
     short = _norm_table(table_name).split(".")[-1]
     return bool(_INTERMEDIATE_TABLE_PATTERN.search(short))
+
+
+def is_intermediate_table(table_name: str) -> bool:
+    """公开 API（batch/视图等外部模块用）。内部逻辑同 _is_intermediate_table。"""
+    return _is_intermediate_table(table_name)
 
 
 def _table_match(name1: str, name2: str) -> bool:
@@ -1011,6 +1024,8 @@ def _parse_select(tree, select_node, sqlglot_dialect: str, comment_alias_map: di
 
     # ── 提取源表和 JOIN ──
     result.source_tables = _extract_joins(tree, select_node)
+    # 主查询对 CTE 的引用（FROM/JOIN + ON）—— 被上面有意排除，单独收集供视图还原关联结构
+    result.cte_joins = _extract_cte_joins(select_node, tree)
 
     # ── 检测 FROM 子查询内部是否为 UNION（常见场景：FROM (SELECT... UNION SELECT...) t）──
     from_clause = select_node.args.get("from_")
@@ -1510,6 +1525,71 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         ))
 
     return joins
+
+
+def _extract_cte_joins(select_node, tree) -> list[dict]:
+    """主查询对 CTE 的直接引用（FROM/JOIN），含 JOIN 类型与 ON 条件。
+
+    与 _extract_joins 的排除逻辑互补：CTE 引用不进物理 source_tables，
+    但「主表 LEFT JOIN 某逻辑块 ON ...」是还原关联结构的关键信息，单独收集。
+    返回: [{name, alias, join_type, join_condition}, ...]
+    """
+    cte_names = set()
+    with_clause = tree.args.get("with_")
+    if not with_clause:
+        for child in tree.walk():
+            if child is tree:
+                continue
+            cw = child.args.get("with_") if hasattr(child, 'args') else None
+            if cw:
+                with_clause = cw
+                break
+    if with_clause:
+        for cte_node in with_clause.expressions:
+            if cte_node.alias:
+                cte_names.add(_clean_name(str(cte_node.alias)).upper())
+    if not cte_names or not select_node:
+        return []
+
+    rows = []
+
+    def _join_type_of(node):
+        kind = node.args.get("kind", "")
+        side = node.args.get("side", "")
+        if side:
+            return f"{side} JOIN".upper()
+        if kind:
+            return f"{kind} JOIN".upper()
+        return "INNER JOIN"
+
+    from_clause = select_node.args.get("from_")
+    if from_clause and isinstance(from_clause.this, exp.Table):
+        tname = ".".join(_clean_name(p.name) for p in from_clause.this.parts).lower()
+        short = tname.split(".")[-1] if "." in tname else tname
+        if short.upper() in cte_names:
+            talias = _clean_name(from_clause.this.alias).lower() if from_clause.this.alias else ""
+            rows.append({"name": short, "alias": talias or short,
+                         "join_type": "FROM", "join_condition": ""})
+
+    for join_node in select_node.args.get("joins", []):
+        join_expr = join_node.this
+        table = (join_expr if isinstance(join_expr, exp.Table)
+                 else (join_expr.find(exp.Table) if join_expr else None))
+        if not table:
+            continue
+        tname = ".".join(_clean_name(p.name) for p in table.parts).lower()
+        short = tname.split(".")[-1] if "." in tname else tname
+        if short.upper() not in cte_names:
+            continue
+        alias = _clean_name(table.alias).lower() if table.alias else ""
+        on_node = join_node.args.get("on")
+        rows.append({
+            "name": short,
+            "alias": alias or short,
+            "join_type": _join_type_of(join_node),
+            "join_condition": on_node.sql(dialect="oracle") if on_node else "",
+        })
+    return rows
 
 
 def _extract_comment_aliases(sql: str) -> dict[int, str]:
@@ -2315,7 +2395,24 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
                         jt = f"{jk} JOIN".upper()
                     else:
                         jt = "INNER JOIN"
-                    cte_tables.append({"name": tname, "alias": talias, "join_type": jt})
+                    # CTE 内部 JOIN 的 ON 条件（还原内部关联结构用）
+                    cj_on = cte_join.args.get("on")
+                    cte_tables.append({
+                        "name": tname, "alias": talias, "join_type": jt,
+                        "join_condition": cj_on.sql(dialect=sqlglot_dialect) if cj_on else "",
+                    })
+
+        # CTE 的 WHERE 限定（各分支非空 where 原文，多分支用 ；拼接）
+        cte_wheres = []
+        for branch_select in all_branch_selects:
+            if not branch_select:
+                continue
+            w = branch_select.args.get("where")
+            if w is not None:
+                w_sql = w.sql(dialect=sqlglot_dialect).strip()
+                if w_sql and w_sql not in cte_wheres:
+                    cte_wheres.append(w_sql)
+        cte_where_clause = "；".join(cte_wheres)
         if not cte_tables and cte_query:
             # fallback: find_all（覆盖非标准结构）
             for table in cte_query.find_all(exp.Table):
@@ -2327,6 +2424,36 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
         # 字段从第一分支取（UNION 按位置对齐，取任一分支即可）
         cte_fields = []
         cte_select_for_fields = cte_select
+        # CTE 内 FROM 子查询的输出列映射：{子查询别名(UPPER): {输出列(lower): [引用...]}}
+        # 字段 source_fields 里的子查询别名（如 r.amount）据此替换为子查询内部引用
+        # （bo.amount），穿透链才能继续走到物理表。
+        sq_alias_map = {}
+        _fs_from = cte_select_for_fields.args.get("from_") if cte_select_for_fields else None
+        if _fs_from and isinstance(_fs_from.this, exp.Subquery):
+            _sub = _fs_from.this
+            _salias = _clean_name(_sub.alias).lower() if _sub.alias else ""
+            _inner = _sub.this if isinstance(_sub.this, exp.Select) else None
+            if _salias and _inner:
+                _colmap = {}
+                for _proj in _inner.expressions:
+                    if isinstance(_proj, exp.Alias):
+                        _out = _clean_name(_proj.alias)
+                    elif isinstance(_proj, exp.Column):
+                        _out = _clean_name(_proj.name)
+                    else:
+                        continue
+                    _refs = []
+                    for _c in _proj.walk():
+                        if isinstance(_c, exp.Column):
+                            _refs.append({
+                                "alias": _clean_name(_c.table).lower() if _c.table else "",
+                                "field": _clean_name(_c.name),
+                            })
+                    if _refs:
+                        _colmap[_out.lower()] = _refs
+                if _colmap:
+                    sq_alias_map[_salias.upper()] = _colmap
+
         if cte_select_for_fields:
             for proj in cte_select_for_fields.expressions:
                 proj_sql = proj.sql(dialect=sqlglot_dialect)
@@ -2344,6 +2471,15 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
                     if isinstance(col, exp.Column):
                         col_name = _clean_name(col.name)
                         tbl_alias = _clean_name(col.table).lower() if col.table else ""
+                        # 子查询别名穿透：r.amount → 子查询内部引用（bo.amount 等）
+                        _sq_cols = sq_alias_map.get(tbl_alias.upper())
+                        if _sq_cols is not None:
+                            for ref in _sq_cols.get(col_name.lower(), []):
+                                key = f"sq:{ref['alias']}.{ref['field']}"
+                                if key not in seen:
+                                    seen.add(key)
+                                    source_fields.append(dict(ref))
+                            continue
                         key = f"{tbl_alias}.{col_name}"
                         if key not in seen:
                             seen.add(key)
@@ -2360,6 +2496,8 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
             name=cte_name,
             source_tables=cte_tables,
             fields=cte_fields,
+            raw_sql=cte_query.sql(dialect=sqlglot_dialect) if cte_query else "",
+            where_clause=cte_where_clause,
         ))
 
     return ctes
@@ -3427,7 +3565,9 @@ def generate_step_description(rule: RawRule, parsed, scenarios: list[dict], all_
         if interesting:
             type_map = {"pivot": "行转列", "aggregate": "聚合", "window": "窗口函数",
                        "case_when": "条件加工", "fallback": "NULL兜底"}
-            desc_parts = [type_map.get(t, t) for t in interesting]
+            # sorted：set 迭代顺序受字符串哈希随机化影响，跨进程不稳定
+            # （同一输入两次分析，HTML 里加工类型列表会顺序翻转）
+            desc_parts = [type_map.get(t, t) for t in sorted(interesting)]
             parts.append("加工: " + ", ".join(desc_parts))
 
     logic = "，".join(parts) if parts else "直接加载"
@@ -4515,9 +4655,13 @@ def build_data_flow(
                     "name": c.name,
                     "source_tables": c.source_tables,
                     "fields": c.fields,
+                    "raw_sql": c.raw_sql,
+                    "where_clause": c.where_clause,
                 }
                 for c in parsed.ctes
             ],
+            # 主查询对 CTE 的引用（含 ON）— 视图层还原关联结构用
+            "cte_joins": list(parsed.cte_joins or []),
             "raw_sql": parsed.raw_sql,
             "join_usage": parsed.join_usage,
             "where_usage": parsed.where_usage,
@@ -4549,6 +4693,50 @@ def build_data_flow(
         "tables": all_tables,
         "steps": steps_detail,
     }
+
+
+def _expand_cte_field(ctes: list, cte_name: str, field_name: str, depth: int = 0) -> list:
+    """递归展开嵌套 CTE 的字段来源，直到物理表（或最深层定义）。
+
+    场景：WITH cte_outer AS (SELECT c.pcode FROM cte_inner c),
+               cte_inner AS (SELECT b.pcode FROM ods.t b)
+          cte_outer.pcode 的真源是 ods.t.pcode。
+
+    返回: [{"alias", "field", "table", "transform", "raw_sql"}, ...]
+    ctes: ParsedSQL.ctes（同一步骤 SQL 内的 CTE 定义，跨 CTE 引用只可能在其中）
+    """
+    if depth > 10 or not ctes or not field_name:
+        return []
+    cte = next((c for c in ctes if c.name.upper() == (cte_name or "").upper()), None)
+    if not cte:
+        return []
+    fd = next((f for f in (cte.fields or [])
+               if str(f.get("name", "")).upper() == field_name.upper()), None)
+    if not fd:
+        return []
+    alias_map = {}
+    for st in (cte.source_tables or []):
+        if st.get("alias"):
+            alias_map[st["alias"].upper()] = st.get("name", st["alias"])
+    out = []
+    for nsf in (fd.get("source_fields") or []):
+        ns_alias = nsf.get("alias", "")
+        ns_field = nsf.get("field", "")
+        if not ns_field:
+            continue
+        ns_table = alias_map.get(ns_alias.upper(), ns_alias)
+        if any(c.name.upper() == ns_table.upper() for c in ctes):
+            # 引用的仍是 CTE（更深嵌套）→ 递归展开
+            out.extend(_expand_cte_field(ctes, ns_table, ns_field, depth + 1))
+        else:
+            out.append({
+                "alias": ns_alias,
+                "field": ns_field,
+                "table": ns_table,
+                "transform": fd.get("transform_type", ""),
+                "raw_sql": fd.get("expression", ""),
+            })
+    return out
 
 
 def build_join_key_lineage(
@@ -4742,87 +4930,25 @@ def build_join_key_lineage(
         if j.get("alias") and j.get("source_table"):
             producing_alias_map[j["alias"].upper()] = j["source_table"]
 
-    # 5. 对每个 lineage 来源，递归追溯
-    for l in step_lineages:
-        src_field = l.get("source_field", "")
-        src_table_alias = l.get("source_table", "")
-        transform = l.get("transform", "direct")
-        raw_sql = l.get("raw_sql", "")
+    # lookup_step 的解析结果（CTE 定义在此，供嵌套 CTE 判定与展开用）
+    lk_parsed = parsed_map.get(_STEP_TO_RULE_CACHE.get(lookup_step, ""))
 
-        # 解析 src_table_alias（用产出步骤的 alias 映射）
-        src_resolved = producing_alias_map.get(src_table_alias.upper(), src_table_alias)
-        src_norm = _norm_table(src_resolved)
+    def _make_source_child(src_field, src_resolved, src_table_alias, transform, raw_sql):
+        """单来源 → 追溯子节点（物理判定 + 子查询穿透 + 中间表跨步骤递归）。
 
-        # CTE 穿透：如果 lineage 带 cte_source_fields，说明字段来自 CTE（如 WITH po_tmp AS ...），
-        # 需要展开 CTE 内部的真实源字段（如 po.a, po.b）替代 CTE 别名
-        cte_sources = l.get("cte_source_fields", [])
-        cte_transform = l.get("cte_transform_type", "")
-        cte_expr = l.get("cte_expression", "")
-        if cte_sources:
-            # CTE 内部别名 → 物理表名映射
-            # 从 parsed_map 拿 CTE 的 source_tables（CTE 内 FROM/JOIN 的表）
-            cte_inner_alias_map = {}
-            cte_name = l.get("cte_name", "")
-            if cte_name and lookup_step:
-                # lookup_step → rule_code → parsed → ctes
-                lk_rule_code = _STEP_TO_RULE_CACHE.get(lookup_step, "")
-                if lk_rule_code:
-                    lk_parsed = parsed_map.get(lk_rule_code)
-                    if lk_parsed:
-                        for cte in (lk_parsed.ctes or []):
-                            if cte.name.upper() == cte_name.upper():
-                                for st in (cte.source_tables or []):
-                                    if st.get("alias"):
-                                        cte_inner_alias_map[st["alias"].upper()] = st.get("name", st["alias"])
-                                break
-            for cs in cte_sources:
-                cs_alias = cs.get("alias", "")
-                cs_field = cs.get("field", "")
-                if not cs_field:
-                    continue
-                # CTE 内部的别名解析：优先用 CTE source_tables 映射，再查主查询 alias_map
-                cs_resolved = cte_inner_alias_map.get(cs_alias.upper(),
-                                                       producing_alias_map.get(cs_alias.upper(), cs_alias))
-                _has_producing_cs = bool(_find_producing_step(cs_resolved, "", steps_list, []))
-                cs_is_physical = (not _is_intermediate_table(cs_resolved)
-                                  and not _has_producing_cs
-                                  and not cs_resolved.startswith("(subquery:"))
-
-                cs_child = {
-                    "step_id": lookup_step,
-                    "field": cs_field,
-                    "table": cs_resolved,
-                    "alias": cs_alias,
-                    "transform": cte_transform or transform,
-                    "raw_sql": cte_expr or raw_sql,
-                    "is_physical": cs_is_physical,
-                    "children": [],
-                }
-
-                if not cs_is_physical and cs_field:
-                    # CTE 内部字段来自中间表/目标表 → 继续向上追溯
-                    upstream_step = _find_producing_step(cs_resolved, cs_field, steps_list, rules,
-                                                         from_step=lookup_step,
-                                                         field_mappings=field_mappings)
-                    if upstream_step:
-                        child = build_join_key_lineage(
-                            upstream_step, cs_field, cs_resolved, rules, parsed_map,
-                            topology, data_flow, field_mappings, visited.copy(), depth + 1,
-                        )
-                        if child:
-                            cs_child = child
-                            cs_child["transform"] = cte_transform or transform
-                            cs_child["raw_sql"] = cte_expr or raw_sql
-
-                node["children"].append(cs_child)
-            continue  # CTE 穿透已处理，跳过下面的普通追溯
-
-        # 判断是否物理源表：按命名规则 + 按是否有产出步骤（多规则组场景，
-        # 另一个规则组的最终表如 dwb_trade_f 是本规则组的中间表）
+        普通追溯路径与嵌套 CTE 展开共用此构造器，判定口径只此一份。
+        """
         _has_producing = bool(_find_producing_step(src_resolved, "", steps_list, []))
+        # 本步骤 SQL 内的 CTE 名不是物理表（嵌套 CTE 由调用方展开；
+        # 此处兜底防 CTE 名被误判为叶节点）
+        _src_is_cte = False
+        if lk_parsed and lk_parsed.ctes and src_resolved:
+            _src_is_cte = any(_c.name.upper() == src_resolved.upper()
+                              for _c in lk_parsed.ctes)
         src_is_physical = (not _is_intermediate_table(src_resolved)
-                          and not _has_producing
-                          and not src_resolved.startswith("(subquery:"))
+                           and not _has_producing
+                           and not src_resolved.startswith("(subquery:")
+                           and not _src_is_cte)
 
         child_node = {
             "step_id": lookup_step,
@@ -4860,6 +4986,117 @@ def build_join_key_lineage(
                         child_node = child
                         child_node["transform"] = transform  # 保留当前跳的加工类型
                         child_node["raw_sql"] = raw_sql
+
+        return child_node
+
+    # 5. 对每个 lineage 来源，递归追溯
+    for l in step_lineages:
+        src_field = l.get("source_field", "")
+        src_table_alias = l.get("source_table", "")
+        transform = l.get("transform", "direct")
+        raw_sql = l.get("raw_sql", "")
+
+        # 解析 src_table_alias（用产出步骤的 alias 映射）
+        src_resolved = producing_alias_map.get(src_table_alias.upper(), src_table_alias)
+        src_norm = _norm_table(src_resolved)
+
+        # CTE 穿透：如果 lineage 带 cte_source_fields，说明字段来自 CTE（如 WITH po_tmp AS ...），
+        # 需要展开 CTE 内部的真实源字段（如 po.a, po.b）替代 CTE 别名
+        cte_sources = l.get("cte_source_fields", [])
+        cte_transform = l.get("cte_transform_type", "")
+        cte_expr = l.get("cte_expression", "")
+        if cte_sources:
+            # CTE 内部别名 → 物理表名映射
+            # 从 parsed_map 拿 CTE 的 source_tables（CTE 内 FROM/JOIN 的表）
+            cte_inner_alias_map = {}
+            cte_name = l.get("cte_name", "")
+            if cte_name and lk_parsed:
+                for cte in (lk_parsed.ctes or []):
+                    if cte.name.upper() == cte_name.upper():
+                        for st in (cte.source_tables or []):
+                            if st.get("alias"):
+                                cte_inner_alias_map[st["alias"].upper()] = st.get("name", st["alias"])
+                        break
+            # lookup_step SQL 内的 CTE 名集合（嵌套 CTE 判定用）
+            _lk_cte_names = {(c.name or "").upper() for c in ((lk_parsed.ctes if lk_parsed else None) or [])}
+
+            for cs in cte_sources:
+                cs_alias = cs.get("alias", "")
+                cs_field = cs.get("field", "")
+                if not cs_field:
+                    continue
+                # CTE 内部的别名解析：优先用 CTE source_tables 映射，再查主查询 alias_map
+                cs_resolved = cte_inner_alias_map.get(cs_alias.upper(),
+                                                       producing_alias_map.get(cs_alias.upper(), cs_alias))
+                # 嵌套 CTE：解析出的"表"本身是本 SQL 内的另一个 CTE 名
+                # （如 cte_outer 引用 cte_inner，别名 c → cte_inner）。
+                # 旧逻辑此处无 CTE 检查，CTE 名被误判为物理叶节点 → 断链。
+                cs_is_nested_cte = cs_resolved.upper() in _lk_cte_names
+                _has_producing_cs = bool(_find_producing_step(cs_resolved, "", steps_list, []))
+                cs_is_physical = (not cs_is_nested_cte
+                                  and not _is_intermediate_table(cs_resolved)
+                                  and not _has_producing_cs
+                                  and not cs_resolved.startswith("(subquery:"))
+
+                cs_child = {
+                    "step_id": lookup_step,
+                    "field": cs_field,
+                    "table": cs_resolved,
+                    "alias": cs_alias,
+                    "transform": cte_transform or transform,
+                    "raw_sql": cte_expr or raw_sql,
+                    "is_physical": cs_is_physical,
+                    "children": [],
+                }
+
+                if not cs_is_physical and cs_field:
+                    if cs_is_nested_cte and lk_parsed:
+                        # 递归展开嵌套 CTE 到物理层，每个来源走共享的
+                        # 物理判定 + 跨步骤追溯（口径与普通路径一致）
+                        expanded = _expand_cte_field(lk_parsed.ctes, cs_resolved, cs_field)
+                        if expanded:
+                            cs_child = {
+                                "step_id": lookup_step,
+                                "field": cs_field,
+                                "table": cs_resolved,
+                                "alias": cs_alias,
+                                "transform": cte_transform or transform,
+                                "raw_sql": cte_expr or raw_sql,
+                                "is_physical": False,
+                                "children": [
+                                    _make_source_child(
+                                        e["field"],
+                                        e.get("table", ""),
+                                        e.get("alias", ""),
+                                        e.get("transform") or cte_transform or transform,
+                                        e.get("raw_sql") or cte_expr or raw_sql,
+                                    )
+                                    for e in expanded
+                                ],
+                            }
+                            node["children"].append(cs_child)
+                            continue
+                    # CTE 内部字段来自中间表/目标表 → 继续向上追溯
+                    upstream_step = _find_producing_step(cs_resolved, cs_field, steps_list, rules,
+                                                         from_step=lookup_step,
+                                                         field_mappings=field_mappings)
+                    if upstream_step:
+                        child = build_join_key_lineage(
+                            upstream_step, cs_field, cs_resolved, rules, parsed_map,
+                            topology, data_flow, field_mappings, visited.copy(), depth + 1,
+                        )
+                        if child:
+                            cs_child = child
+                            cs_child["transform"] = cte_transform or transform
+                            cs_child["raw_sql"] = cte_expr or raw_sql
+
+                node["children"].append(cs_child)
+            continue  # CTE 穿透已处理，跳过下面的普通追溯
+
+        # 普通追溯：物理判定 + 子查询穿透 + 中间表跨步骤递归
+        # （口径与嵌套 CTE 展开共用 _make_source_child，判定逻辑只此一份）
+        child_node = _make_source_child(src_field, src_resolved, src_table_alias,
+                                        transform, raw_sql)
 
         node["children"].append(child_node)
 
@@ -5419,6 +5656,15 @@ def _extract_create_table_body(content: str) -> str:
     return content[start:]  # 配平失败兜底（取到末尾）
 
 
+# DDL 已消费文件记录：{ddl_dir(resolve): {文件绝对路径}}（provenance 用，只记实际参与解析的文件）
+_DDL_CONSUMED_FILES: dict[str, set] = {}
+
+
+def ddl_consumed_files(ddl_dir: str) -> list:
+    """返回某 DDL 目录下实际参与解析（表名命中且提取到表定义体）的文件清单。"""
+    return sorted(_DDL_CONSUMED_FILES.get(str(Path(ddl_dir).resolve()), ()))
+
+
 def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
     """从 DDL 文件读取目标表字段类型和中文名。
 
@@ -5494,6 +5740,8 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
         body = _extract_create_table_body(content)
         if not body:
             continue
+        # provenance 记录：该文件被本表解析实际消费
+        _DDL_CONSUMED_FILES.setdefault(str(ddl_path.resolve()), set()).add(str(sql_file.resolve()))
 
         # 字段名 + 类型：类型可含空格（如 "character varying"）和括号参数（如 (10) 或 (18,2)）
         # 字段名允许大写（DDL 导出可能全大写）
@@ -6395,6 +6643,7 @@ def analyze_pipeline(
     ddl_dir: str = "",
     source_file: str = "",
     rule_group_code: str = "",
+    context_out: dict = None,
 ) -> dict:
     """Step 3~7 核心解析，返回完整 knowledge dict。
 
@@ -6413,6 +6662,9 @@ def analyze_pipeline(
         ddl_dir: DDL 文件目录（可选，为空则跳过 DDL 元数据解析）
         source_file: 源文件名（可选，写入 meta.source_file）
         rule_group_code: 规则组编码（可选，写入 meta.rule_group_code）
+        context_out: 导出上下文收集器（可选，None 时行为不变）。传入 dict 时函数会把
+            不落盘的中间结构填进去（table_catalog / final_target_* / rule_group_en /
+            ddl_files），供 baseline_v1 等投影层使用——draft 本身不受影响。
 
     Returns: (knowledge, parsed_map)
         knowledge: 完整 knowledge dict（与原 main 组装结构完全一致）
@@ -6576,6 +6828,18 @@ def analyze_pipeline(
         },
         "source": build_source(rules, target_fields, group_variables, parsed_map),
     }
+
+    # 导出上下文（可选）：不落盘的中间结构，供 baseline_v1 投影层复用；
+    # 不传 context_out 时零开销，knowledge 产物不受任何影响
+    if context_out is not None:
+        context_out["table_catalog"] = table_catalog
+        context_out["final_target_schema"] = target_schema
+        context_out["final_target_table"] = target_name
+        context_out["rule_group_en"] = next(
+            (r.rule_group_en for r in rules if getattr(r, "rule_group_en", "")), "")
+        if ddl_dir:
+            context_out["ddl_files"] = ddl_consumed_files(ddl_dir)
+
     return knowledge, parsed_map
 
 

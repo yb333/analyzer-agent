@@ -320,8 +320,8 @@ def _run_batch_inprocess(excel_path, output_dir, no_ai, ddl_dir,
 
 def _process_group(group, output_dir, raw, no_ai, ddl_dir):
     """处理单个规则组：解析 + 生成交付件。"""
-    from analyzer import (detect_dialect, analyze_pipeline,
-                          _generate_ai_summary, _is_intermediate_table)
+    from analyzer import detect_dialect, analyze_pipeline, generate_ai_summary
+    from engine import is_intermediate_table
     from view_generator import (generate_mapping, generate_asset_report,
                                 generate_tech_design, generate_sdd)
 
@@ -348,7 +348,7 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
         # 目标表（取最后一个非中间表，仅用于日志/结果展示；
         # knowledge.meta.target_table 由 analyze_pipeline 内部按 max(exec_sequence) 算）
         for rule in reversed(rules):
-            if not _is_intermediate_table(rule.target_table):
+            if not is_intermediate_table(rule.target_table):
                 result.target_table = f"{rule.target_schema}.{rule.target_table}" if rule.target_schema else rule.target_table
                 break
         if not result.target_table and rules:
@@ -390,7 +390,7 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
             data_flow = knowledge["data_flow"]
             field_mappings = knowledge["field_mappings"]
             quality = knowledge["quality"]
-            summary_text = _generate_ai_summary(knowledge, rules, parsed_map, topology,
+            summary_text = generate_ai_summary(knowledge, rules, parsed_map, topology,
                                                  field_mappings, quality, data_flow)
             (out_dir / "knowledge_summary.md").write_text(summary_text, encoding="utf-8", newline="\n")
 

@@ -10,6 +10,7 @@
 
 运行:
     pytest tests/test_usage.py -v
+    功能回归时跳过埋点: pytest -m "not telemetry" tests/
 """
 
 import io
@@ -18,6 +19,9 @@ import sys
 from pathlib import Path
 
 import pytest
+
+# 埋点测试与功能验证分层：功能回归用 -m "not telemetry" 跳过本文件
+pytestmark = pytest.mark.telemetry
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ANALYZER_REF = PROJECT_ROOT / "dws-pipeline-analyzer" / "references"
@@ -51,6 +55,9 @@ def isolated_usage(monkeypatch, tmp_path):
     monkeypatch.setattr(usage, "CONFIG_PATH", fake_dir / "config.json")
     monkeypatch.setattr(usage, "LOCAL_LOG_PATH", fake_dir / "usage.jsonl")
     monkeypatch.setattr(usage, "QUEUE_PATH", fake_dir / "usage_queue.jsonl")
+    # 重置进程内熔断标志（模块级可变状态，跨测试会泄漏；
+    # monkeypatch 测试结束自动恢复原值）
+    monkeypatch.setattr(usage, "_NET_DOWN", False)
     # 清掉环境变量（其他测试可能设过）
     monkeypatch.delenv("ANALYZER_NO_TELEMETRY", raising=False)
     monkeypatch.delenv("ANALYZER_TELEMETRY_ENDPOINT", raising=False)

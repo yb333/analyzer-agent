@@ -469,12 +469,15 @@ def _yml_read_query_sql(data: dict) -> str:
     return "".join(part for _, part in sql_parts)
 
 
-def read_yml(yml_dir: str) -> dict:
+def read_yml(yml_dir: str, consumed_files: list = None) -> dict:
     """读取代码仓规则组目录下的 yml 文件，返回和 read_excel 完全一致的结构。
 
     一个规则组目录下有多个 *.yml 文件（一个 yml = 一条规则）。
     本函数遍历目录下所有 yml，合并为一个规则组，产出结构同 read_excel：
         {rules, target_fields, group_variables, variables, rule_group_code, rule_group_en}
+
+    consumed_files: 可选出参列表，传入后把实际读取的 yml 绝对路径追加进去
+        （baseline_v1 provenance 用）；不传时行为不变。
 
     yml 格式（详见 sample_rule.yml）：
         顶层 = RULE sheet 字段（中文 key）
@@ -502,6 +505,8 @@ def read_yml(yml_dir: str) -> dict:
     all_vars = set()
 
     for yf in yml_files:
+        if consumed_files is not None:
+            consumed_files.append(str(yf.resolve()))
         try:
             data = yaml.safe_load(yf.read_text(encoding="utf-8"))
         except Exception as e:
@@ -1359,6 +1364,12 @@ def discover_i_view(yml_dir: Path, f_schema: str, f_table: str) -> dict | None:
     return None
 
 
+def generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality, data_flow) -> str:
+    """公开 API（batch 等外部模块用）。内部逻辑同 _generate_ai_summary。"""
+    return _generate_ai_summary(knowledge, rules, parsed_map, topology,
+                                field_mappings, quality, data_flow)
+
+
 def _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality, data_flow) -> str:
     """生成 AI 增强用的精简摘要 markdown。
 
@@ -1541,6 +1552,11 @@ def main():
     parser.add_argument("--output", required=True, help="输出基础目录（脚本会在此目录下按规则组英文名称建子目录）")
     parser.add_argument("--dialect", default="", help="SQL 方言 (oracle/dws/auto)，默认自动检测")
     parser.add_argument("--ddl-dir", default="", help="DDL 文件目录（可选，用于补充字段类型）")
+    parser.add_argument("--export", default="",
+                        help="附加导出模式：baseline_v1（优化场景契约，投影自 knowledge_draft，"
+                             "见 docs/baseline_v1-契约.md）。校验不过 fail loud 不落盘")
+    parser.add_argument("--platform-generation", dest="platform_generation", default="1.0",
+                        help="平台代次（baseline_v1 asset.platform_generation / write_plan 映射版本），默认 1.0")
     args = parser.parse_args()
 
     # ── 运营埋点：记录开始时刻 + 预备上下文 ──
@@ -1548,11 +1564,6 @@ def main():
     import uuid as _uuid_usage
     _t0_usage = _t_usage.time()
     _trace_id = f"trace_{int(_t0_usage)}_{_uuid_usage.uuid4().hex[:8]}"
-    try:
-        from usage import flush_queue as _flush_usage
-        _flush_usage()
-    except Exception:
-        pass
     _usage_exc = None  # 捕获异常类型（成功时为 None）
 
     input_path = Path(args.input)
@@ -1570,9 +1581,10 @@ def main():
     # ── Step 1: 读取输入 ──
     # 输入分流：.xlsx 文件 → read_excel；目录 → read_yml（代码仓 yml 场景）
     is_yml_mode = input_path.is_dir()
+    consumed_yml_files = []  # 实际读取的 yml 清单（baseline_v1 provenance 用）
     if is_yml_mode:
         print("Step 1: 读取代码仓 yml...")
-        raw = read_yml(str(input_path))
+        raw = read_yml(str(input_path), consumed_files=consumed_yml_files)
     else:
         print("Step 1: 读取制品包 Excel...")
         raw = read_excel(str(input_path))
@@ -1762,10 +1774,12 @@ def main():
 
     # ── Step 3~7: 核心解析（与批量路径共用 analyze_pipeline，避免两套逻辑漂移）──
     print("Step 3-7: 解析 + 组装 knowledge...")
+    engine_ctx = {}  # 引擎导出上下文（table_catalog 等，不落盘；baseline_v1 投影用）
     knowledge, parsed_map = analyze_pipeline(
         rules, raw["target_fields"], raw["group_variables"], dialect,
         ddl_dir=ddl_dir, source_file=input_path.name,
         rule_group_code=raw["rule_group_code"],
+        context_out=engine_ctx if args.export else None,
     )
     # 从 knowledge 取回 AI summary 需要的中间结构
     topology = knowledge["topology"]
@@ -1827,10 +1841,56 @@ def main():
     summary_file.write_text(summary_text, encoding="utf-8", newline="\n")
     _t_json_summary = round(_t_usage.time() - _t_json0, 2)
 
+    # ── baseline_v1 契约导出（--export baseline_v1；校验不过 fail loud 不落盘）──
+    # 纯机器投影：AI 不参与（契约是纯物理事实包，任何 AI 补写都是假信息风险）
+    baseline_path = None
+    if args.export == "baseline_v1":
+        from baseline_export import export_baseline_v1, BaselineExportError
+        provenance = []
+        if is_yml_mode:
+            for f in consumed_yml_files:
+                provenance.append({"type": "rule_yml", "path": f})
+        else:
+            provenance.append({"type": "execution_tasks", "path": str(input_path.resolve())})
+        for f in engine_ctx.get("ddl_files", []):
+            provenance.append({"type": "ddl", "path": f})
+        _sched_meta = knowledge.get("meta", {}).get("schedule") or {}
+        _seen_lts = set()
+        for key in ("f_tasks", "i_tasks", "other_tasks", "all_tasks"):
+            for t in (_sched_meta.get(key) or []):
+                if isinstance(t, dict) and t.get("lts_file") and t["lts_file"] not in _seen_lts:
+                    _seen_lts.add(t["lts_file"])
+                    provenance.append({"type": "lts", "path": t["lts_file"]})
+        _seen_dq = set()
+        for d in sorted((knowledge.get("meta", {}).get("dq_rules") or []),
+                        key=lambda d: str(d.get("rule_number") or "")):
+            p = d.get("dq_file") if isinstance(d, dict) else None
+            if p and p not in _seen_dq:
+                _seen_dq.add(p)
+                provenance.append({"type": "dq", "path": p})
+        export_ctx = {
+            "rule_group_en": engine_ctx.get("rule_group_en") or raw.get("rule_group_en") or group_en,
+            "platform_generation": args.platform_generation,
+            "source_type": "repo_yml" if is_yml_mode else "execution_tasks.xlsx",
+            "provenance": provenance,
+            "final_target_schema": engine_ctx.get("final_target_schema", ""),
+            "final_target_table": engine_ctx.get("final_target_table", ""),
+            "table_catalog": engine_ctx.get("table_catalog") or {},
+        }
+        try:
+            baseline_path = export_baseline_v1(knowledge, export_ctx, output_dir)
+        except BaselineExportError as e:
+            print("[baseline_v1] 导出失败，产物未落盘：", file=sys.stderr)
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+
 
     print(f"\n=== 完成 ===")
     print(f"输出: {output_file}")
     print(f"摘要: {summary_file}")
+    if baseline_path is not None:
+        # 消费方按 "baseline_v1: {绝对路径}" 行定位契约产物（约定见 docs/baseline_v1-契约.md）
+        print(f"baseline_v1: {baseline_path.resolve()}")
     print(f"目标表: {target_name}")
     print(f"步骤数: {len(rules)}")
     print(f"字段数: {stats['total_in_sql']}")
@@ -2239,11 +2299,6 @@ def main_chain():
     import uuid as _uuid_usage
     _t0_usage = _t_usage.time()
     _trace_id = f"trace_{int(_t0_usage)}_{_uuid_usage.uuid4().hex[:8]}"
-    try:
-        from usage import flush_queue as _flush_usage
-        _flush_usage()
-    except Exception:
-        pass
 
     input_path = Path(args.input)
 
