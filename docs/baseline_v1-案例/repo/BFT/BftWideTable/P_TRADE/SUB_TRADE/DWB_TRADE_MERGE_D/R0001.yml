@@ -1,0 +1,20 @@
+规则编码: R0001
+规则中文名称: 交易合并明细
+规则类型: '1'
+执行序列: '1'
+目标Schema: dws
+目标表: tmp_trade_merge
+删除模式: '1'
+(生成的)查询语句: SELECT o.order_id, o.cust_id, p.pay_amount FROM ods.ods_trade_order_di
+  o LEFT JOIN ods.ods_trade_pay_di p ON o.order_id = p.order_id WHERE o.del = 'N'
+规则组编码: GR_TRADE_MERGE
+规则组英文名称: DWB_TRADE_MERGE_D
+额外信息（其他sheet页信息）:
+  TargetFields:
+  - 规则编码: R0001
+    目标字段名称: order_id
+    来源字段名称: o.order_id
+    加密方式: '0'
+    别名: ''
+    字段类型: VARCHAR(64)
+    备注: 订单ID

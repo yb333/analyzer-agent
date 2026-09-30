@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "baseline_v1",
+  "title": "baseline_v1 契约（权威版，analyzer 仓维护）",
+  "description": "dws-pipeline-analyzer 面向优化场景的投影产物（--export baseline_v1）。本文件是权威 schema：v1.0 初始拷贝自 design-dev-agent 交接包；v1.1 起 write_plan 等增量由 analyzer 仓主导演进，消费方 vendor 同步（协议见 docs/baseline_v1-契约.md）。语义分级：事实（必填或显式空，逐字保真）/ hint（load_strategy、patterns，非权威）/ 结构化（write_plan——确定性文法翻译，非推断）。增量字段、驱动表、主键、粒度等推断永不进契约。",
+  "type": "object",
+  "required": ["version", "asset", "provenance", "rules", "tables", "lineage", "load_strategy", "warnings"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "契约版本，双端校验锚点。当前权威版本 '1.1'（v1.0 见交接包）。变更需 bump + 双端同步。",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "asset": {
+      "type": "object",
+      "required": ["schema", "table", "rule_group_code", "rule_group_en", "dialect", "source_type", "analysis_time", "platform_generation"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "type": "string", "minLength": 1 },
+        "table": { "type": "string", "minLength": 1 },
+        "rule_group_code": { "type": "string" },
+        "rule_group_en": { "type": "string" },
+        "dialect": { "type": "string", "description": "oracle/dws/auto 等" },
+        "source_type": { "type": "string", "description": "execution_tasks.xlsx / repo_yml 等——生产侧实现细节，消费方不感知" },
+        "analysis_time": { "type": "string" },
+        "platform_generation": { "type": "string", "description": "平台代次（如 '1.0'/'2.0'）；write_plan.kind 等平台语义映射按代次由 analyzer 侧维护" }
+      }
+    },
+    "provenance": {
+      "type": "array",
+      "description": "解析过程实际消费的源文件清单（原则：缺口显式化）。交付方保证可达；消费方另有快照兜底仅作 patch 保险。",
+      "items": {
+        "type": "object",
+        "required": ["type", "path"],
+        "additionalProperties": false,
+        "properties": {
+          "type": { "type": "string", "enum": ["execution_tasks", "rule_yml", "ddl", "lts", "dq", "other"] },
+          "path": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["rule_code", "exec_sequence", "scenario_id", "target_schema", "target_table", "delete_mode", "delete_condition", "query_sql", "source_tables"],
+        "additionalProperties": false,
+        "properties": {
+          "rule_code": { "type": "string", "minLength": 1, "description": "平台稳定标识" },
+          "rule_name": { "type": "string" },
+          "exec_sequence": { "type": "integer" },
+          "scenario_id": { "type": "string", "description": "多场景分组" },
+          "is_common": { "type": "boolean" },
+          "target_schema": { "type": "string", "minLength": 1 },
+          "target_table": { "type": "string", "minLength": 1 },
+          "delete_mode": { "type": "string", "description": "平台原始值逐字携带（'1'-'9'），不做语义归一" },
+          "delete_condition": { "type": "string", "description": "可空串；逐字原始值——比对锚点，永不做归一" },
+          "merge_on": { "type": "string", "description": "MERGE ON 条件；delete_mode=6 时必供（schema 无法表达条件必填，由双方校验器强制 fail-loud）" },
+          "write_plan": {
+            "type": "object",
+            "description": "写入计划（v1.1 增量）：delete_mode+delete_condition 按写入类型的确定性结构化翻译。kind 映射按 platform_generation 由 analyzer 侧维护（权威）；condition_expr 逐字来自 delete_condition 或交换配置，来自 SQL 解析时为等价重排版（以 condition_source 区分）；解析不出 = 显式 null + warnings，绝不伪造。",
+            "required": ["kind", "condition_role", "condition_expr", "condition_columns", "condition_source"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "写入类型（delete_mode 的结构化翻译，platform_generation='1.0' 映射）",
+                "enum": ["full_truncate", "append", "subpartition_truncate", "delete_by_condition", "partition_truncate", "merge_upsert", "rpt_item", "update_by_condition", "exchange_partition", "view", "unknown"]
+              },
+              "condition_role": {
+                "type": "string",
+                "description": "delete_condition 在该写入类型下扮演的角色；'unclear'=平台语义未定（如 RPT_ITEM）或原文与预期形态不符",
+                "enum": ["none", "on_predicate", "where_predicate", "partition_expr", "subpartition_expr", "exchange_table", "unclear"]
+              },
+              "condition_expr": { "type": ["string", "null"], "description": "条件的语义主体文本；null=按该角色的预期未取到（配合 warnings）" },
+              "condition_columns": { "type": "array", "items": { "type": "string" }, "description": "谓词中出现的限定列引用（alias.col / table.col，原样文本，按出现顺序去重）；非谓词形态为空数组" },
+              "condition_source": { "type": ["string", "null"], "enum": ["delete_condition", "query_sql", "exchange_config", "none", null], "description": "condition_expr 的来源：平台删除条件列 / SQL 文本解析（MERGE ON）/ 交换分区配置 / 无" }
+            }
+          },
+          "query_sql": { "type": "string", "minLength": 1, "description": "SQL 原文，逐字保真（禁美化/重排版）" },
+          "source_tables": { "type": "array", "items": { "type": "string" }, "description": "SQL 内物理表（schema.table）" },
+          "joins": {
+            "type": "array",
+            "description": "物理表 join 事实（子查询假名/CTE 名不进契约）",
+            "items": {
+              "type": "object",
+              "required": ["source_table", "alias", "join_type"],
+              "additionalProperties": false,
+              "properties": {
+                "source_table": { "type": "string" },
+                "alias": { "type": "string" },
+                "join_type": { "type": "string", "description": "FROM/LEFT/INNER/…（FROM=主表）" },
+                "join_condition": { "type": "string" }
+              }
+            }
+          },
+          "where_clause": { "type": "string" },
+          "group_by": { "type": "array", "items": { "type": "string" } },
+          "is_view_step": { "type": "boolean" },
+          "exchange_source_table": { "type": "string", "description": "交换分区的正式目标表（dm=9）；非交换步骤不携带" }
+        }
+      }
+    },
+    "tables": {
+      "type": "array",
+      "minItems": 1,
+      "description": "SQL 涉及的全部表（含源表/中间表/目标表）",
+      "items": {
+        "type": "object",
+        "required": ["schema", "name"],
+        "additionalProperties": false,
+        "properties": {
+          "schema": { "type": "string" },
+          "name": { "type": "string" },
+          "fields": {
+            "type": "array",
+            "description": "DDL 可得则填（name/type/comment）；DDL 缺失时中间表按血缘回填字段名（type/comment 留空），再缺则空数组；类型回填由消费方查库，仅用于全量 DDL 生成",
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string" },
+                "comment": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "lineage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_code", "target_field", "transform_type", "raw_expr", "physical_sources"],
+        "additionalProperties": false,
+        "properties": {
+          "rule_code": { "type": "string" },
+          "target_field": { "type": "string" },
+          "transform_type": { "type": "string", "description": "生产方枚举（direct/aggregate/…）；围栏判定不锚定此标签（锚 raw_expr 原文）" },
+          "raw_expr": { "type": "string", "description": "逐字表达式原文——围栏/血缘比对锚点" },
+          "physical_sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["table", "field"],
+              "additionalProperties": false,
+              "properties": {
+                "table": { "type": "string", "description": "物理源表（CTE 穿透后）" },
+                "field": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schedule": {
+      "type": ["object", "null"],
+      "description": "代码仓模式可得（f_tasks/i_tasks/other_tasks，含 jobs/params）；xlsx 模式为显式 null（缺口显式化，消费方报'无法断言调度不变'）",
+      "additionalProperties": true
+    },
+    "dq_rules": {
+      "type": ["array", "null"],
+      "items": { "type": "object", "additionalProperties": true },
+      "description": "存量 DQ（rule_number/name/desc/check_type/alert_level/sql/target_table）；xlsx 模式为显式 null；优化场景完全跟随输入，一般不动"
+    },
+    "load_strategy": {
+      "type": "object",
+      "description": "hint 级（资产级判定，非权威）",
+      "additionalProperties": true
+    },
+    "patterns": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true },
+      "description": "hint 级加工模式提示，给人看不进 ts"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "title"],
+        "additionalProperties": true,
+        "properties": {
+          "type": { "type": "string" },
+          "title": { "type": "string" },
+          "severity": { "type": "string" }
+        }
+      },
+      "description": "逆向交叉验证差异事实（field_name_mismatch / quality 分_category / write_plan_gap；必填可空数组）；消费方式=报告+存档，不参与 patch 决策"
+    }
+  }
+}

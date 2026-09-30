@@ -1,0 +1,8 @@
+规则Number: DQ_000001
+规则中文名: 主键空值检查
+规则中文描述: 合并键不允许为空
+检查类型: NULL
+告警级别: '2'
+SQL: SELECT count(*) FROM fin_dwb.dwb_trade_merge_d WHERE order_id IS NULL
+目标表: dwb_trade_merge_d
+规则负责人: test_user

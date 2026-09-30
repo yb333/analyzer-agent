@@ -1,0 +1,22 @@
+'*任务名称': TASK_TRADE_MERGE_I
+'*任务类型': 周期任务
+'*任务组名称': GROUP_TRADE_MERGE
+'*责任人': test_user
+'*项目名称': BCNB_DAILY
+调度周期: 0 40 2 * * ?
+开始时间: 2026/01/01 02:40:00
+依赖上一周期: 是
+是否一天多调: 否
+额外信息（其他sheet页信息）: |
+  Jobs: |
+    - '*job名称': Pjob_merge_i
+      '*job的父节点名称': start
+      '*job类型': database
+      job重试次数: '1'
+      job重试间隔: '60'
+  taskParams: |
+    - '*任务名称': TASK_TRADE_MERGE_I
+      '*任务组名称': GROUP_TRADE_MERGE
+      '*参数名称': V_SUCCESS_VALUE
+      '*项目名称': BCNB_DAILY
+      参数值: v_code==0

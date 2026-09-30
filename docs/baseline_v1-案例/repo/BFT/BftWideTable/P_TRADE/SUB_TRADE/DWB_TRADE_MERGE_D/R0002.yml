@@ -1,0 +1,28 @@
+规则编码: R0002
+规则中文名称: 增量合并进最终表
+规则类型: '1'
+执行序列: '2'
+目标Schema: dws
+目标表: dwb_trade_merge_d
+删除模式: '6'
+删除条件: m.order_id = t.order_id
+(生成的)查询语句: SELECT t.order_id, t.cust_id, t.pay_amount, current_timestamp AS merge_time
+  FROM dws.tmp_trade_merge t
+规则组编码: GR_TRADE_MERGE
+规则组英文名称: DWB_TRADE_MERGE_D
+额外信息（其他sheet页信息）:
+  TargetFields:
+  - 规则编码: R0002
+    目标字段名称: order_id
+    来源字段名称: t.order_id
+    加密方式: '0'
+    别名: ''
+    字段类型: VARCHAR(64)
+    备注: 订单ID
+  - 规则编码: R0002
+    目标字段名称: pay_amount
+    来源字段名称: t.pay_amount
+    加密方式: '0'
+    别名: ''
+    字段类型: DECIMAL(18,2)
+    备注: 支付金额
