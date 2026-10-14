@@ -28,11 +28,11 @@ ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_D.
 
 
 def _write_dq_excel(path, rows):
-    """构造 DQ 平台导出格式 excel（主 sheet「规则基本信息」+ 附属空 sheet）。"""
+    """构造 DQ 平台导出格式 excel（主 sheet「规则基础信息」+ 附属空 sheet）。"""
     import openpyxl
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "规则基本信息"
+    ws.title = "规则基础信息"
     ws.append(["规则Number", "规则ID", "操作类型", "规则中文名", "规则中文描述",
                "检查类型", "规则负责人", "目标表schema", "目标表", "目标表编码",
                "SQL", "告警级别"])
@@ -83,7 +83,7 @@ class TestReadDqExcel:
         import openpyxl
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "规则基本信息"
+        ws.title = "规则基础信息"
         ws.append(["规则 Number", "规则中文名", "规则中文描述", "检查类型",
                    "目标表schema", "目标表", "SQL", "告警级别", "规则负责人"])
         ws.append(["R1", "名", "述", "型", "dws", "t1", "SELECT 1", "级", "人"])

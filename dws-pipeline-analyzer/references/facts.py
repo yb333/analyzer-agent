@@ -101,7 +101,7 @@ def run_facts(dir_path, output_path) -> Path:
     if asm["dq"]:
         dq_rules = read_dq_excel(asm["dq"])
         if not dq_rules:
-            print(f"[facts] DQ 制品无有效规则行: {asm['dq']}——主 sheet「规则基本信息」"
+            print(f"[facts] DQ 制品无有效规则行: {asm['dq']}——主 sheet「规则基础信息」"
                   "需含带规则Number的数据行", file=sys.stderr)
             sys.exit(1)
         print(f"  [DQ] 发现 {len(dq_rules)} 条质量检查规则(excel)")

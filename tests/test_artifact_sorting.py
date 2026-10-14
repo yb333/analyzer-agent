@@ -47,7 +47,7 @@ def _make_excel(path, sheets: dict):
 
 def _et(d): return _make_excel(d / "et.xlsx", {"RULE": ["规则编码"], "TargetFields": ["规则编码"], "GroupVariables": []})
 def _lts(d): return _make_excel(d / "lts.xlsx", {"tasks": ["任务名称"], "jobs": [], "taskParams": []})
-def _dq(d): return _make_excel(d / "dq.xlsx", {"规则基本信息": ["规则Number"], "参数配置": []})
+def _dq(d): return _make_excel(d / "dq.xlsx", {"规则基础信息": ["规则Number"], "参数配置": []})
 
 
 # ── classify_artifact_excel：指纹判型 ─────────────────────────

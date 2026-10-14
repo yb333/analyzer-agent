@@ -687,7 +687,7 @@ def read_dq_excel(excel_path) -> list | None:
     loader，与 _parse_dq_yml（yml 源）产出同构，投影层（baseline_export / view）
     无感源差异（docs/13：loader 接口契约）。
 
-    只消费主 sheet「规则基本信息」——需求已明确的关心点（规则 Number/中文名/
+    只消费主 sheet「规则基础信息」——需求已明确的关心点（规则 Number/中文名/
     描述/检查类型/告警级别/SQL/目标表/schema/负责人）。附属 sheet（参数配置/
     输出列配置/目录路径）需求未清晰，暂不消费（provenance 亦不带 sheets——
     "实际消费的源"只有主 sheet，路径即够定位；需求清晰后按对账表扩充）。
@@ -713,9 +713,9 @@ def read_dq_excel(excel_path) -> list | None:
         return None
     wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
     try:
-        if "规则基本信息" not in wb.sheetnames:
+        if "规则基础信息" not in wb.sheetnames:
             return None
-        rows = list(wb["规则基本信息"].iter_rows(values_only=True))
+        rows = list(wb["规则基础信息"].iter_rows(values_only=True))
     finally:
         wb.close()
     if not rows:
@@ -1180,12 +1180,12 @@ class ManifestError(Exception):
 
 # ── 制品类型自动分拣（docs/15：sheet 结构指纹判型，判型知识单源在解析侧）──
 # 指纹与各 loader 的 sheet 认知同源：read_excel 认 RULE/TargetFields、
-# read_lts_excel 认 tasks（jobs/taskParams 为可选附属）、read_dq_excel 认规则基本信息。
+# read_lts_excel 认 tasks（jobs/taskParams 为可选附属）、read_dq_excel 认规则基础信息。
 # 三类指纹集合不相交（消费方实测，docs/15 §一）；平台结构演进时改这里并知会消费方。
 _ARTIFACT_SHEET_FINGERPRINTS = {
     "execution_tasks": ("RULE", "TargetFields"),   # 全部命中判术加
     "lts": ("tasks",),
-    "dq": ("规则基本信息",),
+    "dq": ("规则基础信息",),
 }
 
 # 目录扫描时忽略的文件（非制品干扰）：Excel 打开时的锁文件 / 隐藏文件 / 子目录

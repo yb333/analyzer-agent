@@ -803,7 +803,7 @@ def main():
                         help="LTS 调度任务 excel 路径（平台导出三 sheet：tasks/jobs/taskParams；"
                              "xlsx/yml 场景均可，优先于代码仓自动发现）")
     parser.add_argument("--dq", default="",
-                        help="DQ 质量规则 excel 路径（平台导出，主 sheet「规则基本信息」；"
+                        help="DQ 质量规则 excel 路径（平台导出，主 sheet「规则基础信息」；"
                              "xlsx/yml 场景均可，优先于代码仓自动发现）")
     parser.add_argument("--export", default="",
                         help="附加导出：asset_facts（存量资产事实包，投影自 knowledge_draft，"
