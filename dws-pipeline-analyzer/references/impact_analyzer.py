@@ -26,6 +26,9 @@ from typing import Optional
 
 from openpyxl.styles import Alignment
 
+# excel 列定位/取值三件套（唯一定义处在 excel_utils，旧名引用零改动）
+from excel_utils import safe_str as _safe_str, find_col as _find_col, get_val as _get_val  # noqa: F401
+
 # ═══════════════════════════════════════════════════════════════
 # 数据类
 # ═══════════════════════════════════════════════════════════════
@@ -146,43 +149,8 @@ class AnalysisResult:
 
 
 # ═══════════════════════════════════════════════════════════════
-# ① 输入解析层（容错风格照搬 read_excel）
+# ① 输入解析层（容错风格与 read_excel 一致；三件套见顶部 excel_utils）
 # ═══════════════════════════════════════════════════════════════
-
-def _safe_str(val) -> str:
-    """安全转字符串（与 analyzer.py 一致）"""
-    if val is None:
-        return ""
-    return str(val).strip()
-
-
-def _find_col(col_idx: dict, name: str) -> Optional[int]:
-    """查找列索引。先精确匹配，再归一化（去空格+全角半角），再子串包含。"""
-    if name in col_idx:
-        return col_idx[name]
-
-    def normalize(s):
-        s = s.replace("（", "(").replace("）", ")")
-        s = s.replace(" ", "").replace("\u3000", "")
-        return s
-
-    norm_name = normalize(name)
-    for actual, idx in col_idx.items():
-        if normalize(actual) == norm_name:
-            return idx
-    for actual, idx in col_idx.items():
-        na = normalize(actual)
-        if norm_name in na or na in norm_name:
-            return idx
-    return None
-
-
-def _get_val(row: tuple, idx: Optional[int]) -> str:
-    """安全获取行值（与 analyzer.py 一致）"""
-    if idx is None or idx >= len(row):
-        return ""
-    return _safe_str(row[idx])
-
 
 def _parse_bool(val: str) -> bool:
     """解析布尔值：平切 Y/是/true/平切 → True"""

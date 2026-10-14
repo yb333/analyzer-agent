@@ -43,6 +43,12 @@ dws-pipeline-analyzer 最初是一个"制品包文档化工具"——读 executi
 
 7. **bug 修复必须测触发场景，不只测简单场景** — 每次修 bug 补测试时，必须包含**触发 bug 的原始复杂场景**（多元素/边界压力/组合），不是"能跑通就行"的单点验证。教训：字符串内分号 bug 第一次修复只测了单字符串场景（一个 match 不触发位置错乱），测试过了但多字符串场景仍然坏。**测试绿了不代表对了，只代表测的那条路没坏。** 补测试时自检："这个 bug 在什么复杂度下才触发？我的测试覆盖了那个复杂度吗？"
 
+8. **单一权威生产点** — 一条信息只允许一处生产：物理属性只在 engine 的 table_catalog、CTE 穿透只在 engine、excel 列定位三件套只在 excel_utils、源发现只在 inputs。投影层只裁剪不重算，禁止碰原始文本。教训：v1.7 重构前字段血缘穿透曾有 4 套平行实现、源表清单 3 个口径（viewmodel.py 头部有完整记录）——多投影各自取数必然分叉。
+
+9. **引擎/装配层不知道消费场景** — 引擎接口只描述"要什么"，不描述"谁在用"（`context_out` 始终导出、由装配层持有、投影按需消费，禁止 `if 某场景` 分支）。契约纪律（dm=6 必供 merge_on、DQ 声明无输出 `[]` 等）只存在于投影与校验层（baseline_export），永不渗透进 engine/inputs。新需求先问归属：输入源增强/引擎能力进核心（所有场景受益），某契约的投影细节留薄适配层（判定标准见 docs/13 §八：至少两个场景可消费才算核心能力）。
+
+10. **注入有主 + 装配有归属** — knowledge.meta 的场景注入（asset_info/schedule/dq_rules）唯一写入点在 inputs.apply_meta_enrichments；「选哪些源、从哪读、三态怎么表达、provenance 记什么」的装配策略唯一归属在 inputs.py，不在 main 流程代码里加分支。教训：analyzer.main 曾是全场景流水线（LTS/DQ/I 视图发现 + 契约 ctx 组装全住在 main，2026-10 docs/13 §三有完整诊断），每加一个源就要改 main——这是耦合的生成机制。
+
 ---
 
 ## 3. 三层架构
@@ -410,18 +416,25 @@ dws-pipeline-analyzer/
 ├── architecture.md       本文档
 ├── references/
 │   ├── engine.py         ★ 理解引擎（数据类 + analyze_pipeline + build_*）
+│   ├── excel_utils.py    excel 列定位/取值三件套（唯一权威生产点）
+│   ├── inputs.py         ★ 输入装配层（源发现：DDL/LTS/DQ/I视图 + 装配函数；
+│   │                     manifest/三态/excel loader 按 docs/13 波 1b/3 进入）
 │   ├── analyzer.py       数据读取 + CLI + re-export兼容层
+│   ├── baseline_export.py baseline_v1 契约投影（优化场景）
 │   ├── batch.py          批量编排（循环调engine）
+│   ├── viewmodel.py      视图模型层（三视图公共数据构建，v1.7 收敛）
 │   ├── view_generator.py 文档化渲染
 │   ├── field_search.py   字段检索（复用engine）
-│   └── impact_analyzer.py 关联影响分析（后续新增）
+│   └── impact_analyzer.py 关联影响分析
 ├── run.py                脚本调度器（dispatch到references/*.py）
 
 commands/（每个command = 一个完整任务工作流）
 ├── analyze.md            资产文档化工作流
 ├── analyze-batch.md      批量文档化
+├── analyze-chain.md      多规则组链路分析
+├── export-baseline.md    baseline_v1 契约导出
 ├── field-search.md       字段检索
-└── impact-analysis.md    关联影响分析（后续新增）
+└── impact-analysis.md    关联影响分析
 ```
 
 ---
@@ -509,6 +522,9 @@ commands/（每个command = 一个完整任务工作流）
 | 多规则组串联 | 统一靠数据依赖追溯（不靠表名尾缀） | 覆盖 mid/tmp/拆分规则组所有场景；尾缀只做加速 |
 | 多规则组命令 | 单独 /analyze-chain（不混入 /analyze） | 产出和逻辑路径不同，不污染单资产的简洁性 |
 | 多规则组追溯源 | 规则组穿透后的源表（不是单规则源表） | 一个规则组多步骤，要看整体读了哪些表 |
+| 输入装配层（inputs.py） | 源发现与装配独立成模块，main 只做 CLI 分发（v1.8） | 装配策略散在 main 是耦合生成机制；analyzer 2536→1694 行，行为零变（golden 26 case 护住） |
+| excel 三件套收拢 | excel_utils.py 唯一定义，analyzer/impact 旧名 re-export | 第 3 份复制（DQ/LTS excel loader）发生前收口 |
+| 场景耦合防线 | context_out 始终导出、装配层持有；契约纪律只在投影层 | 引擎接口不出现"谁在用"；docs/13 §四三条守则 |
 
 ---
 
