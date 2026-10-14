@@ -63,6 +63,7 @@ from inputs import (  # noqa: F401
     _discover_dq_from_repo, _parse_dq_yml,
     _extract_view_sql, _find_view_by_name, _search_view_by_source, discover_i_view,
     append_i_view_step, apply_meta_enrichments, build_baseline_export_ctx,
+    read_lts_excel,
 )
 
 # excel 列定位/取值三件套（唯一定义处在 excel_utils，此处保留旧名）
@@ -793,6 +794,9 @@ def main():
     parser.add_argument("--output", required=True, help="输出基础目录（脚本会在此目录下按规则组英文名称建子目录）")
     parser.add_argument("--dialect", default="", help="SQL 方言 (oracle/dws/auto)，默认自动检测")
     parser.add_argument("--ddl-dir", default="", help="DDL 文件目录（可选，用于补充字段类型）")
+    parser.add_argument("--lts", default="",
+                        help="LTS 调度任务 excel 路径（平台导出三 sheet：tasks/jobs/taskParams；"
+                             "xlsx/yml 场景均可，优先于代码仓自动发现）")
     parser.add_argument("--export", default="",
                         help="附加导出模式：baseline_v1（优化场景契约，投影自 knowledge_draft，"
                              "见 docs/baseline_v1-契约.md）。校验不过 fail loud 不落盘")
@@ -947,10 +951,20 @@ def main():
         ddl_dir = _auto_discover_ddl_from_repo(input_path, rules)
         _t_ddl = round(_t_usage.time() - _t_ddl0, 2)
 
-    # yml 场景：自动发现 LTS 调度任务
+    # LTS 调度来源：--lts 显式 excel（loader，优先）→ yml 场景代码仓自动发现
     schedule_info = None
     _t_lts = 0
-    if is_yml_mode and raw.get("rule_group_code"):
+    if args.lts:
+        _t_lts0 = _t_usage.time()
+        schedule_info = read_lts_excel(args.lts, raw.get("rule_group_code") or "")
+        _t_lts = round(_t_usage.time() - _t_lts0, 2)
+        if schedule_info:
+            f_names = [t["task_name"] for t in schedule_info.get("f_tasks", [])]
+            i_names = [t["task_name"] for t in schedule_info.get("i_tasks", [])]
+            print(f"  [LTS] 调度任务(excel): F={f_names} I={i_names} ({_t_lts}s)")
+        else:
+            print(f"  [LTS] excel 未读到任务: {args.lts}")
+    elif is_yml_mode and raw.get("rule_group_code"):
         try:
             _t_lts0 = _t_usage.time()
             schedule_info = _discover_lts_from_repo(input_path, raw["rule_group_code"])

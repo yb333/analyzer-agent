@@ -172,3 +172,176 @@ class TestLtsInAnalysis:
         kj_path = out_dir / "DWB_TEST_F" / "knowledge_draft.json"
         knowledge = json.loads(kj_path.read_text(encoding="utf-8"))
         assert "schedule" not in knowledge.get("meta", {}), "xlsx 模式不该有 schedule"
+
+
+class TestReadLtsExcel:
+    """read_lts_excel：LTS 平台导出 excel（三 sheet）→ 与 yml 发现同构（v1.8 波 1b）。
+
+    excel 是 yml 的原始形态（yml 由平台从该 excel 转出），loader 契约：
+    产出 dict 结构与 _discover_lts_from_repo 完全同构，投影层无感源差异。
+    """
+
+    @staticmethod
+    def _write_lts_excel(path, tasks_rows, jobs_rows=None, params_rows=None):
+        """构造 LTS 平台导出格式 excel。*_rows 不含表头。"""
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "tasks"
+        ws.append(["项目名称", "任务组名称", "任务名称", "任务类型", "开始时间",
+                   "结束时间", "调度周期", "依赖上一周期", "日历数据", "责任人",
+                   "是否一天多调"])
+        for r in tasks_rows:
+            ws.append(r)
+        if jobs_rows is not None:
+            wj = wb.create_sheet("jobs")
+            wj.append(["项目名称", "任务组名称", "任务名称", "job名称", "job类型",
+                       "job的父节点名称", "job超时时间", "job重试次数", "job重试间隔",
+                       "job异常处理方式"])
+            for r in jobs_rows:
+                wj.append(r)
+        if params_rows is not None:
+            wp = wb.create_sheet("taskParams")
+            wp.append(["项目名称", "任务组名称", "任务名称", "参数名称", "参数值"])
+            for r in params_rows:
+                wp.append(r)
+        wb.save(str(path))
+
+    def test_full_three_sheets_isomorphic(self, tmp_path):
+        """三 sheet 完整读取，task dict 字段与 yml 解析产物同构。"""
+        import datetime
+        xlsx = tmp_path / "schedule.xlsx"
+        self._write_lts_excel(
+            xlsx,
+            tasks_rows=[
+                ["PROJ", "GROUP_A", "TASK_X_F", "周期任务", datetime.datetime(2026, 3, 20, 10, 31, 25),
+                 None, "0 26 0 * * ?", None, None, "x00123456", None],
+            ],
+            jobs_rows=[
+                ["PROJ", "GROUP_A", "TASK_X_F", "Pjob_x", "url", "start",
+                 "10", "3", "60", "终止"],
+            ],
+            params_rows=[
+                ["PROJ", "GROUP_A", "TASK_X_F", "V_GROUP_CODE", "RG001"],
+                ["PROJ", "GROUP_A", "TASK_X_F", "V_DT", "20260320"],
+            ],
+        )
+        from inputs import read_lts_excel
+        sched = read_lts_excel(str(xlsx), "RG001")
+        assert sched is not None
+        f = sched["f_tasks"][0]
+        # 与 _parse_lts_task 产物字段完全同构（loader 接口契约）
+        assert set(f.keys()) == {
+            "task_name", "task_type", "schedule_cron", "owner", "start_time",
+            "depends_prev_cycle", "multi_day", "task_group", "project",
+            "group_code", "jobs", "params", "lts_file",
+        }
+        assert f["task_name"] == "TASK_X_F"
+        assert f["task_type"] == "周期任务"
+        assert f["schedule_cron"] == "0 26 0 * * ?"
+        assert f["owner"] == "x00123456"
+        assert f["task_group"] == "GROUP_A"
+        assert f["project"] == "PROJ"
+        assert f["group_code"] == "RG001"  # taskParams 的 V_GROUP_CODE
+        assert f["start_time"] == "2026-03-20 10:31:25"  # datetime → str
+        assert f["jobs"] == [{"name": "Pjob_x", "type": "url", "parent": "start",
+                              "retry_count": "3", "retry_interval": "60",
+                              "timeout": "10", "error_handler": "终止"}]
+        assert {"name": "V_DT", "value": "20260320"} in f["params"]
+        assert f["lts_file"] == str(xlsx)
+
+    def test_f_to_i_link_by_name(self, tmp_path):
+        """I 任务无 V_GROUP_CODE（同 yml 场景）→ 按 _F→_I 命名关联进 i_tasks。"""
+        xlsx = tmp_path / "schedule.xlsx"
+        self._write_lts_excel(
+            xlsx,
+            tasks_rows=[
+                ["PROJ", "G", "TASK_X_F", "周期任务", None, None, "", None, None, "u", None],
+                ["PROJ", "G", "TASK_X_I", "周期任务", None, None, "", None, None, "u", None],
+            ],
+            params_rows=[
+                ["PROJ", "G", "TASK_X_F", "V_GROUP_CODE", "RG001"],
+            ],
+        )
+        from inputs import read_lts_excel
+        sched = read_lts_excel(str(xlsx), "RG001")
+        assert [t["task_name"] for t in sched["f_tasks"]] == ["TASK_X_F"]
+        assert [t["task_name"] for t in sched["i_tasks"]] == ["TASK_X_I"]
+        # I 任务虽不在匹配集（无 V_GROUP_CODE），仍进 all_tasks
+        assert {t["task_name"] for t in sched["all_tasks"]} == {"TASK_X_F", "TASK_X_I"}
+
+    def test_group_code_filter_multiple_groups(self, tmp_path):
+        """excel 混多规则组任务时，按 V_GROUP_CODE 精确过滤。"""
+        xlsx = tmp_path / "schedule.xlsx"
+        self._write_lts_excel(
+            xlsx,
+            tasks_rows=[
+                ["PROJ", "G1", "TASK_A_F", "周期任务", None, None, "", None, None, "u", None],
+                ["PROJ", "G2", "TASK_B_F", "周期任务", None, None, "", None, None, "u", None],
+            ],
+            params_rows=[
+                ["PROJ", "G1", "TASK_A_F", "V_GROUP_CODE", "RG_A"],
+                ["PROJ", "G2", "TASK_B_F", "V_GROUP_CODE", "RG_B"],
+            ],
+        )
+        from inputs import read_lts_excel
+        sched = read_lts_excel(str(xlsx), "RG_B")
+        assert [t["task_name"] for t in sched["all_tasks"]] == ["TASK_B_F"]
+
+    def test_no_group_code_match_fallback_collect_all(self, tmp_path):
+        """V_GROUP_CODE 列空值/不匹配 → 回退全收（excel 是显式输入，信任范围）。"""
+        xlsx = tmp_path / "schedule.xlsx"
+        self._write_lts_excel(
+            xlsx,
+            tasks_rows=[
+                ["PROJ", "G", "TASK_X_F", "周期任务", None, None, "", None, None, "u", None],
+            ],
+            params_rows=[
+                ["PROJ", "G", "TASK_X_F", "V_GROUP_CODE", None],  # 真实导出常见空值
+            ],
+        )
+        from inputs import read_lts_excel
+        sched = read_lts_excel(str(xlsx), "RG001")
+        assert sched is not None
+        assert len(sched["all_tasks"]) == 1
+        assert sched["all_tasks"][0]["group_code"] == ""
+
+    def test_missing_optional_sheets_explicit_empty(self, tmp_path):
+        """jobs/taskParams sheet 缺失 → jobs/params 显式空列表。"""
+        xlsx = tmp_path / "schedule.xlsx"
+        self._write_lts_excel(
+            xlsx,
+            tasks_rows=[["PROJ", "G", "TASK_X_F", "周期任务", None, None, "", None, None, "u", None]],
+            jobs_rows=None, params_rows=None,
+        )
+        from inputs import read_lts_excel
+        sched = read_lts_excel(str(xlsx))
+        t = sched["all_tasks"][0]
+        assert t["jobs"] == []
+        assert t["params"] == []
+        assert t["group_code"] == ""
+
+    def test_other_task_classification(self, tmp_path):
+        """非 _F/_I 后缀任务归 other_tasks。"""
+        xlsx = tmp_path / "schedule.xlsx"
+        self._write_lts_excel(
+            xlsx,
+            tasks_rows=[
+                ["PROJ", "G", "TASK_ODS_X", "周期任务", None, None, "", None, None, "u", None],
+            ],
+        )
+        from inputs import read_lts_excel
+        sched = read_lts_excel(str(xlsx))
+        assert [t["task_name"] for t in sched["other_tasks"]] == ["TASK_ODS_X"]
+        assert sched["f_tasks"] == [] and sched["i_tasks"] == []
+
+    def test_invalid_inputs_return_none(self, tmp_path):
+        from inputs import read_lts_excel
+        assert read_lts_excel(tmp_path / "not_exist.xlsx") is None
+        # 无 tasks sheet
+        import openpyxl
+        xlsx = tmp_path / "bad.xlsx"
+        wb = openpyxl.Workbook()
+        wb.active.title = "other"
+        wb.save(str(xlsx))
+        assert read_lts_excel(str(xlsx)) is None

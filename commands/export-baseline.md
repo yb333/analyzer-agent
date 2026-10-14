@@ -42,6 +42,8 @@ python {skill_dir}/run.py analyzer \
 - `--platform-generation`：平台代次，默认 `1.0`；术加迁移 2.0 时显式传 `2.0`
   （write_plan 的 delete_mode→写入类型映射按代次换版，契约事实字段不变）
 - xlsx 场景 DDL 不自动发现，需要时加 `--ddl-dir {DDL目录}`（增强 tables[].fields）
+- xlsx 场景调度：需要携带 schedule 时加 `--lts {LTS excel}`（平台导出三 sheet，
+  v2 首优一次的 LTS 制品）。缺省时 `schedule` 为显式 null——消费方增量资产必给 LTS
 
 产物：`{output_dir}/baseline_v1.json`。脚本 stdout 单独打印一行
 `baseline_v1: {绝对路径}`——**消费方按该行前缀定位产物**，把这行原样转交。

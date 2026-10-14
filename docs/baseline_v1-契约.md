@@ -116,7 +116,7 @@ baseline_v1
 | TargetFields（目标字段/来源字段/字段类型/备注） | lineage[] + tables[].fields 优先级链；类型经 DDL/血缘落 fields |
 | TargetFields.加密方式 | 设计上丢弃（v1.2 候选：如消费方需要安全审计请提案） |
 | GroupVariables / 参数变量 | 设计上丢弃（调度参数已随 schedule.params 携带；规则级变量进 v1.2 候选） |
-| LTS 任务/调度/jobs/params | schedule（事实原样） |
+| LTS 任务/调度/jobs/params | schedule（事实原样；源=yml 发现或 --lts excel，两者同构） |
 | DQ 规则 7 字段 | dq_rules[] |
 | 项目编码/数据源/业务责任人 | source_type 不可知模式暂丢弃（v1.2 候选：asset.owner 等） |
 | 源文件路径（yml/xlsx/DDL/LTS/DQ） | provenance[] |
@@ -126,8 +126,12 @@ baseline_v1
 
 ```
 python run.py analyzer --input {xlsx或规则组目录} --output {dir} [--ddl-dir D] \
-                       --export baseline_v1 [--platform-generation 1.0]
+                       [--lts {LTS excel}] --export baseline_v1 [--platform-generation 1.0]
 ```
+
+- `--lts`（v1.8）：LTS 调度任务 excel（平台导出三 sheet：tasks/jobs/taskParams），
+  xlsx/yml 场景均可、优先于代码仓自动发现；loader 产出与 yml 发现同构
+  （`inputs.read_lts_excel`），schedule 段形态不因源差异而变。
 
 - 产物：`{dir}/{规则组英文}/baseline_v1.json`；stdout 单独一行
   `baseline_v1: {绝对路径}`，消费方按该前缀解析定位。
@@ -162,5 +166,7 @@ python run.py analyzer --input {xlsx或规则组目录} --output {dir} [--ddl-di
 - [x] provenance 采集（rule_yml / xlsx / ddl / lts / dq 实际消费清单）
 - [x] write_plan 全模式结构化（dm 1-9 + 视图 + 未知），merge_on dm=6 fail loud
 - [x] `/export-baseline` 命令封装（零 AI 介入 + 人回路指引）
+- [x] LTS excel 读取器（`inputs.read_lts_excel`，v1.8 波 1b：xlsx 场景 schedule 通道，
+  与 yml 发现同构；DQ excel 读取器待模板到位）
 - [ ] 批量 / 链式分析接入（analyze-batch / analyze-chain，按需）
 - [ ] 远期可选：补数任务发现、RPT_ITEM（dm=7）语料确认后细化、加密标识/规则变量入契约提案

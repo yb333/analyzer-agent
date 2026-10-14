@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from engine import RawRule, _is_intermediate_table
+from excel_utils import safe_str as _safe_str, find_col as _find_col, get_val as _get_val
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -362,6 +363,33 @@ def _build_lts_result(data, task_name, group_code, params, jobs):
     }
 
 
+def _classify_lts_tasks(matched: list, lookup: dict | None = None) -> dict:
+    """LTS 任务分类（_F/_I/其他）+ F→I 命名关联。excel/yml 两源共用的唯一权威定义。
+
+    I 任务通常不带 V_GROUP_CODE（不会被规则组匹配命中），按 _F→_I 命名从
+    lookup（同批候选任务索引，key=任务名）关联补入 i_tasks。
+
+    Returns: {"f_tasks": [...], "i_tasks": [...], "other_tasks": [...], "all_tasks": [...]}
+    """
+    f_tasks = [t for t in matched if t["task_name"].endswith("_F")]
+    i_tasks = [t for t in matched if t["task_name"].endswith("_I")]
+    other_tasks = [t for t in matched
+                   if not t["task_name"].endswith("_F") and not t["task_name"].endswith("_I")]
+    pool = dict(lookup or {})
+    for t in matched:
+        pool.setdefault(t["task_name"], t)
+    for f_task in f_tasks:
+        i_task = pool.get(f_task["task_name"][:-2] + "_I")
+        if i_task and i_task not in i_tasks:
+            i_tasks.append(i_task)
+    all_tasks = list(matched)
+    for t in i_tasks:
+        if t not in all_tasks:
+            all_tasks.append(t)
+    return {"f_tasks": f_tasks, "i_tasks": i_tasks, "other_tasks": other_tasks,
+            "all_tasks": all_tasks}
+
+
 def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
     """从代码仓 LTS/ 目录发现规则组对应的调度任务（支持多调度匹配同一规则组）。
 
@@ -411,41 +439,179 @@ def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
         if task["group_code"] == rule_group_code:
             matched.append(task)
 
-    # 按任务名后缀分类
-    f_tasks = [t for t in matched if t["task_name"].endswith("_F")]
-    i_tasks = [t for t in matched if t["task_name"].endswith("_I")]
-    other_tasks = [t for t in matched
-                   if not t["task_name"].endswith("_F") and not t["task_name"].endswith("_I")]
+    # 分类 + F→I 命名关联（_classify_lts_tasks：excel/yml 两源共用的唯一权威定义）
+    result = _classify_lts_tasks(matched, by_task_name)
 
-    # F 任务关联的 I 任务（按命名推导 _F → _I）
-    # I 任务通常不含 V_GROUP_CODE，不会被 grep 命中，需要按文件名额外查找
-    for f_task in f_tasks:
+    # yml 源补充：候选文件里没有的 I 任务，按文件名在同目录找
+    # （文件名通常是 TASK_XXX_I.yml；excel 源无此步骤——所有任务行都在表里）
+    i_tasks = result["i_tasks"]
+    for f_task in result["f_tasks"]:
         f_name = f_task["task_name"]
-        if f_name.endswith("_F"):
-            i_name = f_name[:-2] + "_I"
-            # 先看候选文件里有没有
-            i_task = by_task_name.get(i_name)
-            if not i_task:
-                # 按文件名在同目录找 I 任务文件（文件名通常是 TASK_XXX_I.yml）
-                f_file = Path(f_task["lts_file"])
-                i_file = f_file.parent / (i_name + ".yml")
-                if i_file.exists():
-                    i_task = _parse_lts_task(i_file)
+        if not f_name.endswith("_F"):
+            continue
+        i_name = f_name[:-2] + "_I"
+        if any(t["task_name"] == i_name for t in i_tasks):
+            continue
+        f_file = Path(f_task["lts_file"])
+        i_file = f_file.parent / (i_name + ".yml")
+        if i_file.exists():
+            i_task = _parse_lts_task(i_file)
             if i_task and i_task not in i_tasks:
                 i_tasks.append(i_task)
+                result["all_tasks"].append(i_task)
 
-    # 合并：所有匹配的任务（去重）
-    all_tasks = list(matched)
-    for t in i_tasks:
-        if t not in all_tasks:
-            all_tasks.append(t)
-
-    return {"f_tasks": f_tasks, "i_tasks": i_tasks, "other_tasks": other_tasks,
-            "all_tasks": all_tasks}
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
-# DQ 质量规则发现（自 analyzer.py 平移）
+# LTS excel 读取器（平台导出三 sheet，yml 的原始形态）
+# ═══════════════════════════════════════════════════════════════
+
+def _read_lts_excel_jobs(wb) -> dict:
+    """jobs sheet → {任务名称: [job dict]}。sheet 缺失/空 → {}（显式空，不猜）。"""
+    if "jobs" not in wb.sheetnames:
+        return {}
+    rows = list(wb["jobs"].iter_rows(values_only=True))
+    if not rows:
+        return {}
+    headers = [_safe_str(h) for h in rows[0]]
+    col = {h: i for i, h in enumerate(headers) if h}
+    idx = {k: _find_col(col, k) for k in
+           ("任务名称", "job名称", "job类型", "job的父节点名称",
+            "job重试次数", "job重试间隔", "job超时时间", "job异常处理方式")}
+    out: dict = {}
+    for row in rows[1:]:
+        if not row:
+            continue
+        task_name = _get_val(row, idx["任务名称"])
+        if not task_name:
+            continue
+        out.setdefault(task_name, []).append({
+            "name": _get_val(row, idx["job名称"]),
+            "type": _get_val(row, idx["job类型"]),
+            "parent": _get_val(row, idx["job的父节点名称"]),
+            "retry_count": _get_val(row, idx["job重试次数"]),
+            "retry_interval": _get_val(row, idx["job重试间隔"]),
+            "timeout": _get_val(row, idx["job超时时间"]),
+            "error_handler": _get_val(row, idx["job异常处理方式"]),
+        })
+    return out
+
+
+def _read_lts_excel_params(wb) -> dict:
+    """taskParams sheet → {任务名称: [{name, value}]}。sheet 缺失/空 → {}。"""
+    if "taskParams" not in wb.sheetnames:
+        return {}
+    rows = list(wb["taskParams"].iter_rows(values_only=True))
+    if not rows:
+        return {}
+    headers = [_safe_str(h) for h in rows[0]]
+    col = {h: i for i, h in enumerate(headers) if h}
+    idx = {k: _find_col(col, k) for k in ("任务名称", "参数名称", "参数值")}
+    out: dict = {}
+    for row in rows[1:]:
+        if not row:
+            continue
+        task_name = _get_val(row, idx["任务名称"])
+        if not task_name:
+            continue
+        out.setdefault(task_name, []).append({
+            "name": _get_val(row, idx["参数名称"]),
+            "value": _get_val(row, idx["参数值"]),
+        })
+    return out
+
+
+def read_lts_excel(excel_path, rule_group_code: str = "") -> dict | None:
+    """读取 LTS 调度任务 excel（平台导出）→ 与 yml 发现同构的 schedule dict。
+
+    LTS yml 就是从本 excel 格式转出的（tasks/jobs/taskParams 三 sheet），
+    本函数是 excel 源 loader，与 _discover_lts_from_repo（yml 源）产出同构
+    （task 字段/分类结构/lts_file 记路径），投影层（baseline_export / view）
+    无感源差异（docs/13：loader 接口契约）。
+
+    三 sheet 列与 yml 字段的对应：
+        tasks      一行一任务：项目名称/任务组名称/任务名称/任务类型/开始时间/
+                   调度周期/依赖上一周期/责任人/是否一天多调
+        jobs       一行一 job（按任务名称关联）：job名称/job类型/job的父节点名称/
+                   job重试次数/job重试间隔/job超时时间/job异常处理方式
+        taskParams 一行一参数（按任务名称关联）：参数名称/参数值
+                   （V_GROUP_CODE → group_code，与 yml 同口径）
+    jobs/taskParams sheet 缺失或为空 → jobs/params 为空列表（显式空）。
+
+    Args:
+        excel_path: LTS excel 文件路径
+        rule_group_code: 规则组编码。给定且有任务 V_GROUP_CODE 匹配 → 只收匹配
+            任务（与 yml 发现同口径）；给空或全不匹配 → 全收（excel 是按资产
+            导出的显式输入，如 V_GROUP_CODE 列值为空时信任其范围）。
+
+    Returns: {"f_tasks": [...], "i_tasks": [...], "other_tasks": [...], "all_tasks": [...]}
+        或 None（文件不存在 / 无 tasks sheet / 读不到任务行）。
+    """
+    import openpyxl
+
+    path = Path(excel_path)
+    if not path.exists():
+        return None
+    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    try:
+        if "tasks" not in wb.sheetnames:
+            return None
+        rows = list(wb["tasks"].iter_rows(values_only=True))
+        if not rows:
+            return None
+        headers = [_safe_str(h) for h in rows[0]]
+        col = {h: i for i, h in enumerate(headers) if h}
+        idx = {k: _find_col(col, k) for k in
+               ("项目名称", "任务组名称", "任务名称", "任务类型", "开始时间",
+                "调度周期", "依赖上一周期", "责任人", "是否一天多调")}
+        jobs_by_task = _read_lts_excel_jobs(wb)
+        params_by_task = _read_lts_excel_params(wb)
+
+        tasks = []
+        for row in rows[1:]:
+            if not row:
+                continue
+            task_name = _get_val(row, idx["任务名称"])
+            if not task_name:
+                continue
+            params = params_by_task.get(task_name, [])
+            group_code = ""
+            for p in params:
+                if p.get("name") == "V_GROUP_CODE":
+                    group_code = str(p.get("value") or "").strip()
+                    break
+            tasks.append({
+                "task_name": task_name,
+                "task_type": _get_val(row, idx["任务类型"]),
+                "schedule_cron": _get_val(row, idx["调度周期"]),
+                "owner": _get_val(row, idx["责任人"]),
+                "start_time": _get_val(row, idx["开始时间"]),
+                "depends_prev_cycle": _get_val(row, idx["依赖上一周期"]),
+                "multi_day": _get_val(row, idx["是否一天多调"]),
+                "task_group": _get_val(row, idx["任务组名称"]),
+                "project": _get_val(row, idx["项目名称"]),
+                "group_code": group_code,
+                "jobs": jobs_by_task.get(task_name, []),
+                "params": params,
+                "lts_file": str(path),  # 与 yml 源同构（provenance 采集用）
+            })
+    finally:
+        wb.close()
+
+    if not tasks:
+        return None
+    matched = [t for t in tasks
+               if rule_group_code and t["group_code"] == rule_group_code]
+    if not matched:
+        matched = tasks
+    # lookup=全表：匹配模式下 I 任务（无 V_GROUP_CODE）仍可按 _F→_I 命名关联，
+    # 与 yml 发现的候选集语义一致
+    return _classify_lts_tasks(matched, {t["task_name"]: t for t in tasks})
+
+
+# ═══════════════════════════════════════════════════════════════
+# DQ 质量规则发现（自 analyzer.py 平移；excel loader 等模板到位后进入）
 # ═══════════════════════════════════════════════════════════════
 
 def _parse_dq_yml(yml_path: Path) -> dict | None:
