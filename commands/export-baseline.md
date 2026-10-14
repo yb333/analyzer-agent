@@ -29,6 +29,42 @@ description: baseline_v1 契约导出（存量资产 → 优化场景机器契�
 /export-baseline DWB_TRADE_MERGE_D        # AI 先在代码仓定位目录
 ```
 
+## 编排模式（--manifest，v2 编排合入）
+
+消费侧 agent（dws-reverser）经编排起调时用 manifest 形态——**一次调用一次交卷**：
+多制品一次收全、产物落 `manifest.output` 精确路径、中间产物（draft/summary）不落盘。
+manifest 由消费方按任务 prompt 的三元组生成：
+
+```json
+{
+  "asset": {"schema": "dws", "table": "dwb_trade_f"},
+  "artifacts": {
+    "execution_tasks": "path/术加.xlsx",
+    "lts": "path/lts.xlsx",
+    "dq": {"status": "provided", "path": "path/dq.xlsx"},
+    "ddl": ["path/a.sql", "path/ddl_dir"]
+  },
+  "output": "path/baseline_v1.json"
+}
+```
+
+```bash
+python {skill_dir}/run.py analyzer --manifest {manifest.json}
+```
+
+装配纪律（全 fail loud，`inputs.load_manifest`）：
+- `execution_tasks` 必给且存在；`asset.table` / `output` 必填
+- **DQ 三态必须显式**：`provided`（带 path）｜ `declared_absent`（声明无 → 契约
+  `dq_rules: []`，入档后永不再问）——缺 key 即违规（"没有"和"忘了"必须可区分）。
+  当前版本 `provided` 暂 fail loud（DQ excel 解析器待平台模板到位）
+- `ddl` 为文件/目录混合清单（内部 stage 归一，provenance 记原路径）；缺省则
+  tables[].table_props 为 null（连库兜底通道待后续波次）
+- 解析出的最终目标表与 `asset` 不一致 → fail loud（防制品串包）
+
+**编排失败语义**：fail loud + stderr 违规清单 + 不落盘 = 交卷终态。agent 把错误
+清单原样退回消费侧流程，由流程决定补数动作（编排模式无回问通道，下方人回路
+动作表由消费侧流程承接，不由 agent 现场编造补数）。
+
 ## 执行流程（单步，AI 不改写任何产物内容）
 
 ```bash

@@ -134,8 +134,9 @@ python {skill_dir}/run.py view_generator \
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `--input` | 是 | execution_tasks.xlsx 路径或代码仓规则组目录 |
-| `--output` | 是 | 输出目录 |
+| `--input` | 是* | execution_tasks.xlsx 路径或代码仓规则组目录（*编排模式 --manifest 下不需要） |
+| `--output` | 是* | 输出目录（*编排模式 --manifest 下不需要） |
+| --manifest | 否 | v2 编排合入：manifest json（{asset, artifacts, output}），一次调用一次交卷、产物落精确路径；与 --input 互斥 |
 | `--dialect` | 否 | oracle/dws/auto，默认自动检测 |
 | `--ddl-dir` | 否 | DDL 目录（补充字段类型和注释） |
 | `--lts` | 否 | LTS 调度任务 excel（平台导出三 sheet：tasks/jobs/taskParams）；xlsx/yml 场景均可，优先于代码仓自动发现 |

@@ -390,14 +390,22 @@ def _project_schedule(meta: dict):
 
 
 def _project_dq_rules(meta: dict):
+    """dq_rules 空值口径（三态，v2 编排合入）：
+    - 有规则 → 列表（按 rule_number 排序保证确定性）
+    - declared_absent（用户声明资产无 DQ，装配层注入 meta.dq_declared_absent）
+      → 空数组 []（明确没有，入档后永不再问）
+    - 未提供（xlsx 无 DQ 通道等）→ 显式 null（无法区分有无，消费方报缺口）
+    """
     dq = meta.get("dq_rules")
-    if not dq:
-        return None
-    keep = ("rule_number", "rule_name", "rule_desc", "check_type", "alert_level", "sql", "target_table")
-    # 按 rule_number 排序保证确定性（发现顺序受目录遍历影响）
-    items = [{k: d.get(k, "") for k in keep} for d in dq]
-    items.sort(key=lambda d: str(d.get("rule_number") or ""))
-    return items
+    if dq:
+        keep = ("rule_number", "rule_name", "rule_desc", "check_type", "alert_level", "sql", "target_table")
+        # 按 rule_number 排序保证确定性（发现顺序受目录遍历影响）
+        items = [{k: d.get(k, "") for k in keep} for d in dq]
+        items.sort(key=lambda d: str(d.get("rule_number") or ""))
+        return items
+    if meta.get("dq_declared_absent"):
+        return []
+    return None
 
 
 def _project_warnings(draft: dict, write_plan_warnings: list) -> list:
@@ -503,10 +511,15 @@ def validate_baseline_v1(data: dict, schema: dict = None) -> list:
     return errors
 
 
-def export_baseline_v1(draft: dict, ctx: dict, output_dir) -> Path:
+def export_baseline_v1(draft: dict, ctx: dict, output_dir, output_file=None) -> Path:
     """投影 → 自校验 → 落盘。校验不过抛 BaselineExportError（fail loud，不写文件）。
 
-    Returns: 产物绝对路径 {output_dir}/baseline_v1.json
+    Args:
+        output_dir: 落盘目录（默认产物 {output_dir}/baseline_v1.json）
+        output_file: 精确产物路径（v2 编排合入：manifest.output 指定，跳过自动命名）；
+            给定时 output_dir 仅用于其父目录兜底校验
+
+    Returns: 产物绝对路径
     """
     data = project_baseline_v1(draft, ctx)
 
@@ -517,7 +530,8 @@ def export_baseline_v1(draft: dict, ctx: dict, output_dir) -> Path:
     if errors:
         raise BaselineExportError("\n".join(errors))
 
-    out_path = Path(output_dir) / "baseline_v1.json"
+    out_path = Path(output_file) if output_file else Path(output_dir) / "baseline_v1.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",

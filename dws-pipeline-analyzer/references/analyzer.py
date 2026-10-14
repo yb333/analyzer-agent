@@ -795,8 +795,11 @@ def main():
         description="dws-pipeline-analyzer — 制品包深度分析器",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--input", required=True, help="execution_tasks.xlsx 文件路径")
-    parser.add_argument("--output", required=True, help="输出基础目录（脚本会在此目录下按规则组英文名称建子目录）")
+    parser.add_argument("--input", default="", help="execution_tasks.xlsx 文件路径")
+    parser.add_argument("--output", default="", help="输出基础目录（脚本会在此目录下按规则组英文名称建子目录）")
+    parser.add_argument("--manifest", default="",
+                        help="v2 编排合入：manifest json 路径（{asset, artifacts, output}——"
+                             "多制品一次收全、产物落 manifest.output 精确路径；与 --input 互斥）")
     parser.add_argument("--dialect", default="", help="SQL 方言 (oracle/dws/auto)，默认自动检测")
     parser.add_argument("--ddl-dir", default="", help="DDL 文件目录（可选，用于补充字段类型）")
     parser.add_argument("--lts", default="",
@@ -808,6 +811,17 @@ def main():
     parser.add_argument("--platform-generation", dest="platform_generation", default="1.0",
                         help="平台代次（baseline_v1 asset.platform_generation / write_plan 映射版本），默认 1.0")
     args = parser.parse_args()
+
+    # ── 编排模式分流（manifest：一次调用一次交卷，流程不进 main 的交互路径）──
+    if args.manifest:
+        if args.input:
+            parser.error("--manifest 与 --input 互斥（编排模式的输入清单在 manifest 文件内）")
+        run_manifest(args.manifest)
+        return
+    if not args.input:
+        parser.error("--input 必填（或使用 --manifest 编排模式）")
+    if not args.output:
+        parser.error("--output 必填（编排模式 --manifest 不需要 --output）")
 
     # ── 运营埋点：记录开始时刻 + 预备上下文 ──
     import time as _t_usage
@@ -1123,6 +1137,137 @@ def main():
         })
     except Exception:
         pass
+
+
+# ═══════════════════════════════════════════════════════════════
+# v2 编排合入（/manifest 模式）：一次调用一次交卷
+# ═══════════════════════════════════════════════════════════════
+
+def run_manifest(manifest_path) -> Path:
+    """manifest 装配 → 分析 → baseline_v1 导出（编排合入，一次调用一次交卷）。
+
+    与 --input 形态的区别（docs/12 §一 / docs/13 §四）：
+    - 输入 = manifest 清单（术加 excel 必给 + LTS excel + DQ 三态 + DDL 清单），
+      装配纪律在 inputs（load_manifest 结构校验 / stage_ddl_files 归一 / read_lts_excel）
+    - 产物 = manifest.output 精确路径（跳过 --output 自动子目录）
+    - 只交契约文件（draft/summary 不落盘——中间产物属实现自由，流程只认契约绿）
+    - 失败 = fail loud：stderr 错误清单原样退回，由消费侧流程决定补数动作
+      （编排模式无回问通道，"错误清单即终态"）
+
+    Returns: 产物绝对路径（stdout 另行打印 `baseline_v1: {路径}` 定位行）。
+    """
+    from inputs import ManifestError, load_manifest, stage_ddl_files, read_lts_excel
+
+    # ── 装配（inputs 层，结构/三态/路径校验全 fail loud）──
+    try:
+        mf = load_manifest(manifest_path)
+    except ManifestError as e:
+        print(f"[manifest] 装配失败: {e}", file=sys.stderr)
+        sys.exit(1)
+    artifacts = mf.get("artifacts") or {}
+
+    # DQ 三态：provided 暂 fail loud（DQ excel 解析器待平台模板，波 1b 余项）；
+    # declared_absent → dq_rules=[]（"明确没有"入档，此后永不再问）
+    dq_status = (artifacts.get("dq") or {}).get("status")
+    if dq_status == "provided":
+        print("[manifest] artifacts.dq=provided 暂不支持：DQ excel 解析器待平台模板到位。"
+              "当前版本请消费侧确认后改走 declared_absent（资产确无 DQ），"
+              "或暂不启用 DQ 通道", file=sys.stderr)
+        sys.exit(1)
+    dq_declared_absent = dq_status == "declared_absent"
+
+    # ── 主输入：术加制品包（query_sql 唯一来源）──
+    input_path = Path(artifacts["execution_tasks"])
+    print(f"=== dws-pipeline-analyzer（编排模式）===")
+    print(f"manifest: {manifest_path}")
+    print("Step 1: 读取制品包 Excel...")
+    raw = read_excel(str(input_path))
+    input_sheets = raw.pop("_source_sheets", None)
+    rules = raw["rules"]
+    if not rules:
+        print("错误: 术加制品包无有效 RULE 行", file=sys.stderr)
+        sys.exit(1)
+
+    # ── LTS excel（增量资产回刷地基；规则组编码已知则精确匹配，混组 excel 防误收）──
+    schedule_info = None
+    lts_path = artifacts.get("lts")
+    if lts_path:
+        schedule_info = read_lts_excel(lts_path, raw.get("rule_group_code") or "")
+        if schedule_info:
+            f_names = [t["task_name"] for t in schedule_info.get("f_tasks", [])]
+            i_names = [t["task_name"] for t in schedule_info.get("i_tasks", [])]
+            print(f"  [LTS] 调度任务(excel): F={f_names} I={i_names}")
+
+    # ── DDL 清单 → stage 目录（engine 只收目录扫描）；provenance 翻译回原路径 ──
+    ddl_dir = ""
+    ddl_map = {}
+    if artifacts.get("ddl"):
+        import tempfile
+        _stage_root = Path(tempfile.mkdtemp(prefix="ddl_stage_"))
+        try:
+            ddl_map = stage_ddl_files(artifacts["ddl"], _stage_root)
+        except ManifestError as e:
+            print(f"[manifest] DDL 装配失败: {e}", file=sys.stderr)
+            sys.exit(1)
+        ddl_dir = str(_stage_root)
+
+    # ── 引擎（xlsx 制品场景：无 I 视图/代码仓 DQ 发现）──
+    sql_texts = [r.query_sql for r in rules if r.query_sql]
+    dialect = detect_dialect(sql_texts)
+    print(f"Step 2: 方言 = {dialect}")
+    print("Step 3-7: 解析 + 组装 knowledge...")
+    engine_ctx = {}
+    knowledge, _parsed = analyze_pipeline(
+        rules, raw["target_fields"], raw["group_variables"], dialect,
+        ddl_dir=ddl_dir, source_file=input_path.name,
+        rule_group_code=raw.get("rule_group_code") or "",
+        context_out=engine_ctx,
+    )
+    apply_meta_enrichments(knowledge, None, schedule_info, None,
+                           dq_declared_absent=dq_declared_absent)
+
+    # ── 资产一致性校验（防串包）：解析出的最终目标表 vs manifest.asset ──
+    mf_asset = mf.get("asset") or {}
+    final_table = str(engine_ctx.get("final_target_table")
+                      or knowledge["meta"].get("target_table") or "").lower()
+    final_schema = str(engine_ctx.get("final_target_schema") or "").lower()
+    want_table = str(mf_asset.get("table") or "").lower()
+    want_schema = str(mf_asset.get("schema") or "").lower()
+    if final_table != want_table:
+        print(f"[manifest] 资产不一致：制品解析目标表 = {final_schema}.{final_table}，"
+              f"manifest.asset = {want_schema}.{want_table}——制品与资产标识可能串包，"
+              "请核对制品清单", file=sys.stderr)
+        sys.exit(1)
+    if want_schema and final_schema and final_schema != want_schema:
+        print(f"[manifest] 资产 schema 不一致：{final_schema} vs {want_schema}", file=sys.stderr)
+        sys.exit(1)
+
+    # DDL provenance：stage 路径翻译回 manifest 原路径（清单即"实际消费"证据）
+    if ddl_map:
+        engine_ctx["ddl_files"] = [ddl_map.get(f, f)
+                                   for f in engine_ctx.get("ddl_files", [])]
+
+    # ── 投影 → 校验 → 落盘（精确路径）──
+    from baseline_export import export_baseline_v1, BaselineExportError
+    export_ctx = build_baseline_export_ctx(
+        knowledge, engine_ctx,
+        is_yml_mode=False, consumed_yml_files=[],
+        input_path=input_path,
+        platform_generation=str(mf.get("platform_generation") or "1.0"),
+        rule_group_en=raw.get("rule_group_en") or "",
+        group_en_fallback="",
+        input_sheets=input_sheets,
+    )
+    try:
+        out = export_baseline_v1(knowledge, export_ctx,
+                                 output_dir=Path(mf["output"]).parent,
+                                 output_file=mf["output"])
+    except BaselineExportError as e:
+        print("[baseline_v1] 导出失败，产物未落盘：", file=sys.stderr)
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    print(f"baseline_v1: {out.resolve()}")
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -158,13 +158,23 @@ baseline_v1
 ## 六、CLI 与交接
 
 ```
+# 文件交接形态（--input，人/流程直接给输入）
 python run.py analyzer --input {xlsx或规则组目录} --output {dir} [--ddl-dir D] \
                        [--lts {LTS excel}] --export baseline_v1 [--platform-generation 1.0]
+
+# 编排合入形态（--manifest，v2：dws-reverser 一次调用一次交卷；与 --input 互斥）
+python run.py analyzer --manifest {manifest.json}
 ```
 
 - `--lts`（v1.8）：LTS 调度任务 excel（平台导出三 sheet：tasks/jobs/taskParams），
   xlsx/yml 场景均可、优先于代码仓自动发现；loader 产出与 yml 发现同构
   （`inputs.read_lts_excel`），schedule 段形态不因源差异而变。
+- `--manifest`（v2 编排合入）：manifest 清单装配——术加 excel 必给 + LTS excel +
+  DQ 三态（provided/declared_absent，缺 key 即违规；declared_absent → 契约
+  `dq_rules: []`；provided 待 DQ excel 模板）+ DDL 文件/目录清单（stage 归一，
+  provenance 记原路径）+ 资产一致性校验（防串包）。产物落 `manifest.output`
+  精确路径，中间产物不落盘；失败 = fail loud stderr 错误清单（编排终态，原样
+  退回消费侧流程）。详见 commands/export-baseline.md 编排模式节。
 
 - 产物：`{dir}/{规则组英文}/baseline_v1.json`；stdout 单独一行
   `baseline_v1: {绝对路径}`，消费方按该前缀解析定位。

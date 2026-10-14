@@ -1010,15 +1010,18 @@ def append_i_view_step(raw: dict, input_path: Path) -> dict | None:
 
 
 def apply_meta_enrichments(knowledge: dict, i_view_info: dict | None,
-                           schedule_info: dict | None, dq_rules: list | None) -> None:
+                           schedule_info: dict | None, dq_rules: list | None,
+                           dq_declared_absent: bool = False) -> None:
     """把装配层发现的信息注入 knowledge.meta（注入有主：唯此一处写这些 key）。
 
     - i_view_info：先从 topology 查 view_step（不自己算，避免 exec_sequence≠step_id
       的错位），再写 meta.asset_info（view_rule_code 已消费，pop 掉）
     - schedule_info → meta.schedule（excel 输入无调度 → 调用方传 None，key 不写）
     - dq_rules → meta.dq_rules
+    - dq_declared_absent（v2 三态）→ meta.dq_declared_absent：用户声明资产无 DQ，
+      投影层据此输出 dq_rules=[]（而非 null）——"明确没有"与"未提供"分离
 
-    三个注入互不依赖，均为条件注入（缺省不写 key，保持既有 draft 形态）。
+    各注入互不依赖，均为条件注入（缺省不写 key，保持既有 draft 形态）。
     """
     if i_view_info:
         view_rule_code = i_view_info.pop("view_rule_code", "")
@@ -1033,6 +1036,8 @@ def apply_meta_enrichments(knowledge: dict, i_view_info: dict | None,
         knowledge["meta"]["schedule"] = schedule_info
     if dq_rules:
         knowledge["meta"]["dq_rules"] = dq_rules
+    if dq_declared_absent:
+        knowledge["meta"]["dq_declared_absent"] = True
 
 
 def build_baseline_export_ctx(knowledge: dict, engine_ctx: dict, *,
@@ -1095,3 +1100,115 @@ def build_baseline_export_ctx(knowledge: dict, engine_ctx: dict, *,
         "final_target_table": engine_ctx.get("final_target_table", ""),
         "table_catalog": engine_ctx.get("table_catalog") or {},
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# manifest 装配（v2 编排合入，波 3）
+# ═══════════════════════════════════════════════════════════════
+
+class ManifestError(Exception):
+    """manifest 结构/内容不合法（编排模式 fail loud，错误清单原样退回消费方）。"""
+
+
+def load_manifest(manifest_path) -> dict:
+    """读取并校验 v2 编排合入的 manifest（一次调用一次交卷的输入装配清单）。
+
+    manifest 形态（docs/13 §四，dws-reverser 的任务 prompt 携带三元组 → 机器生成）：
+        {
+          "asset": {"schema": "dws", "table": "dwb_trade_f"},   # 资产标识（一致性校验锚）
+          "artifacts": {
+            "execution_tasks": "path/术加.xlsx",                 # 必给（query_sql 唯一来源）
+            "lts": "path/lts.xlsx",                              # 增量资产必给；全量可不填
+            "dq": {"status": "provided", "path": "path/dq.xlsx"},
+                 | {"status": "declared_absent"},                # 声明无（入档后永不再问）
+            "ddl": ["path/a.sql", "path/ddl_dir"]                # 文件/目录混合；缺则连库兜底（未来）
+          },
+          "output": "path/baseline_v1.json"                      # 精确产物路径
+        }
+
+    校验纪律（全 fail loud——manifest 是机器写的，结构缺失=上游流程漏了，
+    宁可退回不可猜；DQ 三态尤其如此：沉默在消费侧已被拦，到这里必须显式）。
+
+    Returns: 解析后的 manifest dict（原样）。
+    Raises: ManifestError（json 非法/必填缺失/三态违规/路径不存在）。
+    """
+    import json
+
+    path = Path(manifest_path)
+    if not path.exists():
+        raise ManifestError(f"manifest 不存在: {path}")
+    try:
+        mf = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ManifestError(f"manifest JSON 解析失败: {e}")
+
+    asset = mf.get("asset") or {}
+    if not str(asset.get("table") or "").strip():
+        raise ManifestError("manifest.asset.table 必填（资产标识，一致性校验锚）")
+    if not str(mf.get("output") or "").strip():
+        raise ManifestError("manifest.output 必填（产物精确路径）")
+
+    artifacts = mf.get("artifacts") or {}
+    et = artifacts.get("execution_tasks")
+    if not et:
+        raise ManifestError("artifacts.execution_tasks 必给（术加制品包，query_sql 唯一来源）")
+    if not Path(et).is_file():
+        raise ManifestError(f"artifacts.execution_tasks 文件不存在: {et}")
+
+    lts = artifacts.get("lts")
+    if lts and not Path(lts).is_file():
+        raise ManifestError(f"artifacts.lts 文件不存在: {lts}")
+
+    dq = artifacts.get("dq")
+    if not isinstance(dq, dict) or dq.get("status") not in ("provided", "declared_absent"):
+        raise ManifestError(
+            "artifacts.dq 必须显式三态之一: {'status': 'provided', 'path': ...} "
+            "或 {'status': 'declared_absent'}（沉默在消费侧已拦，此处缺失=违规）")
+    if dq.get("status") == "provided" and not Path(dq.get("path") or "").is_file():
+        raise ManifestError(f"artifacts.dq(provided) 文件不存在: {dq.get('path')}")
+
+    ddl = artifacts.get("ddl") or []
+    if not isinstance(ddl, list):
+        raise ManifestError("artifacts.ddl 应为路径数组（文件/目录混合）")
+    for p in ddl:
+        if not Path(p).exists():
+            raise ManifestError(f"artifacts.ddl 路径不存在: {p}")
+
+    return mf
+
+
+def stage_ddl_files(ddl_paths: list, stage_dir) -> dict:
+    """DDL 文件/目录混合清单 → 统一 stage 目录（engine 的 ddl_dir 只收目录扫描）。
+
+    文件拷入 stage（保文件名，同名加序号前缀）；目录 rglob 拷入其中 DDL 文件。
+
+    Returns: {stage 文件绝对路径: manifest 原路径}——engine 消费 stage 路径，
+    provenance 记原路径（manifest 显式清单即"实际消费"证据，比目录扫描推断更强）。
+    Raises: ManifestError（路径不存在）。
+    """
+    import shutil
+
+    stage = Path(stage_dir)
+    stage.mkdir(parents=True, exist_ok=True)
+    mapping: dict = {}
+    used_names: dict = {}
+
+    def _stage(src: Path):
+        key = src.name.lower()
+        n = used_names.get(key, 0)
+        used_names[key] = n + 1
+        dst = stage / (f"{n}_{src.name}" if n else src.name)
+        shutil.copyfile(src, dst)
+        mapping[str(dst.resolve())] = str(src.resolve())
+
+    for p in ddl_paths or []:
+        src = Path(p)
+        if src.is_file():
+            _stage(src)
+        elif src.is_dir():
+            for ext in ("*.sql", "*.ddl", "*.txt", "*.SQL", "*.DDL", "*.TXT"):
+                for f in src.rglob(ext):
+                    _stage(f)
+        else:
+            raise ManifestError(f"DDL 路径不存在: {src}")
+    return mapping
