@@ -150,7 +150,7 @@ baseline_v1
 | TargetFields.加密方式 | 设计上丢弃（v1.2 候选：如消费方需要安全审计请提案） |
 | GroupVariables / 参数变量 | 设计上丢弃（调度参数已随 schedule.params 携带；规则级变量进 v1.2 候选） |
 | LTS 任务/调度/jobs/params | schedule（事实原样；源=yml 发现或 --lts excel，两者同构） |
-| DQ 规则 7 字段 | dq_rules[] |
+| DQ 规则字段（yml 7 字段 / excel 主 sheet 同构列 + 目标表schema） | dq_rules[]（excel 源额外携带 target_schema；附属 sheet 需求未清晰暂不消费） |
 | 项目编码/数据源/业务责任人 | source_type 不可知模式暂丢弃（v1.2 候选：asset.owner 等） |
 | 源文件路径（yml/xlsx/DDL/LTS/DQ） | provenance[] |
 | 解析交叉验证差异 | warnings[] |
@@ -160,7 +160,8 @@ baseline_v1
 ```
 # 文件交接形态（--input，人/流程直接给输入）
 python run.py analyzer --input {xlsx或规则组目录} --output {dir} [--ddl-dir D] \
-                       [--lts {LTS excel}] --export baseline_v1 [--platform-generation 1.0]
+                       [--lts {LTS excel}] [--dq {DQ excel}] \
+                       --export baseline_v1 [--platform-generation 1.0]
 
 # 编排合入形态（--manifest，v2：dws-reverser 一次调用一次交卷；与 --input 互斥）
 python run.py analyzer --manifest {manifest.json}
@@ -228,6 +229,8 @@ python run.py analyzer --manifest {manifest.json}
 - [x] tables[].table_props / is_distribute_key（v1.2：DDL 物理属性透传，
   engine 唯一生产点；DQ excel 的 rule_code/告警配置扩充待模板）
 - [x] LTS excel 读取器（`inputs.read_lts_excel`，v1.8 波 1b：xlsx 场景 schedule 通道，
-  与 yml 发现同构；DQ excel 读取器待模板到位）
+  与 yml 发现同构）
+- [x] DQ excel 读取器（`inputs.read_dq_excel` + `--dq`/manifest provided 通道：
+  主 sheet 同构 8 字段 + target_schema；附属 sheet 待需求清晰后按对账表扩充）
 - [ ] 批量 / 链式分析接入（analyze-batch / analyze-chain，按需）
 - [ ] 远期可选：补数任务发现、RPT_ITEM（dm=7）语料确认后细化、加密标识/规则变量入契约提案

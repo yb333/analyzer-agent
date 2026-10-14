@@ -140,6 +140,7 @@ python {skill_dir}/run.py view_generator \
 | `--dialect` | 否 | oracle/dws/auto，默认自动检测 |
 | `--ddl-dir` | 否 | DDL 目录（补充字段类型和注释） |
 | `--lts` | 否 | LTS 调度任务 excel（平台导出三 sheet：tasks/jobs/taskParams）；xlsx/yml 场景均可，优先于代码仓自动发现 |
+| `--dq` | 否 | DQ 质量规则 excel（平台导出，主 sheet「规则基本信息」）；xlsx/yml 场景均可，优先于代码仓自动发现 |
 | `--export` | 否 | 附加导出：`baseline_v1`（优化场景契约投影，见 docs/baseline_v1-契约.md） |
 | `--platform-generation` | 否 | 平台代次（baseline_v1 用），默认 1.0 |
 

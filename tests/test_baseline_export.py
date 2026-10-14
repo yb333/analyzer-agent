@@ -344,9 +344,11 @@ class TestE2ERepoYml:
 
     def test_dq_sorted_and_trimmed(self, exported):
         assert [q["rule_number"] for q in exported["dq_rules"]] == ["DQ_000001", "DQ_000002"]
+        # 7 同构字段 + target_schema（DQ excel 源特有，yml 源空串）
         assert set(exported["dq_rules"][0]) == {
             "rule_number", "rule_name", "rule_desc", "check_type",
-            "alert_level", "sql", "target_table"}
+            "alert_level", "sql", "target_table", "target_schema"}
+        assert exported["dq_rules"][0]["target_schema"] == ""
 
     def test_tables_ddl_plus_lineage_union(self, exported):
         tmp = next(t for t in exported["tables"] if t["name"] == "tmp_trade_order")

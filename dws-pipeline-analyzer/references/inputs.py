@@ -680,6 +680,74 @@ def _parse_dq_from_text(text: str) -> dict | None:
     }
 
 
+def read_dq_excel(excel_path) -> list | None:
+    """读取 DQ 质量规则 excel（平台导出）→ 与 yml 解析同构的 dq_rules 列表。
+
+    excel 是 LTS/DQ yml 的原始形态（平台从该 excel 转出 yml），本函数是 DQ 源
+    loader，与 _parse_dq_yml（yml 源）产出同构，投影层（baseline_export / view）
+    无感源差异（docs/13：loader 接口契约）。
+
+    只消费主 sheet「规则基本信息」——需求已明确的关心点（规则 Number/中文名/
+    描述/检查类型/告警级别/SQL/目标表/schema/负责人）。附属 sheet（参数配置/
+    输出列配置/目录路径）需求未清晰，暂不消费（provenance 亦不带 sheets——
+    "实际消费的源"只有主 sheet，路径即够定位；需求清晰后按对账表扩充）。
+
+    列映射（find_col 模糊匹配，全角/半角/空格容错）：
+        规则Number→rule_number  规则中文名→rule_name  规则中文描述→rule_desc
+        检查类型→check_type  告警级别→alert_level  SQL→sql
+        目标表→target_table  目标表schema→target_schema（excel 特有，yml 源空串）
+        规则负责人→owner
+        dq_file=excel 路径（provenance 采集用，同 yml 源形态）
+
+    Args:
+        excel_path: DQ excel 文件路径
+
+    Returns: [dq_rule_dict, ...]（每行一条，同 yml 解析产物结构）；
+        None（文件不存在 / 无主 sheet / 无有效规则行——"给了但读不到规则"
+        由调用方决定语义：manifest provided 场景应 fail loud）。
+    """
+    import openpyxl
+
+    path = Path(excel_path)
+    if not path.exists():
+        return None
+    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    try:
+        if "规则基本信息" not in wb.sheetnames:
+            return None
+        rows = list(wb["规则基本信息"].iter_rows(values_only=True))
+    finally:
+        wb.close()
+    if not rows:
+        return None
+
+    headers = [_safe_str(h) for h in rows[0]]
+    col = {h: i for i, h in enumerate(headers) if h}
+    idx = {k: _find_col(col, k) for k in
+           ("规则Number", "规则中文名", "规则中文描述", "检查类型", "告警级别",
+            "SQL", "目标表", "目标表schema", "规则负责人")}
+
+    rules = []
+    for row in rows[1:]:
+        if not row:
+            continue
+        rule_number = _get_val(row, idx["规则Number"])
+        if not rule_number:
+            continue  # 无编号的行不是规则（模板尾部统计行等）
+        rules.append({
+            "rule_number": rule_number,
+            "rule_name": _get_val(row, idx["规则中文名"]),
+            "rule_desc": _get_val(row, idx["规则中文描述"]),
+            "check_type": _get_val(row, idx["检查类型"]),
+            "alert_level": _get_val(row, idx["告警级别"]),
+            "sql": _get_val(row, idx["SQL"]),
+            "target_table": _get_val(row, idx["目标表"]),
+            "target_schema": _get_val(row, idx["目标表schema"]),
+            "owner": _get_val(row, idx["规则负责人"]),
+            "dq_file": str(path),  # 与 yml 源同构（provenance 采集用）
+        })
+    return rules if rules else None
+
 def _discover_dq_from_repo(yml_dir: Path, target_table: str) -> list | None:
     """从代码仓 DQ/ 目录发现资产对应的 DQ 质量检查规则。
 

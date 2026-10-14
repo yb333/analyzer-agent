@@ -234,9 +234,11 @@ class TestRunManifestE2E:
 # ── 5. 编排失败语义 ────────────────────────────────────────────
 
 class TestManifestFailLoud:
-    def test_provided_dq_rejected_until_loader_ready(self, tmp_path, capsys):
+    def test_provided_dq_with_empty_excel_fails_loud(self, tmp_path, capsys):
+        """provided 但 excel 无有效规则行 → fail loud（矛盾输入，错误清单退回）。
+        DQ excel loader 已就绪后 provided 不再被拒——拒绝语义收敛为"空制品"。"""
         mf = {
-            "asset": {"table": "t"},
+            "asset": {"table": "dwb_cust_asset_d"},
             "artifacts": {"execution_tasks": str(ET_XLSX),
                           "dq": {"status": "provided", "path": str(LTS_XLSX)}},
             "output": str(tmp_path / "o.json"),
@@ -246,7 +248,7 @@ class TestManifestFailLoud:
         with pytest.raises(SystemExit):
             _run_manifest(["--manifest", str(p)])
         err = capsys.readouterr().err
-        assert "provided 暂不支持" in err
+        assert "无有效规则行" in err
         assert not Path(mf["output"]).exists()
 
     def test_asset_mismatch_fails(self, tmp_path, capsys):

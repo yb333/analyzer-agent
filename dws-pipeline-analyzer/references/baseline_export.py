@@ -398,7 +398,9 @@ def _project_dq_rules(meta: dict):
     """
     dq = meta.get("dq_rules")
     if dq:
-        keep = ("rule_number", "rule_name", "rule_desc", "check_type", "alert_level", "sql", "target_table")
+        # target_schema 为 DQ excel 源特有（yml 源空串）；其余 7 字段两源同构
+        keep = ("rule_number", "rule_name", "rule_desc", "check_type", "alert_level",
+                "sql", "target_table", "target_schema")
         # 按 rule_number 排序保证确定性（发现顺序受目录遍历影响）
         items = [{k: d.get(k, "") for k in keep} for d in dq]
         items.sort(key=lambda d: str(d.get("rule_number") or ""))

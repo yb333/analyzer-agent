@@ -63,7 +63,7 @@ from inputs import (  # noqa: F401
     _discover_dq_from_repo, _parse_dq_yml,
     _extract_view_sql, _find_view_by_name, _search_view_by_source, discover_i_view,
     append_i_view_step, apply_meta_enrichments, build_baseline_export_ctx,
-    read_lts_excel,
+    read_lts_excel, read_dq_excel,
 )
 
 # excel 列定位/取值三件套（唯一定义处在 excel_utils，此处保留旧名）
@@ -805,6 +805,9 @@ def main():
     parser.add_argument("--lts", default="",
                         help="LTS 调度任务 excel 路径（平台导出三 sheet：tasks/jobs/taskParams；"
                              "xlsx/yml 场景均可，优先于代码仓自动发现）")
+    parser.add_argument("--dq", default="",
+                        help="DQ 质量规则 excel 路径（平台导出，主 sheet「规则基本信息」；"
+                             "xlsx/yml 场景均可，优先于代码仓自动发现）")
     parser.add_argument("--export", default="",
                         help="附加导出模式：baseline_v1（优化场景契约，投影自 knowledge_draft，"
                              "见 docs/baseline_v1-契约.md）。校验不过 fail loud 不落盘")
@@ -1014,10 +1017,18 @@ def main():
     field_mappings = knowledge["field_mappings"]
     quality = knowledge["quality"]
     target_name = knowledge["meta"]["target_table"]
-    # 发现 DQ 质量检查规则（此时 target_name 已有，用 I视图名/F表名关联）
+    # DQ 来源：--dq 显式 excel（loader，优先）→ yml 场景代码仓自动发现
     dq_rules = None
     _t_dq = 0
-    if is_yml_mode and target_name:
+    if args.dq:
+        _t_dq0 = _t_usage.time()
+        dq_rules = read_dq_excel(args.dq)
+        _t_dq = round(_t_usage.time() - _t_dq0, 2)
+        if dq_rules:
+            print(f"  [DQ] 发现 {len(dq_rules)} 条质量检查规则(excel) ({_t_dq}s)")
+        else:
+            print(f"  [DQ] excel 未读到有效规则: {args.dq}")
+    elif is_yml_mode and target_name:
         try:
             _t_dq0 = _t_usage.time()
             dq_rules = _discover_dq_from_repo(input_path, target_name)
@@ -1166,15 +1177,19 @@ def run_manifest(manifest_path) -> Path:
         sys.exit(1)
     artifacts = mf.get("artifacts") or {}
 
-    # DQ 三态：provided 暂 fail loud（DQ excel 解析器待平台模板，波 1b 余项）；
-    # declared_absent → dq_rules=[]（"明确没有"入档，此后永不再问）
+    # DQ 三态：provided → excel loader（同构产出）；declared_absent → dq_rules=[]
+    # （"明确没有"入档，此后永不再问）
     dq_status = (artifacts.get("dq") or {}).get("status")
-    if dq_status == "provided":
-        print("[manifest] artifacts.dq=provided 暂不支持：DQ excel 解析器待平台模板到位。"
-              "当前版本请消费侧确认后改走 declared_absent（资产确无 DQ），"
-              "或暂不启用 DQ 通道", file=sys.stderr)
-        sys.exit(1)
+    dq_rules = None
     dq_declared_absent = dq_status == "declared_absent"
+    if dq_status == "provided":
+        dq_rules = read_dq_excel(artifacts["dq"]["path"])
+        if not dq_rules:
+            print(f"[manifest] artifacts.dq=provided 但 excel 无有效规则行: "
+                  f"{artifacts['dq']['path']}——请核对 DQ 制品（主 sheet「规则基本信息」"
+                  "需含带规则Number的数据行）", file=sys.stderr)
+            sys.exit(1)
+        print(f"  [DQ] 发现 {len(dq_rules)} 条质量检查规则(excel)")
 
     # ── 主输入：术加制品包（query_sql 唯一来源）──
     input_path = Path(artifacts["execution_tasks"])
@@ -1223,7 +1238,7 @@ def run_manifest(manifest_path) -> Path:
         rule_group_code=raw.get("rule_group_code") or "",
         context_out=engine_ctx,
     )
-    apply_meta_enrichments(knowledge, None, schedule_info, None,
+    apply_meta_enrichments(knowledge, None, schedule_info, dq_rules,
                            dq_declared_absent=dq_declared_absent)
 
     # ── 资产一致性校验（防串包）：解析出的最终目标表 vs manifest.asset ──

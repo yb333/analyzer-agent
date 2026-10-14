@@ -56,7 +56,8 @@ python {skill_dir}/run.py analyzer --manifest {manifest.json}
 - `execution_tasks` 必给且存在；`asset.table` / `output` 必填
 - **DQ 三态必须显式**：`provided`（带 path）｜ `declared_absent`（声明无 → 契约
   `dq_rules: []`，入档后永不再问）——缺 key 即违规（"没有"和"忘了"必须可区分）。
-  当前版本 `provided` 暂 fail loud（DQ excel 解析器待平台模板到位）
+  `provided`（带 path）由 DQ excel loader 解析（`inputs.read_dq_excel`，与 yml 源
+  同构 + `target_schema` 字段）；excel 无有效规则行 = 矛盾输入 fail loud
 - `ddl` 为文件/目录混合清单（内部 stage 归一，provenance 记原路径）；缺省则
   tables[].table_props 为 null（连库兜底通道待后续波次）
 - 解析出的最终目标表与 `asset` 不一致 → fail loud（防制品串包）
@@ -80,6 +81,8 @@ python {skill_dir}/run.py analyzer \
 - xlsx 场景 DDL 不自动发现，需要时加 `--ddl-dir {DDL目录}`（增强 tables[].fields）
 - xlsx 场景调度：需要携带 schedule 时加 `--lts {LTS excel}`（平台导出三 sheet，
   v2 首优一次的 LTS 制品）。缺省时 `schedule` 为显式 null——消费方增量资产必给 LTS
+- xlsx 场景 DQ：加 `--dq {DQ excel}`（平台导出，主 sheet「规则基本信息」）；
+  缺省时 `dq_rules` 为显式 null
 
 产物：`{output_dir}/baseline_v1.json`。脚本 stdout 单独打印一行
 `baseline_v1: {绝对路径}`——**消费方按该行前缀定位产物**，把这行原样转交。
