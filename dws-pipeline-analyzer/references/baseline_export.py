@@ -263,7 +263,9 @@ def _project_rules(draft: dict):
 def _table_fields_from_catalog(catalog_entry: dict) -> list:
     fields = []
     for fname, fmeta in catalog_entry.items():
-        if fname == "__table_comment__":
+        # 特殊 key（__table_comment__ / __table_props__ 等表级信息）不是字段；
+        # 表级物理属性由 v1.2 投影层另行消费，不进 fields
+        if fname.startswith("__"):
             continue
         if not isinstance(fmeta, dict):
             continue

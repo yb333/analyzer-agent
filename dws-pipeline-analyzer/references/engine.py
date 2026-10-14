@@ -5620,11 +5620,13 @@ def detect_patterns(
 # 辅助: parse_ddl_for_metadata() — 从 DDL 文件读取字段类型+中文名
 # ═══════════════════════════════════════════════════════════════
 
-def _extract_create_table_body(content: str) -> str:
-    r"""从 DDL 内容里提取 CREATE TABLE 字段定义块（括号内内容）。
+def _locate_create_table_span(content: str) -> tuple[int, int] | None:
+    r"""定位 CREATE TABLE 字段定义块的 (body_start, body_end)。
 
-    用括号配平精确定位表定义的闭合括号，避免贪婪正则把 WITH(...)/DISTRIBUTE BY/
-    PARTITION BY 等表定义后的子句包进来。
+    body_start = CREATE TABLE 后第一个左括号之后一位；body_end = 配平的右括号
+    位置。body 与表尾物理属性子句（WITH/DISTRIBUTE BY/PARTITION BY）的分界点，
+    字段提取（_extract_create_table_body）与物理属性提取（_extract_table_props）
+    共用本定位，保证两段切分永远一致。
 
     支持多种写法：
         CREATE TABLE t (...)
@@ -5632,14 +5634,16 @@ def _extract_create_table_body(content: str) -> str:
         CREATE TABLE schema.t (...)
         CREATE TABLE t /* 注释 */ (...)
     多空格/tab/换行都容错（靠 ``\s+`` 和 ``\S*``）。
+
+    配平失败兜底返回 (start, len)——与既有 _extract_create_table_body 行为一致。
+    找不到 CREATE TABLE 返回 None。
     """
-    # 定位 CREATE TABLE 后的第一个左括号（跳过表名/schema/IF NOT EXISTS/注释）
     ct = re.search(
         r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[^\(]*\(',
         content, re.IGNORECASE | re.DOTALL
     )
     if not ct:
-        return ""
+        return None
     start = ct.end()  # 第一个 ( 之后
     # 从 start 开始括号配平，找到配对的闭合 )
     depth = 1
@@ -5651,9 +5655,91 @@ def _extract_create_table_body(content: str) -> str:
         elif ch == ")":
             depth -= 1
             if depth == 0:
-                return content[start:i]
+                return (start, i)
         i += 1
-    return content[start:]  # 配平失败兜底（取到末尾）
+    return (start, len(content))  # 配平失败兜底（取到末尾）
+
+
+def _extract_create_table_body(content: str) -> str:
+    r"""从 DDL 内容里提取 CREATE TABLE 字段定义块（括号内内容）。
+
+    用括号配平精确定位表定义的闭合括号，避免贪婪正则把 WITH(...)/DISTRIBUTE BY/
+    PARTITION BY 等表定义后的子句包进来。定位逻辑在 _locate_create_table_span
+    （与 _extract_table_props 共用，保证两段切分一致）。
+    """
+    span = _locate_create_table_span(content)
+    if span is None:
+        return ""
+    return content[span[0]:span[1]]
+
+
+def _extract_table_props(content: str) -> dict:
+    r"""从 CREATE TABLE 语句提取表定义闭合括号之后的物理属性子句。
+
+    GaussDB(DWS) 常见表尾子句：WITH(...) 存储参数、DISTRIBUTE BY 分布键、
+    PARTITION BY 分区定义、TABLESPACE 表空间。字段定义体（括号内）不含这些
+    信息——本函数是 _extract_create_table_body（只取括号内）的互补面，
+    两者的唯一权威生产点都在 engine（docs/13：投影/视图只消费，禁止二次解析）。
+
+    Returns: {}（无任何物理属性时不写 key）或含以下 key（有才给，原文片段不重排）：
+        distribute_by:      "HASH (user_id, org_id)" / "REPLICATION" / "ROUNDROBIN"
+        distribute_columns: ["user_id", "org_id"]（小写；仅 HASH/列表形式有）
+        partition_by:       "PARTITION BY RANGE (dt) (...)"（到下一子句/语句尾）
+        with_options:       "orientation=column, compression=low"（WITH 括号内原文）
+        tablespace:         "pg_default"
+    """
+    span = _locate_create_table_span(content)
+    if span is None:
+        return {}
+    # 尾部子句：闭合括号之后到语句结束（分号）或内容末尾
+    tail = content[span[1] + 1:]
+    semi = tail.find(";")
+    if semi >= 0:
+        tail = tail[:semi]
+    if not tail.strip():
+        return {}
+
+    props: dict = {}
+
+    # WITH(...)：存储参数（orientation/compression 等），括号内原文
+    m = re.search(r'\bWITH\s*\(([^)]*)\)', tail, re.IGNORECASE)
+    if m and m.group(1).strip():
+        props["with_options"] = m.group(1).strip()
+
+    # DISTRIBUTE BY：分布键（HASH(col,...) / REPLICATION / ROUNDROBIN）。
+    # 容错 "DISTRIBUTED BY"（部分导出工具的过去分词写法）。
+    m = re.search(
+        r'\bDISTRIBUTE[D]?\s+BY\s+(.*?)(?=\bWITH\s*\(|\bPARTITION\s+BY\b|\bTABLESPACE\b|$)',
+        tail, re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        dist = m.group(1).strip().rstrip(",").strip()
+        if dist:
+            props["distribute_by"] = dist
+            cols = re.findall(r'\(([^)]*)\)', dist)
+            if cols:
+                dcols = [c.strip().lower() for c in cols[0].split(",") if c.strip()]
+                if dcols:
+                    props["distribute_columns"] = dcols
+
+    # PARTITION BY：分区定义（可含很长的分区列表），到下一子句关键字或语句尾
+    m = re.search(r'\b(PARTITION\s+BY\b.*)$', tail, re.IGNORECASE | re.DOTALL)
+    if m:
+        part = m.group(1)
+        stop = re.search(r'\b(WITH\s*\(|DISTRIBUTE[D]?\s+BY|TABLESPACE\b)',
+                         part, re.IGNORECASE)
+        if stop:
+            part = part[:stop.start()]
+        part = part.strip().rstrip(",").strip()
+        if part:
+            props["partition_by"] = part
+
+    # TABLESPACE
+    m = re.search(r'\bTABLESPACE\s+(\S+)', tail, re.IGNORECASE)
+    if m:
+        props["tablespace"] = m.group(1).rstrip(",")
+
+    return props
 
 
 # DDL 已消费文件记录：{ddl_dir(resolve): {文件绝对路径}}（provenance 用，只记实际参与解析的文件）
@@ -5742,6 +5828,13 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
             continue
         # provenance 记录：该文件被本表解析实际消费
         _DDL_CONSUMED_FILES.setdefault(str(ddl_path.resolve()), set()).add(str(sql_file.resolve()))
+
+        # 表级物理属性（WITH/DISTRIBUTE BY/PARTITION BY/TABLESPACE）：
+        # 唯一生产点在此（engine），投影/视图只消费 __table_props__，禁止二次解析
+        table_props = _extract_table_props(content)
+        if table_props:
+            result["__table_props__"] = table_props
+        dist_cols = set(table_props.get("distribute_columns") or [])
 
         # 字段名 + 类型：类型可含空格（如 "character varying"）和括号参数（如 (10) 或 (18,2)）
         # 字段名允许大写（DDL 导出可能全大写）
@@ -5845,6 +5938,7 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
                     "nullable": nullable,
                     "default_value": default_value,
                     "is_pk": fname in pk_fields,
+                    "is_distribute_key": fname in dist_cols,
                 }
 
         # ── 2. 提取 COMMENT ON COLUMN（覆盖行内注释）──
@@ -5859,7 +5953,8 @@ def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
                 result[fname]["comment"] = comment
             else:
                 result[fname] = {"type": "", "comment": comment,
-                                 "nullable": True, "default_value": "", "is_pk": False}
+                                 "nullable": True, "default_value": "", "is_pk": False,
+                                 "is_distribute_key": fname in dist_cols}
 
         # ── 3. 提取表级注释 COMMENT ON TABLE ──
         # 存到特殊 key，供标题等使用（不影响字段遍历——没有 type 会被跳过）

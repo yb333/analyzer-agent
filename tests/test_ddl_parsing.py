@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ANALYZER_REF = PROJECT_ROOT / "dws-pipeline-analyzer" / "references"
 sys.path.insert(0, str(ANALYZER_REF))
 
-from engine import parse_ddl_for_metadata, _extract_create_table_body
+from engine import parse_ddl_for_metadata, _extract_create_table_body, _extract_table_props
 
 
 def _write_ddl(tmp_path, table_name, ddl_content):
@@ -349,3 +349,151 @@ class TestTypeLengthPreservation:
         assert meta["a"]["type"] == "nvarchar(10)"
         assert "varying" in meta["b"]["type"].lower() and "20" in meta["b"]["type"]
         assert meta["c"]["type"] == "varchar(30)"
+
+
+class TestExtractTableProps:
+    """_extract_table_props：表定义闭合括号之后的物理属性提取（v1.8 波 1b）。
+
+    真实 GaussDB(DWS) 表尾子句：WITH(...) 存储参数 / DISTRIBUTE BY 分布键 /
+    PARTITION BY 分区定义 / TABLESPACE。这是 catalog.__table_props__ 的唯一
+    生产点（docs/13：单一权威生产点，投影/视图只消费）。
+    """
+
+    def test_full_gaussdb_ddl(self):
+        """典型三段式：WITH + DISTRIBUTE BY HASH + PARTITION BY RANGE 全部提取。"""
+        ddl = (
+            "CREATE TABLE customer_addr (\n"
+            "  ca_address_sk INTEGER NOT NULL,\n"
+            "  ca_address_id CHARACTER(16)\n"
+            ")\n"
+            "WITH (orientation=column, compression=low)\n"
+            "DISTRIBUTE BY HASH (ca_address_sk)\n"
+            "PARTITION BY RANGE (ca_address_sk)\n"
+            "(\n"
+            "  PARTITION p1 VALUES LESS THAN (10000),\n"
+            "  PARTITION p2 VALUES LESS THAN (20000)\n"
+            ");"
+        )
+        props = _extract_table_props(ddl)
+        assert props["distribute_by"] == "HASH (ca_address_sk)"
+        assert props["distribute_columns"] == ["ca_address_sk"]
+        assert props["with_options"] == "orientation=column, compression=low"
+        assert props["partition_by"].startswith("PARTITION BY RANGE (ca_address_sk)")
+        assert "VALUES LESS THAN (10000)" in props["partition_by"]
+
+    def test_multi_column_hash(self):
+        """HASH 多列分布键，全部进 distribute_columns（小写）。"""
+        ddl = "CREATE TABLE t (a INT, b INT, c INT) DISTRIBUTE BY HASH (A, b);"
+        props = _extract_table_props(ddl)
+        assert props["distribute_by"] == "HASH (A, b)"  # 原文不重排
+        assert props["distribute_columns"] == ["a", "b"]
+
+    def test_replication_no_columns(self):
+        """REPLICATION 复制表无分布列。"""
+        ddl = "CREATE TABLE dim_code (code INT, name VARCHAR(64)) DISTRIBUTE BY REPLICATION;"
+        props = _extract_table_props(ddl)
+        assert props["distribute_by"] == "REPLICATION"
+        assert "distribute_columns" not in props
+
+    def test_roundrobin(self):
+        ddl = "CREATE TABLE t (a INT) DISTRIBUTE BY ROUNDROBIN;"
+        props = _extract_table_props(ddl)
+        assert props["distribute_by"] == "ROUNDROBIN"
+
+    def test_distributed_by_spelling(self):
+        """部分导出工具写 DISTRIBUTED BY（过去分词），容错。"""
+        ddl = "CREATE TABLE t (a INT) DISTRIBUTED BY HASH (a);"
+        props = _extract_table_props(ddl)
+        assert props["distribute_by"] == "HASH (a)"
+        assert props["distribute_columns"] == ["a"]
+
+    def test_clause_order_distribute_before_partition(self):
+        """DISTRIBUTE BY 在 PARTITION BY 之前：两边都要正确切分。"""
+        ddl = (
+            "CREATE TABLE t (dt DATE, uid INT)\n"
+            "DISTRIBUTE BY HASH (uid)\n"
+            "PARTITION BY RANGE (dt)\n"
+            "(\n"
+            "  PARTITION p202401 VALUES LESS THAN ('2024-02-01')\n"
+            ");"
+        )
+        props = _extract_table_props(ddl)
+        assert props["distribute_by"] == "HASH (uid)"
+        assert props["partition_by"].startswith("PARTITION BY RANGE (dt)")
+        assert "DISTRIBUTE" not in props["partition_by"].upper()
+
+    def test_clause_order_partition_before_distribute(self):
+        """PARTITION BY 在 DISTRIBUTE BY 之前：partition_by 截断到下一子句。"""
+        ddl = (
+            "CREATE TABLE t (dt DATE, uid INT)\n"
+            "PARTITION BY RANGE (dt) (PARTITION p1 VALUES LESS THAN ('2024-02-01'))\n"
+            "DISTRIBUTE BY HASH (uid)\n"
+            "WITH (orientation=column);"
+        )
+        props = _extract_table_props(ddl)
+        assert props["distribute_by"] == "HASH (uid)"
+        assert props["with_options"] == "orientation=column"
+        part = props["partition_by"]
+        assert part.startswith("PARTITION BY RANGE (dt)")
+        assert "DISTRIBUTE" not in part.upper()
+        assert "WITH" not in part.upper()
+
+    def test_tablespace(self):
+        ddl = "CREATE TABLE t (a INT) TABLESPACE pg_default;"
+        props = _extract_table_props(ddl)
+        assert props["tablespace"] == "pg_default"
+
+    def test_no_props_returns_empty(self):
+        """无任何表尾子句 → 空 dict（不写 __table_props__ key）。"""
+        ddl = "CREATE TABLE t (a INT, b VARCHAR(10));"
+        assert _extract_table_props(ddl) == {}
+
+    def test_lowercase_keywords(self):
+        """关键字小写也识别（DDL 导出工具大小写不统一）。"""
+        ddl = "create table t (a int) distribute by hash (a) with (orientation=column);"
+        props = _extract_table_props(ddl)
+        assert props["distribute_by"] == "hash (a)"
+        assert props["with_options"] == "orientation=column"
+
+    def test_statement_end_at_semicolon(self):
+        """尾部分号之后的内容（下一条语句）不混入。"""
+        ddl = (
+            "CREATE TABLE t (a INT) DISTRIBUTE BY HASH (a);\n"
+            "COMMENT ON TABLE t IS '注释';"
+        )
+        props = _extract_table_props(ddl)
+        assert props["distribute_by"] == "HASH (a)"
+        assert "COMMENT" not in props["distribute_by"].upper()
+
+
+class TestTablePropsInMetadata:
+    """parse_ddl_for_metadata：__table_props__ 注入 + is_distribute_key 字段标记。"""
+
+    def test_metadata_carries_table_props(self, tmp_path):
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (uid INT, dt DATE)\n"
+            "DISTRIBUTE BY HASH (uid)\n"
+            "PARTITION BY RANGE (dt) (PARTITION p1 VALUES LESS THAN ('2024-02-01'));")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        assert meta["__table_props__"]["distribute_by"] == "HASH (uid)"
+        assert meta["__table_props__"]["distribute_columns"] == ["uid"]
+        assert meta["__table_props__"]["partition_by"].startswith("PARTITION BY RANGE")
+        # 分布键列标记
+        assert meta["uid"]["is_distribute_key"] is True
+        assert meta["dt"]["is_distribute_key"] is False
+
+    def test_metadata_no_props_no_key(self, tmp_path):
+        """无物理属性 → 不写 __table_props__（字段标记 False）。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f", "CREATE TABLE test_f (uid INT);")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        assert "__table_props__" not in meta
+        assert meta["uid"]["is_distribute_key"] is False
+
+    def test_comment_only_field_gets_flag(self, tmp_path):
+        """COMMENT ON COLUMN 出现 body 外新字段时，同样带 is_distribute_key 键。"""
+        ddl_dir = _write_ddl(tmp_path, "test_f",
+            "CREATE TABLE test_f (uid INT) DISTRIBUTE BY HASH (uid);\n"
+            "COMMENT ON COLUMN test_f.extra IS '补充字段';")
+        meta = parse_ddl_for_metadata(ddl_dir, "test_f")
+        assert "extra" in meta
+        assert meta["extra"]["is_distribute_key"] is False

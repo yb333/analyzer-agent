@@ -229,3 +229,43 @@ def mock_repo_data(tmp_path):
         "ddl_dir": Path(ddl_dir) if ddl_dir else None,
         "repo_info": info,
     }
+
+
+class TestTablePropsInCatalog:
+    """__table_props__ 表级物理属性进 catalog（v1.8 波 1b，唯一生产点在 engine）。"""
+
+    def test_catalog_entry_carries_table_props(self, tmp_path):
+        """build_table_catalog 的 entry 含 __table_props__（有属性时）。"""
+        from engine import build_table_catalog, RawRule
+        ddl_dir = tmp_path / "ddl"
+        ddl_dir.mkdir()
+        (ddl_dir / "dwb_f.sql").write_text(
+            "CREATE TABLE dwb_f (uid INT, dt DATE)\n"
+            "WITH (orientation=column)\n"
+            "DISTRIBUTE BY HASH (uid)\n"
+            "PARTITION BY RANGE (dt) (PARTITION p1 VALUES LESS THAN ('2024-02-01'));",
+            encoding="utf-8")
+        rules = [RawRule(rule_code="R1", rule_name="r1", rule_type=1, exec_sequence=1,
+                         target_schema="dws", target_table="dwb_f", delete_mode="",
+                         query_sql="SELECT 1", rule_group_code="G", rule_group_en="G")]
+        catalog = build_table_catalog(rules, str(ddl_dir))
+        entry = catalog["dws.dwb_f"]
+        props = entry["__table_props__"]
+        assert props["distribute_by"] == "HASH (uid)"
+        assert props["distribute_columns"] == ["uid"]
+        assert props["with_options"] == "orientation=column"
+        assert props["partition_by"].startswith("PARTITION BY RANGE")
+        assert entry["uid"]["is_distribute_key"] is True
+        assert entry["dt"]["is_distribute_key"] is False
+
+    def test_catalog_no_props_entry_clean(self, tmp_path):
+        """无物理属性 → entry 无 __table_props__ key（catalog 形态不膨胀）。"""
+        from engine import build_table_catalog, RawRule
+        ddl_dir = tmp_path / "ddl"
+        ddl_dir.mkdir()
+        (ddl_dir / "dwb_f.sql").write_text("CREATE TABLE dwb_f (uid INT);", encoding="utf-8")
+        rules = [RawRule(rule_code="R1", rule_name="r1", rule_type=1, exec_sequence=1,
+                         target_schema="dws", target_table="dwb_f", delete_mode="",
+                         query_sql="SELECT 1", rule_group_code="G", rule_group_en="G")]
+        catalog = build_table_catalog(rules, str(ddl_dir))
+        assert "__table_props__" not in catalog["dws.dwb_f"]

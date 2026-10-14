@@ -442,3 +442,28 @@ class TestE2EMerge:
         assert ei.value.code == 1
         assert "R0002" in err.getvalue() and "merge_on" in err.getvalue()
         assert not (out_base / "DWB_TRADE_MERGE_D" / "baseline_v1.json").exists()
+
+
+def test_table_fields_from_catalog_skips_table_props():
+    """表级特殊 key（__table_props__ 等）不得泄漏进 tables[].fields。
+
+    __table_props__ 是 dict，原实现只过滤 __table_comment__（str），dict 会穿过
+    isinstance 检查被当成字段输出——v1.2 投影消费表级属性前的防护。
+    """
+    from baseline_export import _table_fields_from_catalog
+    entry = {
+        "__table_comment__": "客户地址表",
+        "__table_props__": {
+            "distribute_by": "HASH (uid)",
+            "distribute_columns": ["uid"],
+            "partition_by": "PARTITION BY RANGE (dt) (...)",
+        },
+        "uid": {"type": "int", "comment": "用户ID", "nullable": False,
+                "default_value": "", "is_pk": True, "is_distribute_key": True},
+        "dt": {"type": "date", "comment": "", "nullable": True,
+               "default_value": "", "is_pk": False, "is_distribute_key": False},
+    }
+    fields = _table_fields_from_catalog(entry)
+    names = [f["name"] for f in fields]
+    assert names == ["uid", "dt"]
+    assert all(not n.startswith("__") for n in names)
