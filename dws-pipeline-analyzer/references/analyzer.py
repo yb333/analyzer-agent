@@ -1167,32 +1167,36 @@ def run_manifest(manifest_path) -> Path:
 
     Returns: 产物绝对路径（stdout 另行打印 `baseline_v1: {路径}` 定位行）。
     """
-    from inputs import ManifestError, load_manifest, stage_ddl_files, read_lts_excel
+    from inputs import (ManifestError, load_manifest, resolve_artifacts,
+                       stage_ddl_files, read_lts_excel, read_dq_excel)
 
-    # ── 装配（inputs 层，结构/三态/路径校验全 fail loud）──
+    # ── 装配（inputs 层：结构校验 + 制品类型分拣，全 fail loud）──
     try:
         mf = load_manifest(manifest_path)
+        ra = resolve_artifacts(mf.get("artifacts") or {})
     except ManifestError as e:
-        print(f"[manifest] 装配失败: {e}", file=sys.stderr)
+        print(f"[manifest] 装配失败:\n{e}", file=sys.stderr)
         sys.exit(1)
+    for note in ra.get("notes") or []:
+        print(f"  [分拣] {note}")
     artifacts = mf.get("artifacts") or {}
 
-    # DQ 三态：provided → excel loader（同构产出）；declared_absent → dq_rules=[]
-    # （"明确没有"入档，此后永不再问）
-    dq_status = (artifacts.get("dq") or {}).get("status")
+    # DQ 三态（resolve 落定）：provided → excel loader（同构产出）；
+    # declared_absent → dq_rules=[]（"明确没有"入档，此后永不再问）
+    dq_status = ra["dq_status"]
     dq_rules = None
     dq_declared_absent = dq_status == "declared_absent"
     if dq_status == "provided":
-        dq_rules = read_dq_excel(artifacts["dq"]["path"])
+        dq_rules = read_dq_excel(ra["dq_path"])
         if not dq_rules:
             print(f"[manifest] artifacts.dq=provided 但 excel 无有效规则行: "
-                  f"{artifacts['dq']['path']}——请核对 DQ 制品（主 sheet「规则基本信息」"
+                  f"{ra['dq_path']}——请核对 DQ 制品（主 sheet「规则基本信息」"
                   "需含带规则Number的数据行）", file=sys.stderr)
             sys.exit(1)
         print(f"  [DQ] 发现 {len(dq_rules)} 条质量检查规则(excel)")
 
     # ── 主输入：术加制品包（query_sql 唯一来源）──
-    input_path = Path(artifacts["execution_tasks"])
+    input_path = Path(ra["execution_tasks"])
     print(f"=== dws-pipeline-analyzer（编排模式）===")
     print(f"manifest: {manifest_path}")
     print("Step 1: 读取制品包 Excel...")
@@ -1205,7 +1209,7 @@ def run_manifest(manifest_path) -> Path:
 
     # ── LTS excel（增量资产回刷地基；规则组编码已知则精确匹配，混组 excel 防误收）──
     schedule_info = None
-    lts_path = artifacts.get("lts")
+    lts_path = ra.get("lts")
     if lts_path:
         schedule_info = read_lts_excel(lts_path, raw.get("rule_group_code") or "")
         if schedule_info:

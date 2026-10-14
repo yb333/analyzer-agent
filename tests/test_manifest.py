@@ -62,41 +62,22 @@ class TestLoadManifest:
         with pytest.raises(ManifestError, match="output"):
             load_manifest(p)
 
-    def test_missing_execution_tasks(self, tmp_path):
-        mf = {"asset": {"table": "t"}, "artifacts": {"dq": {"status": "declared_absent"}},
-              "output": "x.json"}
-        p = tmp_path / "m.json"
-        p.write_text(json.dumps(mf), encoding="utf-8")
-        with pytest.raises(ManifestError, match="execution_tasks 必给"):
-            load_manifest(p)
-
-    def test_dq_silence_is_rejected(self, tmp_path):
-        """DQ 沉默（缺 dq key）= 违规——三态必须显式，区分'没有'和'忘了'。"""
-        mf = {"asset": {"table": "t"},
-              "artifacts": {"execution_tasks": str(ET_XLSX)},
-              "output": "x.json"}
-        p = tmp_path / "m.json"
-        p.write_text(json.dumps(mf), encoding="utf-8")
-        with pytest.raises(ManifestError, match="三态"):
-            load_manifest(p)
-
-    def test_dq_provided_requires_existing_file(self, tmp_path):
+    def test_dq_dict_bad_status_rejected(self, tmp_path):
+        """dq 为三态对象时 status 必须合法（结构级，仍在 load 校验）。"""
         mf = {"asset": {"table": "t"},
               "artifacts": {"execution_tasks": str(ET_XLSX),
-                            "dq": {"status": "provided", "path": "nope.xlsx"}},
+                            "dq": {"status": "maybe"}},
               "output": "x.json"}
         p = tmp_path / "m.json"
         p.write_text(json.dumps(mf), encoding="utf-8")
-        with pytest.raises(ManifestError, match="provided.*不存在"):
+        with pytest.raises(ManifestError, match="status 必须为"):
             load_manifest(p)
 
-    def test_missing_file_fails(self, tmp_path):
-        p = _write_manifest(tmp_path)
-        mf = json.loads(p.read_text(encoding="utf-8"))
-        mf["artifacts"]["execution_tasks"] = "/not/exist.xlsx"
-        p.write_text(json.dumps(mf), encoding="utf-8")
-        with pytest.raises(ManifestError, match="不存在"):
-            load_manifest(p)
+    # 路径级校验与三态落定已迁移至 resolve_artifacts（docs/15 自动分拣），
+    # 覆盖见 tests/test_artifact_sorting.py：
+    #   - execution_tasks 必给 / 文件不存在 → resolve 阶段 ManifestError
+    #   - DQ 沉默（无声明且分拣无发现）→ resolve 阶段违规
+    #   - provided 路径不存在 → resolve 阶段报错
 
 
 # ── 2. stage_ddl_files ─────────────────────────────────────────
