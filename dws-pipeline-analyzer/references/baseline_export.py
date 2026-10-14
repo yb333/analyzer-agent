@@ -17,6 +17,14 @@ v1.1（analyzer 侧主导的增量）：
     condition_expr 逐字来自 delete_condition / 交换配置，来自 SQL 解析时为等价
     重排版（condition_source='query_sql' 标记）。
 
+v1.2（纯增量，docs/12 §2.3 → 消费端需求）：
+    tables[].table_props —— DDL 表级物理属性（分布键/分区/存储参数），
+      唯一生产点=engine 的 DDL 解析（__table_props__），本模块原样透传；
+      DDL 缺失 = 显式 null。
+    tables[].fields[].is_distribute_key —— 分布键列标记（DDL 事实）。
+    provenance[].sheets —— xlsx 制品的 sheet 定位（文件+sheet，patch 底本回查）；
+      路径类源（rule_yml/ddl）不携带。
+
 本模块由 analyzer.main 在 --export baseline_v1 时调用（不作为独立 CLI）：
     from baseline_export import export_baseline_v1
     path = export_baseline_v1(knowledge, ctx, output_dir)   # 校验不过抛 BaselineExportError
@@ -30,8 +38,8 @@ import json
 import re
 from pathlib import Path
 
-CONTRACT_VERSION = "1.1"
-SUPPORTED_VERSIONS = {"1.0", "1.1"}
+CONTRACT_VERSION = "1.2"
+SUPPORTED_VERSIONS = {"1.0", "1.1", "1.2"}
 
 DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "baseline_v1.schema.json"
 
@@ -264,7 +272,7 @@ def _table_fields_from_catalog(catalog_entry: dict) -> list:
     fields = []
     for fname, fmeta in catalog_entry.items():
         # 特殊 key（__table_comment__ / __table_props__ 等表级信息）不是字段；
-        # 表级物理属性由 v1.2 投影层另行消费，不进 fields
+        # 表级物理属性由 _project_tables 从 __table_props__ 透传，不进 fields
         if fname.startswith("__"):
             continue
         if not isinstance(fmeta, dict):
@@ -273,6 +281,7 @@ def _table_fields_from_catalog(catalog_entry: dict) -> list:
             "name": fname,
             "type": str(fmeta.get("type") or ""),
             "comment": str(fmeta.get("comment") or ""),
+            "is_distribute_key": bool(fmeta.get("is_distribute_key")),
         })
     return fields
 
@@ -305,22 +314,29 @@ def _project_tables(draft: dict, ctx: dict) -> list:
         name = str(t.get("name") or "")
         key = f"{schema}.{name}".lower()
 
+        # 表级物理属性（v1.2）：DDL catalog 的 __table_props__ 原样透传（原文不重排）；
+        # 无 catalog（表无 DDL）→ 显式 null——表级物理事实不可得
+        entry = catalog.get(key) or {}
+        table_props = entry.get("__table_props__") if entry else None
+
         # fields 口径（信息守恒）：DDL catalog（类型/注释事实）∪ 血缘字段名（无类型事实），
         # 大小写不敏感去重；两者皆缺 → 空数组（消费方查库回填）。
         # 最终目标表无 catalog 时用 meta.target_field_types 兜底（同为 DDL 来源）。
         fields = []
         seen_names = set()
 
-        def _add_field(fname: str, ftype: str = "", fcomment: str = ""):
+        def _add_field(fname: str, ftype: str = "", fcomment: str = "",
+                       is_dist: bool = False):
             low = fname.lower()
             if low in seen_names or not fname:
                 return
             seen_names.add(low)
-            fields.append({"name": fname, "type": ftype, "comment": fcomment})
+            fields.append({"name": fname, "type": ftype, "comment": fcomment,
+                           "is_distribute_key": is_dist})
 
-        if key in catalog:
-            for f in _table_fields_from_catalog(catalog[key]):
-                _add_field(f["name"], f["type"], f["comment"])
+        if entry:
+            for f in _table_fields_from_catalog(entry):
+                _add_field(f["name"], f["type"], f["comment"], f["is_distribute_key"])
         elif key == final_key:
             types = meta.get("target_field_types") or {}
             comments = meta.get("target_field_comments") or {}
@@ -329,7 +345,9 @@ def _project_tables(draft: dict, ctx: dict) -> list:
         for fn in fields_by_table.get(key, []):
             _add_field(fn)
 
-        tables_out.append({"schema": schema, "name": name, "fields": fields})
+        out = {"schema": schema, "name": name, "table_props": table_props,
+               "fields": fields}
+        tables_out.append(out)
     return tables_out
 
 
@@ -354,8 +372,9 @@ def _project_lineage(draft: dict) -> list:
 
 
 def _project_schedule(meta: dict):
-    """schedule：f/i/other_tasks 原样（jobs/params 事实），裁冗余 all_tasks 与 lts_file
-    （路径已进 provenance）。xlsx 等模式无调度 → 显式 null。"""
+    """schedule：f/i/other_tasks 原样（jobs/params 事实），裁冗余 all_tasks、lts_file
+    与 _source_sheets（路径已进 provenance，sheets 已进 provenance[].sheets）。
+    xlsx 等模式无调度 → 显式 null。"""
     sched = meta.get("schedule")
     if not sched:
         return None

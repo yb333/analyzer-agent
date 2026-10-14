@@ -355,6 +355,11 @@ def read_excel(excel_path: str) -> dict:
 
         result["variables"] = sorted(all_vars)
 
+    # v1.2 provenance：实际读到的 sheet 清单（文件+sheet 定位，装配层采集用；
+    # 私有 key，main 读出后不流入 draft）
+    result["_source_sheets"] = [s for s in ("RULE", "TargetFields", "GroupVariables")
+                                if s in wb.sheetnames]
+
     wb.close()
     return result
 
@@ -827,12 +832,14 @@ def main():
     # 输入分流：.xlsx 文件 → read_excel；目录 → read_yml（代码仓 yml 场景）
     is_yml_mode = input_path.is_dir()
     consumed_yml_files = []  # 实际读取的 yml 清单（baseline_v1 provenance 用）
+    input_sheets = None      # xlsx 实际读到的 sheet 清单（v1.2 provenance[].sheets 用）
     if is_yml_mode:
         print("Step 1: 读取代码仓 yml...")
         raw = read_yml(str(input_path), consumed_files=consumed_yml_files)
     else:
         print("Step 1: 读取制品包 Excel...")
         raw = read_excel(str(input_path))
+        input_sheets = raw.pop("_source_sheets", None)
     rules = raw["rules"]
 
     # 确定输出目录：基础目录 / 规则组英文名称（兜底用规则组编码或 output）
@@ -1048,6 +1055,7 @@ def main():
             platform_generation=args.platform_generation,
             rule_group_en=raw.get("rule_group_en") or "",
             group_en_fallback=group_en,
+            input_sheets=input_sheets,
         )
         try:
             baseline_path = export_baseline_v1(knowledge, export_ctx, output_dir)

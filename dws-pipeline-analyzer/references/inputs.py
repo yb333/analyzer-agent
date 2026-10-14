@@ -567,6 +567,10 @@ def read_lts_excel(excel_path, rule_group_code: str = "") -> dict | None:
                 "调度周期", "依赖上一周期", "责任人", "是否一天多调")}
         jobs_by_task = _read_lts_excel_jobs(wb)
         params_by_task = _read_lts_excel_params(wb)
+        # v1.2 provenance：实际读到的 sheet 清单（私有 key，随 dict 流动到
+        # meta.schedule，baseline 投影层读出进 provenance[].sheets 并裁掉）
+        source_sheets = [s for s in ("tasks", "jobs", "taskParams")
+                         if s in wb.sheetnames]
 
         tasks = []
         for row in rows[1:]:
@@ -607,7 +611,9 @@ def read_lts_excel(excel_path, rule_group_code: str = "") -> dict | None:
         matched = tasks
     # lookup=全表：匹配模式下 I 任务（无 V_GROUP_CODE）仍可按 _F→_I 命名关联，
     # 与 yml 发现的候选集语义一致
-    return _classify_lts_tasks(matched, {t["task_name"]: t for t in tasks})
+    result = _classify_lts_tasks(matched, {t["task_name"]: t for t in tasks})
+    result["_source_sheets"] = source_sheets
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1035,7 +1041,8 @@ def build_baseline_export_ctx(knowledge: dict, engine_ctx: dict, *,
                               input_path: Path,
                               platform_generation: str = "1.0",
                               rule_group_en: str = "",
-                              group_en_fallback: str = "") -> dict:
+                              group_en_fallback: str = "",
+                              input_sheets: list | None = None) -> dict:
     """组装 baseline_v1 投影上下文（provenance 采集 + ctx 拼装）。
 
     装配层职责：provenance 是「实际消费的源文件清单」，随装配在此采集；
@@ -1047,22 +1054,31 @@ def build_baseline_export_ctx(knowledge: dict, engine_ctx: dict, *,
         is_yml_mode / consumed_yml_files / input_path: 输入形态与实际消费的 yml 清单
         platform_generation: 平台代次（透传投影层，决定 write_plan 映射版本）
         rule_group_en / group_en_fallback: 规则组英文名（yml 原值 → CLI 兜底）
+        input_sheets: xlsx 主输入实际读到的 sheet 清单（v1.2 provenance[].sheets，
+            read_excel 的 _source_sheets；yml 模式不携带）
     """
     provenance = []
     if is_yml_mode:
         for f in consumed_yml_files:
             provenance.append({"type": "rule_yml", "path": f})
     else:
-        provenance.append({"type": "execution_tasks", "path": str(input_path.resolve())})
+        entry = {"type": "execution_tasks", "path": str(input_path.resolve())}
+        if input_sheets:
+            entry["sheets"] = list(input_sheets)
+        provenance.append(entry)
     for f in engine_ctx.get("ddl_files", []):
         provenance.append({"type": "ddl", "path": f})
     _sched_meta = knowledge.get("meta", {}).get("schedule") or {}
+    _lts_sheets = _sched_meta.get("_source_sheets") or []
     _seen_lts = set()
     for key in ("f_tasks", "i_tasks", "other_tasks", "all_tasks"):
         for t in (_sched_meta.get(key) or []):
             if isinstance(t, dict) and t.get("lts_file") and t["lts_file"] not in _seen_lts:
                 _seen_lts.add(t["lts_file"])
-                provenance.append({"type": "lts", "path": t["lts_file"]})
+                entry = {"type": "lts", "path": t["lts_file"]}
+                if _lts_sheets:
+                    entry["sheets"] = list(_lts_sheets)
+                provenance.append(entry)
     _seen_dq = set()
     for d in sorted((knowledge.get("meta", {}).get("dq_rules") or []),
                     key=lambda d: str(d.get("rule_number") or "")):

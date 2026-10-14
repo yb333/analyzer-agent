@@ -263,7 +263,10 @@ class TestProjection:
         })
         dwb = next(t for t in out["tables"] if t["name"] == "dwb_x")
         # DDL 类型事实 + 血缘字段名并集（本例同名字段，只剩 DDL 版本）
-        assert dwb["fields"] == [{"name": "order_id", "type": "VARCHAR(64)", "comment": "订单ID"}]
+        assert dwb["fields"] == [{"name": "order_id", "type": "VARCHAR(64)",
+                                  "comment": "订单ID", "is_distribute_key": False}]
+        # v1.2：该表 DDL 无表尾物理子句 → table_props 显式 null
+        assert dwb["table_props"] is None
 
     def test_export_fail_loud_no_file(self, tmp_path):
         """校验不过（dm=6 无 merge_on）→ 抛错且不落盘。"""
@@ -310,7 +313,7 @@ class TestE2ERepoYml:
 
     def test_passes_authoritative_schema(self, exported):
         assert validate_baseline_v1(exported, _load_schema()) == []
-        assert exported["version"] == "1.1"
+        assert exported["version"] == "1.2"
 
     def test_provenance_types(self, exported):
         types = {p["type"] for p in exported["provenance"]}
@@ -467,3 +470,113 @@ def test_table_fields_from_catalog_skips_table_props():
     names = [f["name"] for f in fields]
     assert names == ["uid", "dt"]
     assert all(not n.startswith("__") for n in names)
+
+
+# ═════════════════════════════════════════════════════════════════
+# v1.2 增量：tables[].table_props / fields[].is_distribute_key / provenance[].sheets
+# ═════════════════════════════════════════════════════════════════
+
+def _v12_catalog():
+    """带物理属性的 catalog entry（engine __table_props__ 形态）。"""
+    return {
+        "uid": {"type": "INT", "comment": "用户ID", "nullable": False,
+                "default_value": "", "is_pk": False, "is_distribute_key": True},
+        "dt": {"type": "DATE", "comment": "日期", "nullable": True,
+               "default_value": "", "is_pk": False, "is_distribute_key": False},
+        "__table_comment__": "交易表",
+        "__table_props__": {
+            "distribute_by": "HASH (uid)",
+            "distribute_columns": ["uid"],
+            "partition_by": "PARTITION BY RANGE (dt) (PARTITION p1 VALUES LESS THAN ('2024-02-01'))",
+            "with_options": "orientation=column, compression=low",
+            "tablespace": "pg_default",
+        },
+    }
+
+
+class TestV12TableProps:
+    def test_table_props_passthrough_and_flags(self):
+        """__table_props__ 原样透传（原文不重排）+ 分布键列标记。"""
+        out = project_baseline_v1(_mini_draft(), {
+            "provenance": [],
+            "final_target_schema": "dws", "final_target_table": "dwb_x",
+            "table_catalog": {"dws.dwb_x": _v12_catalog()},
+        })
+        dwb = next(t for t in out["tables"] if t["name"] == "dwb_x")
+        assert dwb["table_props"] == _v12_catalog()["__table_props__"]
+        by_name = {f["name"]: f for f in dwb["fields"]}
+        assert by_name["uid"]["is_distribute_key"] is True
+        assert by_name["dt"]["is_distribute_key"] is False
+
+    def test_table_props_null_when_no_ddl(self):
+        """表无 DDL（不在 catalog）→ table_props 显式 null，血缘回填字段 False。"""
+        out = project_baseline_v1(_mini_draft(), {"provenance": []})
+        for t in out["tables"]:
+            assert t["table_props"] is None
+
+    def test_v11_shape_backward_compatible(self):
+        """v1.1 形态产物（无 table_props/sheets/is_distribute_key）通过 v1.2 权威校验
+        ——纯增量承诺（v1.0→v1.1→v1.2 链条）。"""
+        v11_product = {
+            "version": "1.1",
+            "asset": {"schema": "dws", "table": "t", "rule_group_code": "", "rule_group_en": "",
+                      "dialect": "dws", "source_type": "repo_yml", "analysis_time": "x",
+                      "platform_generation": "1.0"},
+            "provenance": [{"type": "rule_yml", "path": "a.yml"}],
+            "rules": [{"rule_code": "R1", "exec_sequence": 1, "scenario_id": "",
+                       "target_schema": "dws", "target_table": "t", "delete_mode": "1",
+                       "delete_condition": "", "query_sql": "SELECT 1", "source_tables": []}],
+            "tables": [{"schema": "dws", "name": "t",
+                        "fields": [{"name": "uid", "type": "INT", "comment": ""}]}],
+            "lineage": [],
+            "schedule": None, "dq_rules": None,
+            "load_strategy": {}, "patterns": [], "warnings": [],
+        }
+        assert validate_baseline_v1(v11_product, _load_schema()) == []
+
+
+class TestV12ProvenanceSheets:
+    def test_xlsx_entry_carries_sheets(self):
+        """xlsx 主输入条目带 sheets（read_excel 的 _source_sheets 经装配层流入）。"""
+        from inputs import build_baseline_export_ctx
+        ctx = build_baseline_export_ctx(
+            {"meta": {}}, {},
+            is_yml_mode=False, consumed_yml_files=[],
+            input_path=Path("/tmp/execution_tasks.xlsx"),
+            input_sheets=["RULE", "TargetFields", "GroupVariables"],
+        )
+        entry = ctx["provenance"][0]
+        assert entry["type"] == "execution_tasks"
+        assert entry["sheets"] == ["RULE", "TargetFields", "GroupVariables"]
+
+    def test_lts_entry_carries_sheets_from_source_meta(self):
+        """LTS excel 条目的 sheets 从 meta.schedule._source_sheets 采集（loader 记录）。"""
+        from inputs import build_baseline_export_ctx
+        knowledge = {"meta": {"schedule": {
+            "_source_sheets": ["tasks", "jobs", "taskParams"],
+            "f_tasks": [{"lts_file": "/r/LTS/T_F.yml"}],
+        }}}
+        ctx = build_baseline_export_ctx(
+            knowledge, {}, is_yml_mode=True, consumed_yml_files=["/r/a.yml"],
+            input_path=Path("/r"),
+        )
+        lts_entries = [p for p in ctx["provenance"] if p["type"] == "lts"]
+        assert len(lts_entries) == 1
+        assert lts_entries[0]["sheets"] == ["tasks", "jobs", "taskParams"]
+        # yml 路径类源不携带 sheets
+        yml_entries = [p for p in ctx["provenance"] if p["type"] == "rule_yml"]
+        assert all("sheets" not in e for e in yml_entries)
+
+    def test_schedule_projection_drops_private_keys(self):
+        """schedule 投影段不携带 _source_sheets / all_tasks / lts_file 私有与冗余 key。"""
+        from baseline_export import _project_schedule
+        meta = {"schedule": {
+            "_source_sheets": ["tasks"],
+            "f_tasks": [{"task_name": "T_F", "lts_file": "/r/T_F.yml"}],
+            "i_tasks": [], "other_tasks": [],
+            "all_tasks": [{"task_name": "T_F", "lts_file": "/r/T_F.yml"}],
+        }}
+        out = _project_schedule(meta)
+        assert "_source_sheets" not in out
+        assert "all_tasks" not in out
+        assert "lts_file" not in out["f_tasks"][0]

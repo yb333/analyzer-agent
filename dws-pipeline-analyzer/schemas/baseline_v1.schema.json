@@ -9,7 +9,7 @@
   "properties": {
     "version": {
       "type": "string",
-      "description": "契约版本，双端校验锚点。当前权威版本 '1.1'（v1.0 见交接包）。变更需 bump + 双端同步。",
+      "description": "契约版本，双端校验锚点。当前权威版本 '1.2'（v1.2 纯增量：tables[].table_props / fields[].is_distribute_key / provenance[].sheets）。变更需 bump + 双端同步。",
       "pattern": "^[0-9]+\\.[0-9]+$"
     },
     "asset": {
@@ -29,14 +29,19 @@
     },
     "provenance": {
       "type": "array",
-      "description": "解析过程实际消费的源文件清单（原则：缺口显式化）。交付方保证可达；消费方另有快照兜底仅作 patch 保险。",
+      "description": "解析过程实际消费的源文件清单（原则：缺口显式化）。交付方保证可达；消费方另有快照兜底仅作 patch 保险。v1.2：xlsx 制品携带 sheets（文件+sheet 定位，供 patch 底本与人肉回查）；DDL/代码仓仍为路径清单。",
       "items": {
         "type": "object",
         "required": ["type", "path"],
         "additionalProperties": false,
         "properties": {
           "type": { "type": "string", "enum": ["execution_tasks", "rule_yml", "ddl", "lts", "dq", "other"] },
-          "path": { "type": "string", "minLength": 1 }
+          "path": { "type": "string", "minLength": 1 },
+          "sheets": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "v1.2 增量：xlsx 类制品实际读到的 sheet 名清单（execution_tasks / lts / dq 等）；路径类源（rule_yml/ddl）不携带"
+          }
         }
       }
     },
@@ -114,6 +119,18 @@
         "properties": {
           "schema": { "type": "string" },
           "name": { "type": "string" },
+          "table_props": {
+            "type": ["object", "null"],
+            "description": "v1.2 增量：DDL 表级物理属性（唯一生产点=analyzer 的 DDL 解析，投影原样透传，原文片段不重排）。DDL 缺失或该表 DDL 无表尾子句 = 显式 null（表级物理事实不可得）。档案 DDL 走 ts 投影再生——投影无损的前提由本字段承载。",
+            "additionalProperties": false,
+            "properties": {
+              "distribute_by": { "type": "string", "description": "分布键子句原文，如 'HASH (user_id)' / 'REPLICATION' / 'ROUNDROBIN'" },
+              "distribute_columns": { "type": "array", "items": { "type": "string" }, "description": "分布键列（小写）；仅 HASH/列表形式有" },
+              "partition_by": { "type": "string", "description": "分区定义子句原文（到下一子句/语句尾）" },
+              "with_options": { "type": "string", "description": "WITH(...) 存储参数括号内原文（orientation/compression 等）" },
+              "tablespace": { "type": "string" }
+            }
+          },
           "fields": {
             "type": "array",
             "description": "DDL 可得则填（name/type/comment）；DDL 缺失时中间表按血缘回填字段名（type/comment 留空），再缺则空数组；类型回填由消费方查库，仅用于全量 DDL 生成",
@@ -124,7 +141,11 @@
               "properties": {
                 "name": { "type": "string" },
                 "type": { "type": "string" },
-                "comment": { "type": "string" }
+                "comment": { "type": "string" },
+                "is_distribute_key": {
+                  "type": "boolean",
+                  "description": "v1.2 增量：是否分布键列（DDL 解析事实）。整表无 DDL（table_props=null）时恒为 false——表级缺信息由 table_props 表达，字段级 false 不产生歧义"
+                }
               }
             }
           }

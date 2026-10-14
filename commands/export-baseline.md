@@ -79,7 +79,7 @@ baseline_v1 导出完成！
 
 1. **一步纯脚本**：不调用 view_generator、不生成 knowledge_ai.md、不改写 baseline_v1.json 任何内容
 2. **逐字保真**：query_sql / delete_condition / raw_expr 为解析原文逐字节拷贝，禁止美化
-3. **版本**：当前契约版本 1.1（含 write_plan 结构化增量），权威 schema 在
+3. **版本**：当前契约版本 1.2（v1.1 write_plan + v1.2 表级物理属性/sheet 定位），权威 schema 在
    `dws-pipeline-analyzer/schemas/baseline_v1.schema.json`，口径见 `docs/baseline_v1-契约.md`
 4. **失败即停**：校验不过不落盘；merge_on 缺失等问题走人回路，禁止 AI 补值
 5. 输出目录约定与 /analyze 相同（`./output/` 基础目录，按规则组英文名建子目录）
