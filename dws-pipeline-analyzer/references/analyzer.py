@@ -459,7 +459,7 @@ def read_yml(yml_dir: str, consumed_files: list = None) -> dict:
         {rules, target_fields, group_variables, variables, rule_group_code, rule_group_en}
 
     consumed_files: 可选出参列表，传入后把实际读取的 yml 绝对路径追加进去
-        （baseline_v1 provenance 用）；不传时行为不变。
+        （asset_facts provenance 用）；不传时行为不变。
 
     yml 格式（详见 sample_rule.yml）：
         顶层 = RULE sheet 字段（中文 key）
@@ -797,9 +797,6 @@ def main():
     )
     parser.add_argument("--input", default="", help="execution_tasks.xlsx 文件路径")
     parser.add_argument("--output", default="", help="输出基础目录（脚本会在此目录下按规则组英文名称建子目录）")
-    parser.add_argument("--manifest", default="",
-                        help="v2 编排合入：manifest json 路径（{asset, artifacts, output}——"
-                             "多制品一次收全、产物落 manifest.output 精确路径；与 --input 互斥）")
     parser.add_argument("--dialect", default="", help="SQL 方言 (oracle/dws/auto)，默认自动检测")
     parser.add_argument("--ddl-dir", default="", help="DDL 文件目录（可选，用于补充字段类型）")
     parser.add_argument("--lts", default="",
@@ -809,22 +806,14 @@ def main():
                         help="DQ 质量规则 excel 路径（平台导出，主 sheet「规则基本信息」；"
                              "xlsx/yml 场景均可，优先于代码仓自动发现）")
     parser.add_argument("--export", default="",
-                        help="附加导出模式：baseline_v1（优化场景契约，投影自 knowledge_draft，"
-                             "见 docs/baseline_v1-契约.md）。校验不过 fail loud 不落盘")
+                        help="附加导出：asset_facts（存量资产事实包，投影自 knowledge_draft，"
+                             "见 docs/asset_facts-契约.md）。校验不过 fail loud 不落盘")
     parser.add_argument("--platform-generation", dest="platform_generation", default="1.0",
-                        help="平台代次（baseline_v1 asset.platform_generation / write_plan 映射版本），默认 1.0")
+                        help="平台代次（asset_facts asset.platform_generation / write_plan 映射版本），默认 1.0")
     args = parser.parse_args()
 
-    # ── 编排模式分流（manifest：一次调用一次交卷，流程不进 main 的交互路径）──
-    if args.manifest:
-        if args.input:
-            parser.error("--manifest 与 --input 互斥（编排模式的输入清单在 manifest 文件内）")
-        run_manifest(args.manifest)
-        return
     if not args.input:
-        parser.error("--input 必填（或使用 --manifest 编排模式）")
-    if not args.output:
-        parser.error("--output 必填（编排模式 --manifest 不需要 --output）")
+        parser.error("--input 必填（agent 编排调用请用 facts 入口：run.py facts --dir X --output Y）")
 
     # ── 运营埋点：记录开始时刻 + 预备上下文 ──
     import time as _t_usage
@@ -848,7 +837,7 @@ def main():
     # ── Step 1: 读取输入 ──
     # 输入分流：.xlsx 文件 → read_excel；目录 → read_yml（代码仓 yml 场景）
     is_yml_mode = input_path.is_dir()
-    consumed_yml_files = []  # 实际读取的 yml 清单（baseline_v1 provenance 用）
+    consumed_yml_files = []  # 实际读取的 yml 清单（asset_facts provenance 用）
     input_sheets = None      # xlsx 实际读到的 sheet 清单（v1.2 provenance[].sheets 用）
     if is_yml_mode:
         print("Step 1: 读取代码仓 yml...")
@@ -1003,7 +992,7 @@ def main():
     # ── Step 3~7: 核心解析（与批量路径共用 analyze_pipeline，避免两套逻辑漂移）──
     print("Step 3-7: 解析 + 组装 knowledge...")
     # 引擎导出上下文（table_catalog 等，不落盘）。引擎接口不知道消费场景，
-    # context_out 始终导出、由装配层持有，投影（baseline_v1 等）按需消费。
+    # context_out 始终导出、由装配层持有，投影（asset_facts 等）按需消费。
     engine_ctx = {}
     knowledge, parsed_map = analyze_pipeline(
         rules, raw["target_fields"], raw["group_variables"], dialect,
@@ -1065,12 +1054,12 @@ def main():
     summary_file.write_text(summary_text, encoding="utf-8", newline="\n")
     _t_json_summary = round(_t_usage.time() - _t_json0, 2)
 
-    # ── baseline_v1 契约导出（--export baseline_v1；校验不过 fail loud 不落盘）──
+    # ── asset_facts 契约导出（--export asset_facts；校验不过 fail loud 不落盘）──
     # 纯机器投影：AI 不参与（契约是纯物理事实包，任何 AI 补写都是假信息风险）。
     # provenance 采集与 ctx 组装在 inputs.build_baseline_export_ctx（装配层），
     # 契约校验/投影在 baseline_export（投影层）——本处只做 CLI 分发。
     baseline_path = None
-    if args.export == "baseline_v1":
+    if args.export == "asset_facts":
         from baseline_export import export_baseline_v1, BaselineExportError
         export_ctx = build_baseline_export_ctx(
             knowledge, engine_ctx,
@@ -1095,7 +1084,7 @@ def main():
     print(f"摘要: {summary_file}")
     if baseline_path is not None:
         # 消费方按 "baseline_v1: {绝对路径}" 行定位契约产物（约定见 docs/baseline_v1-契约.md）
-        print(f"baseline_v1: {baseline_path.resolve()}")
+        print(f"asset_facts: {baseline_path.resolve()}")
     print(f"目标表: {target_name}")
     print(f"步骤数: {len(rules)}")
     print(f"字段数: {stats['total_in_sql']}")
@@ -1148,145 +1137,6 @@ def main():
         })
     except Exception:
         pass
-
-
-# ═══════════════════════════════════════════════════════════════
-# v2 编排合入（/manifest 模式）：一次调用一次交卷
-# ═══════════════════════════════════════════════════════════════
-
-def run_manifest(manifest_path) -> Path:
-    """manifest 装配 → 分析 → baseline_v1 导出（编排合入，一次调用一次交卷）。
-
-    与 --input 形态的区别（docs/12 §一 / docs/13 §四）：
-    - 输入 = manifest 清单（术加 excel 必给 + LTS excel + DQ 三态 + DDL 清单），
-      装配纪律在 inputs（load_manifest 结构校验 / stage_ddl_files 归一 / read_lts_excel）
-    - 产物 = manifest.output 精确路径（跳过 --output 自动子目录）
-    - 只交契约文件（draft/summary 不落盘——中间产物属实现自由，流程只认契约绿）
-    - 失败 = fail loud：stderr 错误清单原样退回，由消费侧流程决定补数动作
-      （编排模式无回问通道，"错误清单即终态"）
-
-    Returns: 产物绝对路径（stdout 另行打印 `baseline_v1: {路径}` 定位行）。
-    """
-    from inputs import (ManifestError, load_manifest, resolve_artifacts,
-                       stage_ddl_files, read_lts_excel, read_dq_excel)
-
-    # ── 装配（inputs 层：结构校验 + 制品类型分拣，全 fail loud）──
-    try:
-        mf = load_manifest(manifest_path)
-        ra = resolve_artifacts(mf.get("artifacts") or {})
-    except ManifestError as e:
-        print(f"[manifest] 装配失败:\n{e}", file=sys.stderr)
-        sys.exit(1)
-    for note in ra.get("notes") or []:
-        print(f"  [分拣] {note}")
-    artifacts = mf.get("artifacts") or {}
-
-    # DQ 三态（resolve 落定）：provided → excel loader（同构产出）；
-    # declared_absent → dq_rules=[]（"明确没有"入档，此后永不再问）
-    dq_status = ra["dq_status"]
-    dq_rules = None
-    dq_declared_absent = dq_status == "declared_absent"
-    if dq_status == "provided":
-        dq_rules = read_dq_excel(ra["dq_path"])
-        if not dq_rules:
-            print(f"[manifest] artifacts.dq=provided 但 excel 无有效规则行: "
-                  f"{ra['dq_path']}——请核对 DQ 制品（主 sheet「规则基本信息」"
-                  "需含带规则Number的数据行）", file=sys.stderr)
-            sys.exit(1)
-        print(f"  [DQ] 发现 {len(dq_rules)} 条质量检查规则(excel)")
-
-    # ── 主输入：术加制品包（query_sql 唯一来源）──
-    input_path = Path(ra["execution_tasks"])
-    print(f"=== dws-pipeline-analyzer（编排模式）===")
-    print(f"manifest: {manifest_path}")
-    print("Step 1: 读取制品包 Excel...")
-    raw = read_excel(str(input_path))
-    input_sheets = raw.pop("_source_sheets", None)
-    rules = raw["rules"]
-    if not rules:
-        print("错误: 术加制品包无有效 RULE 行", file=sys.stderr)
-        sys.exit(1)
-
-    # ── LTS excel（增量资产回刷地基；规则组编码已知则精确匹配，混组 excel 防误收）──
-    schedule_info = None
-    lts_path = ra.get("lts")
-    if lts_path:
-        schedule_info = read_lts_excel(lts_path, raw.get("rule_group_code") or "")
-        if schedule_info:
-            f_names = [t["task_name"] for t in schedule_info.get("f_tasks", [])]
-            i_names = [t["task_name"] for t in schedule_info.get("i_tasks", [])]
-            print(f"  [LTS] 调度任务(excel): F={f_names} I={i_names}")
-
-    # ── DDL 清单 → stage 目录（engine 只收目录扫描）；provenance 翻译回原路径 ──
-    ddl_dir = ""
-    ddl_map = {}
-    if artifacts.get("ddl"):
-        import tempfile
-        _stage_root = Path(tempfile.mkdtemp(prefix="ddl_stage_"))
-        try:
-            ddl_map = stage_ddl_files(artifacts["ddl"], _stage_root)
-        except ManifestError as e:
-            print(f"[manifest] DDL 装配失败: {e}", file=sys.stderr)
-            sys.exit(1)
-        ddl_dir = str(_stage_root)
-
-    # ── 引擎（xlsx 制品场景：无 I 视图/代码仓 DQ 发现）──
-    sql_texts = [r.query_sql for r in rules if r.query_sql]
-    dialect = detect_dialect(sql_texts)
-    print(f"Step 2: 方言 = {dialect}")
-    print("Step 3-7: 解析 + 组装 knowledge...")
-    engine_ctx = {}
-    knowledge, _parsed = analyze_pipeline(
-        rules, raw["target_fields"], raw["group_variables"], dialect,
-        ddl_dir=ddl_dir, source_file=input_path.name,
-        rule_group_code=raw.get("rule_group_code") or "",
-        context_out=engine_ctx,
-    )
-    apply_meta_enrichments(knowledge, None, schedule_info, dq_rules,
-                           dq_declared_absent=dq_declared_absent)
-
-    # ── 资产一致性校验（防串包）：解析出的最终目标表 vs manifest.asset ──
-    mf_asset = mf.get("asset") or {}
-    final_table = str(engine_ctx.get("final_target_table")
-                      or knowledge["meta"].get("target_table") or "").lower()
-    final_schema = str(engine_ctx.get("final_target_schema") or "").lower()
-    want_table = str(mf_asset.get("table") or "").lower()
-    want_schema = str(mf_asset.get("schema") or "").lower()
-    if final_table != want_table:
-        print(f"[manifest] 资产不一致：制品解析目标表 = {final_schema}.{final_table}，"
-              f"manifest.asset = {want_schema}.{want_table}——制品与资产标识可能串包，"
-              "请核对制品清单", file=sys.stderr)
-        sys.exit(1)
-    if want_schema and final_schema and final_schema != want_schema:
-        print(f"[manifest] 资产 schema 不一致：{final_schema} vs {want_schema}", file=sys.stderr)
-        sys.exit(1)
-
-    # DDL provenance：stage 路径翻译回 manifest 原路径（清单即"实际消费"证据）
-    if ddl_map:
-        engine_ctx["ddl_files"] = [ddl_map.get(f, f)
-                                   for f in engine_ctx.get("ddl_files", [])]
-
-    # ── 投影 → 校验 → 落盘（精确路径）──
-    from baseline_export import export_baseline_v1, BaselineExportError
-    export_ctx = build_baseline_export_ctx(
-        knowledge, engine_ctx,
-        is_yml_mode=False, consumed_yml_files=[],
-        input_path=input_path,
-        platform_generation=str(mf.get("platform_generation") or "1.0"),
-        rule_group_en=raw.get("rule_group_en") or "",
-        group_en_fallback="",
-        input_sheets=input_sheets,
-    )
-    try:
-        out = export_baseline_v1(knowledge, export_ctx,
-                                 output_dir=Path(mf["output"]).parent,
-                                 output_file=mf["output"])
-    except BaselineExportError as e:
-        print("[baseline_v1] 导出失败，产物未落盘：", file=sys.stderr)
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
-    print(f"baseline_v1: {out.resolve()}")
-    return out
 
 
 # ═══════════════════════════════════════════════════════════════

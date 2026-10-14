@@ -1178,67 +1178,6 @@ class ManifestError(Exception):
     """manifest 结构/内容不合法（编排模式 fail loud，错误清单原样退回消费方）。"""
 
 
-def load_manifest(manifest_path) -> dict:
-    """读取并校验 v2 编排合入的 manifest（一次调用一次交卷的输入装配清单）。
-
-    manifest 形态（docs/13 §四，dws-reverser 的任务 prompt 携带三元组 → 机器生成）：
-        {
-          "asset": {"schema": "dws", "table": "dwb_trade_f"},   # 资产标识（一致性校验锚）
-          "artifacts": {
-            "execution_tasks": "path/术加.xlsx",                 # 必给（query_sql 唯一来源）
-            "lts": "path/lts.xlsx",                              # 增量资产必给；全量可不填
-            "dq": {"status": "provided", "path": "path/dq.xlsx"},
-                 | {"status": "declared_absent"},                # 声明无（入档后永不再问）
-            "ddl": ["path/a.sql", "path/ddl_dir"]                # 文件/目录混合；缺则连库兜底（未来）
-          },
-          "output": "path/baseline_v1.json"                      # 精确产物路径
-        }
-
-    校验分层（全 fail loud）：
-        本函数只做结构级校验（json / 必填 key / 值形态）；路径存在性与制品类型
-        分拣在 resolve_artifacts（支持目录/文件组/excel_dir 自动分拣——docs/15）。
-
-    Returns: 解析后的 manifest dict（原样）。
-    Raises: ManifestError（json 非法 / 必填 key 缺失 / dq dict 形态 status 非法）。
-    """
-    import json
-
-    path = Path(manifest_path)
-    if not path.exists():
-        raise ManifestError(f"manifest 不存在: {path}")
-    try:
-        mf = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise ManifestError(f"manifest JSON 解析失败: {e}")
-
-    asset = mf.get("asset") or {}
-    if not str(asset.get("table") or "").strip():
-        raise ManifestError("manifest.asset.table 必填（资产标识，一致性校验锚）")
-    if not str(mf.get("output") or "").strip():
-        raise ManifestError("manifest.output 必填（产物精确路径）")
-
-    artifacts = mf.get("artifacts")
-    if artifacts is None:
-        raise ManifestError("artifacts 必给（execution_tasks / excel_dir 至少其一，"
-                            "键形态见 docs/14 对接指南）")
-    if not isinstance(artifacts, dict):
-        raise ManifestError("artifacts 应为对象（键形态见 docs/14 对接指南）")
-
-    dq = artifacts.get("dq")
-    if dq is not None and not isinstance(dq, (dict, str, list)):
-        raise ManifestError("artifacts.dq 形态应为三态对象 / 文件路径 / 路径数组")
-    if isinstance(dq, dict) and dq.get("status") not in ("provided", "declared_absent"):
-        raise ManifestError(
-            "artifacts.dq.status 必须为 provided | declared_absent"
-            "（沉默即违规——分拣发现不了'无'，三态必须显式落定，见 docs/15）")
-
-    ddl = artifacts.get("ddl") or []
-    if not isinstance(ddl, list):
-        raise ManifestError("artifacts.ddl 应为路径数组（文件/目录混合）")
-
-    return mf
-
-
 # ── 制品类型自动分拣（docs/15：sheet 结构指纹判型，判型知识单源在解析侧）──
 # 指纹与各 loader 的 sheet 认知同源：read_excel 认 RULE/TargetFields、
 # read_lts_excel 认 tasks（jobs/taskParams 为可选附属）、read_dq_excel 认规则基本信息。
@@ -1281,135 +1220,65 @@ def classify_artifact_excel(path) -> tuple[str | None, str]:
     return None, f"多指纹命中 {hits}（指纹不应重叠，语料异常请反馈）"
 
 
-def _collect_typed(kind: str, val, errors: list) -> list:
-    """单键取值（str 文件=显式指认 / str 目录=分拣该型 / 数组=文件组）→ 文件列表。
+def assemble_artifact_dir(dir_path) -> dict:
+    """制品目录 → 通道装配（消费方 docs/specs/opt/12 v3：识别职责全在逆向侧）。
 
-    显式文件不判指纹（docs/15 §一.3：指认了就按指认走，指认错由资产强校验拦）；
-    目录/文件组属自动分拣范畴——每个文件必须可判型且判为本型，否则计入 errors。
+    目录就是用户所给的全部（文件命名/组织/混放非制品文件零要求）：
+      - 术加制品包必需——缺失/判不出是唯一整体 fail 闸（没有它无法产出）
+      - 同型多个（多义）fail loud，不静默取一
+      - `.sql` / `.ddl` 后缀即型归 DDL（无歧义）
+      - 无法识别的文件（非 excel / 缺指纹 sheet，如 mapping、说明文档）**不阻断**：
+        收集进 unrecognized，由调用方进 warnings 随产物交付（消费方闸口人扫兜底）
+      - DQ 未检出 → dq=None，调用方按两态落 dq_rules=[] + dq_not_detected warning
+        （不要求调用方显式声明"无"——发现不了"无"，闸口向人披露纠错）
+
+    Returns: {"execution_tasks": path, "lts": path|None, "dq": path|None,
+              "ddl": [paths], "unrecognized": [(文件名, 原因)]}
+    Raises: ManifestError（目录不存在 / 术加缺失 / 同型多义——错误一次报齐）。
     """
-    items = val if isinstance(val, list) else [val]
-    out = []
-    for item in items:
-        p = Path(str(item))
-        if p.is_file():
-            out.append(str(p))
-        elif p.is_dir():
-            for f in sorted(p.iterdir()):
-                if f.is_dir() or f.name.startswith(_DIR_SKIP_PREFIXES):
-                    continue
-                k, reason = classify_artifact_excel(f)
-                if k == kind:
-                    out.append(str(f))
-                else:
-                    detail = f"判型为 {k}" if k else reason
-                    errors.append(f"{kind} 目录中无法归入该型的文件: {f.name}（{detail}）")
-        else:
-            errors.append(f"{kind} 路径不存在: {item}")
-    return out
+    d = Path(dir_path)
+    if not d.is_dir():
+        raise ManifestError(f"制品目录不存在: {dir_path}")
 
-
-def resolve_artifacts(artifacts: dict) -> dict:
-    """artifacts 段 → 具体通道（自动分拣 + 显式指认合并，docs/15）。
-
-    支持形态（每键均可缺省，缺省走分拣或不给）：
-        execution_tasks / lts: str 文件（显式）| str 目录（分拣该型）| [文件/目录...]
-        dq: {"status": "provided"[, "path"]} | {"status": "declared_absent"}
-           | str / [..]（= provided + 自动定位）
-        excel_dir: str 目录——混目录全分拣（每型恰一个候选；显式键已指认的型被
-           覆盖时提示不报错）
-        ddl: 路径数组（不变，stage 通道处理）
-
-    纪律（全 fail loud，ManifestError 汇总一次报齐）：
-        - 显式指认优先于自动分拣；分拣到的每个文件必须可判型
-        - 每型恰一个候选：execution_tasks 必给；lts 0/1；多候选（多义）不静默取一
-        - DQ 三态语义不变（发现得了"有"、发现不了"无"）：declared_absent 与发现
-          DQ 制品矛盾即报错；最终状态必须显式落定，沉默仍违规
-
-    Returns: {"execution_tasks": path, "lts": path|None,
-              "dq_status": "provided"|"declared_absent", "dq_path": path|None,
-              "notes": [提示行（stdout 用，非错误）]}
-    """
-    errors: list[str] = []
-    notes: list[str] = []
-
-    # ── 显式键解析（execution_tasks / lts / dq 路径形态）──
-    explicit: dict[str, list] = {}
-    for key in ("execution_tasks", "lts", "dq"):
-        val = artifacts.get(key)
-        if val is None or isinstance(val, dict):
+    found: dict[str, list] = {"execution_tasks": [], "lts": [], "dq": []}
+    ddl: list[str] = []
+    unrecognized: list = []
+    for f in sorted(d.iterdir()):
+        if f.is_dir() or f.name.startswith(_DIR_SKIP_PREFIXES):
             continue
-        files = _collect_typed(key, val, errors)
-        if files:
-            explicit[key] = files
-
-    # ── excel_dir 混目录分拣 ──
-    found: dict[str, list] = {}
-    excel_dir = artifacts.get("excel_dir")
-    if excel_dir:
-        d = Path(str(excel_dir))
-        if not d.is_dir():
-            errors.append(f"excel_dir 目录不存在: {excel_dir}")
+        if f.suffix.lower() in (".sql", ".ddl"):
+            ddl.append(str(f))  # 后缀即型，直接收录
+            continue
+        kind, reason = classify_artifact_excel(f)
+        if kind is None:
+            unrecognized.append((f.name, reason))
         else:
-            for f in sorted(d.iterdir()):
-                if f.is_dir() or f.name.startswith(_DIR_SKIP_PREFIXES):
-                    continue
-                kind, reason = classify_artifact_excel(f)
-                if kind is None:
-                    errors.append(f"excel_dir 无法识别的文件 {f.name}（{reason}）")
-                else:
-                    found.setdefault(kind, []).append(str(f))
+            found[kind].append(str(f))
 
-    # ── 合并：显式优先，excel_dir 补缺；每型恰一个候选 ──
-    resolved: dict[str, str | None] = {}
-    for kind in ("execution_tasks", "lts"):
-        cand = list(explicit.get(kind) or [])
-        extra = found.get(kind, [])
-        if cand and extra:
-            notes.append(f"{kind}: 显式指认优先（excel_dir 另分拣到 {len(extra)} 个，已忽略）")
-        final = cand or extra
-        if len(final) > 1:
-            errors.append(f"{kind} 多义：{len(final)} 个候选 {[Path(f).name for f in final]}"
-                          "——请只保留一个或显式指认其一")
-        resolved[kind] = final[0] if final else None
-    if not resolved["execution_tasks"]:
-        errors.append("execution_tasks 必给（术加制品包，query_sql 唯一来源）"
-                      "——显式指认或经 excel_dir/目录分拣")
-
-    # ── DQ 三态落定（语义不变：无文件 ≠ 无 DQ）──
-    dq_val = artifacts.get("dq")
-    dq_declared = isinstance(dq_val, dict) and dq_val.get("status") == "declared_absent"
-    dq_cands = list(explicit.get("dq") or [])
-    if (isinstance(dq_val, dict) and dq_val.get("status") == "provided"
-            and dq_val.get("path")):
-        dq_cands = [str(dq_val["path"])] + [c for c in dq_cands
-                                            if c != str(dq_val["path"])]
-    dq_found = found.get("dq", [])
-    if dq_cands and dq_found and not set(dq_cands) & set(dq_found):
-        notes.append(f"dq: 显式指认优先（excel_dir 另分拣到 {len(dq_found)} 个，已忽略）")
-    if dq_declared:
-        if dq_cands or dq_found:
-            cands = dq_cands or dq_found
-            errors.append(f"dq 矛盾：declared_absent（声明资产无 DQ）但指认/分拣发现了 "
-                          f"DQ 制品 {[Path(c).name for c in cands]}——请核对声明或制品")
-        dq_status, dq_path = "declared_absent", None
-    elif dq_cands or dq_found:
-        final = dq_cands or dq_found
-        if len(final) > 1:
-            errors.append(f"dq 多义：{len(final)} 个候选 {[Path(f).name for f in final]}"
-                          "——请只保留一个或显式指认其一")
-        dq_status, dq_path = "provided", final[0]
-    else:
-        errors.append("dq 三态必须落定：未发现 DQ 制品不等于资产无 DQ——"
-                      "确无则显式 declared_absent；有则提供 DQ 制品"
-                      "（放入 excel_dir 或指认路径）")
-        dq_status, dq_path = None, None
-
+    errors: list[str] = []
+    if not found["execution_tasks"]:
+        hint = (f"（目录另有 {len(unrecognized)} 个无法识别文件，清单随错误给出）"
+                if unrecognized else "")
+        errors.append("缺必需料：目录中未识别出术加制品包 excel"
+                      f"（需含 RULE + TargetFields sheet）{hint}")
+    for kind in ("execution_tasks", "lts", "dq"):
+        if len(found[kind]) > 1:
+            errors.append(f"{kind} 多义：{[Path(x).name for x in found[kind]]}"
+                          "——同型制品请只保留一个")
+    if unrecognized and errors:
+        errors.append("无法识别的文件（不阻断，供排查）：" +
+                      "；".join(f"{n}（{r}）" for n, r in unrecognized[:5]))
     if errors:
         raise ManifestError("\n".join(f"- {e}" for e in errors))
-    return {"execution_tasks": resolved["execution_tasks"],
-            "lts": resolved["lts"],
-            "dq_status": dq_status, "dq_path": dq_path,
-            "notes": notes}
+
+    return {
+        "execution_tasks": found["execution_tasks"][0] if found["execution_tasks"] else None,
+        "lts": found["lts"][0] if found["lts"] else None,
+        "dq": found["dq"][0] if found["dq"] else None,
+        "ddl": ddl,
+        "unrecognized": unrecognized,
+    }
+
 
 def stage_ddl_files(ddl_paths: list, stage_dir) -> dict:
     """DDL 文件/目录混合清单 → 统一 stage 目录（engine 的 ddl_dir 只收目录扫描）。

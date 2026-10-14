@@ -128,20 +128,28 @@ python {skill_dir}/run.py view_generator \
 - **加载策略检测**：自动检测全量/增量/分区交换，用于影响分析风险判定
 - **关联影响分析**：源端变更 → 本资产受什么影响，输出影响清单 Excel（16种变化类型，类型兼容性判定）
 
+## 面向 agent 的入口（facts）
+
+dws-reverser 等 agent 调用用 facts 入口（目录直入、一次调用一次交卷、退出码
+0=交卷 / 1=制品问题 / 2=参数错误），调用合同与提示词模板见 docs/14-消费方对接指南.md：
+
+```bash
+python {skill_dir}/run.py facts --dir {制品目录} --output {asset_facts.json 绝对路径}
+```
+
 ## 命令参数
 
 ### analyzer
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `--input` | 是* | execution_tasks.xlsx 路径或代码仓规则组目录（*编排模式 --manifest 下不需要） |
-| `--output` | 是* | 输出目录（*编排模式 --manifest 下不需要） |
-| --manifest | 否 | v2 编排合入：manifest json（{asset, artifacts, output}），一次调用一次交卷、产物落精确路径；与 --input 互斥 |
+| `--input` | 是 | execution_tasks.xlsx 路径或代码仓规则组目录（agent 编排调用请用 `run.py facts`） |
+| `--output` | 是 | 输出目录 |
 | `--dialect` | 否 | oracle/dws/auto，默认自动检测 |
 | `--ddl-dir` | 否 | DDL 目录（补充字段类型和注释） |
 | `--lts` | 否 | LTS 调度任务 excel（平台导出三 sheet：tasks/jobs/taskParams）；xlsx/yml 场景均可，优先于代码仓自动发现 |
 | `--dq` | 否 | DQ 质量规则 excel（平台导出，主 sheet「规则基本信息」）；xlsx/yml 场景均可，优先于代码仓自动发现 |
-| `--export` | 否 | 附加导出：`baseline_v1`（优化场景契约投影，见 docs/baseline_v1-契约.md） |
+| `--export` | 否 | 附加导出：`asset_facts`（存量资产事实包，见 docs/asset_facts-契约.md；agent 编排调用走 `run.py facts --dir X --output Y`） |
 | `--platform-generation` | 否 | 平台代次（baseline_v1 用），默认 1.0 |
 
 ### view_generator

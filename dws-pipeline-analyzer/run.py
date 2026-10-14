@@ -7,6 +7,9 @@ Usage:
 Examples:
     python run.py analyzer --input execution_tasks.xlsx --output output/
     python run.py view_generator --input knowledge_draft.json --output output/
+    python run.py facts --dir {制品目录} --output {asset_facts.json 绝对路径}
+      （facts = 面向 agent 的存量资产事实包入口：目录直入、一次调用一次交卷，
+        退出码 0=交卷 / 1=制品问题 / 2=参数错误，详见 docs/14 使用说明）
 """
 
 import sys

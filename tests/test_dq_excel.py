@@ -11,6 +11,7 @@
 """
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -122,6 +123,20 @@ def _run_main(argv):
         sys.argv = old_argv
 
 
+def _run_facts(argv):
+    from facts import main
+    import io, contextlib
+    old_argv = sys.argv
+    sys.argv = ["facts.py"] + argv
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            main()
+        return buf.getvalue()
+    finally:
+        sys.argv = old_argv
+
+
 class TestDqChannelsE2E:
     def test_main_dq_flag(self, tmp_path):
         """/--dq 通道：xlsx 制品 + DQ excel → meta.dq_rules 注入 + 契约投影。"""
@@ -139,46 +154,32 @@ class TestDqChannelsE2E:
         assert len(draft["meta"]["dq_rules"]) == 1
         assert draft["meta"]["dq_rules"][0]["target_schema"] == "dws"
 
-    def test_manifest_provided_unlocked(self, tmp_path):
-        """manifest provided → read_dq_excel → 契约 dq_rules 含 target_schema。"""
-        xlsx = tmp_path / "dq.xlsx"
-        _write_dq_excel(xlsx, [
+    def test_facts_dir_dq_provided(self, tmp_path):
+        """facts 目录直入：DQ 制品分拣 → 契约 dq_rules 含 target_schema。"""
+        bag = tmp_path / "bag"
+        bag.mkdir()
+        shutil.copy(ET_XLSX, bag / "et.xlsx")
+        _write_dq_excel(bag / "dq.xlsx", [
             ["R001", "1", "新增", "空值检查", "主键非空", "空值检查",
              "u", "dws", "dwb_cust_asset_d", "T1", "SELECT 1", "严重"],
         ])
-        mf = {
-            "asset": {"schema": "", "table": "dwb_cust_asset_d"},
-            "artifacts": {
-                "execution_tasks": str(ET_XLSX),
-                "dq": {"status": "provided", "path": str(xlsx)},
-            },
-            "output": str(tmp_path / "o" / "baseline_v1.json"),
-        }
-        mf_path = tmp_path / "m.json"
-        mf_path.write_text(json.dumps(mf, ensure_ascii=False), encoding="utf-8")
-        _run_main(["--manifest", str(mf_path)])
-        d = json.loads(Path(mf["output"]).read_text(encoding="utf-8"))
+        out = tmp_path / "o" / "asset_facts.json"
+        _run_facts(["--dir", str(bag), "--output", str(out)])
+        d = json.loads(out.read_text(encoding="utf-8"))
         assert d["dq_rules"][0]["rule_number"] == "R001"
         assert d["dq_rules"][0]["target_schema"] == "dws"
         # DQ provenance 自动采集（dq_file 同构红利）
         dq_prov = [p for p in d["provenance"] if p["type"] == "dq"]
         assert len(dq_prov) == 1 and dq_prov[0]["path"].endswith("dq.xlsx")
 
-    def test_manifest_provided_empty_excel_fails_loud(self, tmp_path, capsys):
-        """provided 但 excel 无规则行 → fail loud（矛盾输入，错误清单退回）。"""
-        xlsx = tmp_path / "empty.xlsx"
-        _write_dq_excel(xlsx, [])
-        mf = {
-            "asset": {"schema": "", "table": "dwb_cust_asset_d"},
-            "artifacts": {
-                "execution_tasks": str(ET_XLSX),
-                "dq": {"status": "provided", "path": str(xlsx)},
-            },
-            "output": str(tmp_path / "o.json"),
-        }
-        mf_path = tmp_path / "m.json"
-        mf_path.write_text(json.dumps(mf, ensure_ascii=False), encoding="utf-8")
+    def test_facts_dir_empty_dq_excel_fails_loud(self, tmp_path, capsys):
+        """目录分拣出 DQ 形态但 excel 无规则行 → fail loud（错误清单退回）。"""
+        bag = tmp_path / "bag"
+        bag.mkdir()
+        shutil.copy(ET_XLSX, bag / "et.xlsx")
+        _write_dq_excel(bag / "dq.xlsx", [])
+        out = tmp_path / "o.json"
         with pytest.raises(SystemExit):
-            _run_main(["--manifest", str(mf_path)])
+            _run_facts(["--dir", str(bag), "--output", str(out)])
         assert "无有效规则行" in capsys.readouterr().err
-        assert not Path(mf["output"]).exists()
+        assert not out.exists()

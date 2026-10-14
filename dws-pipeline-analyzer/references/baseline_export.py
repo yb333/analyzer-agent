@@ -17,6 +17,12 @@ v1.1（analyzer 侧主导的增量）：
     condition_expr 逐字来自 delete_condition / 交换配置，来自 SQL 解析时为等价
     重排版（condition_source='query_sql' 标记）。
 
+v1.3（更名 + 目录通道两态，消费方 docs/specs/opt/12 v3）：
+    产物更名 asset_facts.json（原 baseline_v1.json，stdout 定位行前缀同步
+    asset_facts:）；目录通道（facts 入口）DQ 两态——未检出 = dq_rules=[] +
+    dq_not_detected warning（不要求调用方显式声明"无"）；warnings 新增分拣
+    类型（unrecognized_artifact / dq_not_detected / lts_not_detected）。
+
 v1.2（纯增量，docs/12 §2.3 → 消费端需求）：
     tables[].table_props —— DDL 表级物理属性（分布键/分区/存储参数），
       唯一生产点=engine 的 DDL 解析（__table_props__），本模块原样透传；
@@ -38,10 +44,10 @@ import json
 import re
 from pathlib import Path
 
-CONTRACT_VERSION = "1.2"
-SUPPORTED_VERSIONS = {"1.0", "1.1", "1.2"}
+CONTRACT_VERSION = "1.3"
+SUPPORTED_VERSIONS = {"1.0", "1.1", "1.2", "1.3"}
 
-DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "baseline_v1.schema.json"
+DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "asset_facts.schema.json"
 
 
 class BaselineExportError(Exception):
@@ -410,9 +416,10 @@ def _project_dq_rules(meta: dict):
     return None
 
 
-def _project_warnings(draft: dict, write_plan_warnings: list) -> list:
-    """三类差异事实合流：field_mappings.warnings（原样）+ quality.issues（category→type）
-    + write_plan_gap（本模块交叉验证产出）。"""
+def _project_warnings(draft: dict, write_plan_warnings: list, extra: list = None) -> list:
+    """差异事实合流（四源）：field_mappings.warnings（原样）+ quality.issues（category→type）
+    + write_plan_gap（本模块交叉验证）+ extra（装配层分拣披露，v1.3——
+    unrecognized_artifact / dq_not_detected / lts_not_detected，经 ctx.extra_warnings）。"""
     out = [dict(w) for w in (draft.get("field_mappings", {}).get("warnings") or [])]
     for iss in (draft.get("quality", {}).get("issues") or []):
         out.append({
@@ -423,6 +430,7 @@ def _project_warnings(draft: dict, write_plan_warnings: list) -> list:
             "id": str(iss.get("id") or ""),
         })
     out.extend(write_plan_warnings)
+    out.extend(dict(w) for w in (extra or []))
     return out
 
 
@@ -453,7 +461,7 @@ def project_baseline_v1(draft: dict, ctx: dict) -> dict:
         "dq_rules": _project_dq_rules(meta),
         "load_strategy": dict(meta.get("load_strategy") or {}),
         "patterns": [dict(p) for p in (meta.get("patterns") or [])],
-        "warnings": _project_warnings(draft, write_plan_warnings),
+        "warnings": _project_warnings(draft, write_plan_warnings, ctx.get("extra_warnings")),
     }
 
 
@@ -532,7 +540,7 @@ def export_baseline_v1(draft: dict, ctx: dict, output_dir, output_file=None) -> 
     if errors:
         raise BaselineExportError("\n".join(errors))
 
-    out_path = Path(output_file) if output_file else Path(output_dir) / "baseline_v1.json"
+    out_path = Path(output_file) if output_file else Path(output_dir) / "asset_facts.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",

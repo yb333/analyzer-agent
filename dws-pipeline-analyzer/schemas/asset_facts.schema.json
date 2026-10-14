@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "baseline_v1",
-  "title": "baseline_v1 契约（权威版，analyzer 仓维护）",
-  "description": "dws-pipeline-analyzer 面向优化场景的投影产物（--export baseline_v1）。本文件是权威 schema：v1.0 初始拷贝自 design-dev-agent 交接包；v1.1 起 write_plan 等增量由 analyzer 仓主导演进，消费方 vendor 同步（协议见 docs/baseline_v1-契约.md）。语义分级：事实（必填或显式空，逐字保真）/ hint（load_strategy、patterns，非权威）/ 结构化（write_plan——确定性文法翻译，非推断）。增量字段、驱动表、主键、粒度等推断永不进契约。",
+  "$id": "asset_facts",
+  "title": "asset_facts 契约（权威版，analyzer 仓维护；v1.3 前名 baseline_v1）",
+  "description": "dws-pipeline-analyzer 面向优化场景的投影产物（facts 入口 --export asset_facts / run.py facts）。本文件是权威 schema：v1.0 初始拷贝自 design-dev-agent 交接包；v1.1 起增量由 analyzer 仓主导演进，消费方 vendor 同步（协议见 docs/asset_facts-契约.md）。v1.3：产物更名 asset_facts（原 baseline_v1），目录通道 DQ 两态（未检出=[]+warnings 标注），warnings 新增 unrecognized_artifact / dq_not_detected / lts_not_detected 类型。语义分级：事实（必填或显式空，逐字保真）/ hint（load_strategy、patterns，非权威）/ 结构化（write_plan——确定性文法翻译，非推断）。增量字段、驱动表、主键、粒度等推断永不进契约。",
   "type": "object",
   "required": ["version", "asset", "provenance", "rules", "tables", "lineage", "load_strategy", "warnings"],
   "additionalProperties": false,
   "properties": {
     "version": {
       "type": "string",
-      "description": "契约版本，双端校验锚点。当前权威版本 '1.2'（v1.2 纯增量：tables[].table_props / fields[].is_distribute_key / provenance[].sheets）。变更需 bump + 双端同步。",
+      "description": "契约版本，双端校验锚点。当前权威版本 '1.3'（产物更名 asset_facts + 目录通道 DQ 两态 + warnings 分拣类型；结构对 v1.2 纯增量兼容）。变更需 bump + 双端同步。",
       "pattern": "^[0-9]+\\.[0-9]+$"
     },
     "asset": {
@@ -186,7 +186,7 @@
     "dq_rules": {
       "type": ["array", "null"],
       "items": { "type": "object", "additionalProperties": true },
-      "description": "存量 DQ（rule_number/name/desc/check_type/alert_level/sql/target_table）；xlsx 模式为显式 null；优化场景完全跟随输入，一般不动"
+      "description": "存量 DQ（rule_number/name/desc/check_type/alert_level/sql/target_table/target_schema）。空值三态（v1.3 定稿）：列表=检出规则；[]=目录通道未检出（伴 dq_not_detected warning，闸口向人披露）；null=未提供 DQ 通道（--input 显式形态）"
     },
     "load_strategy": {
       "type": "object",
@@ -210,7 +210,7 @@
           "severity": { "type": "string" }
         }
       },
-      "description": "逆向交叉验证差异事实（field_name_mismatch / quality 分_category / write_plan_gap；必填可空数组）；消费方式=报告+存档，不参与 patch 决策"
+      "description": "逆向交叉验证差异事实（field_name_mismatch / quality 分_category / write_plan_gap；v1.3 新增分拣通道：unrecognized_artifact 无法识别的非必需文件 / dq_not_detected 未检出 DQ 制品 / lts_not_detected 未检出 LTS；必填可空数组）；消费方式=报告+存档+闸口人扫，不参与 patch 决策"
     }
   }
 }

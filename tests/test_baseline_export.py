@@ -1,4 +1,4 @@
-"""baseline_v1 契约导出测试（--export baseline_v1）。
+"""asset_facts 契约导出测试（--export asset_facts）。
 
 覆盖：
 - write_plan 全模式矩阵（dm 1-9 / 视图 / 未知 dm / 条件缺失告警 / MERGE ON 抽取）
@@ -275,7 +275,7 @@ class TestProjection:
         with pytest.raises(BaselineExportError):
             export_baseline_v1(draft, {"provenance": [{"type": "other", "path": "x"}]},
                                tmp_path)
-        assert not (tmp_path / "baseline_v1.json").exists()
+        assert not (tmp_path / "asset_facts.json").exists()
 
     def test_v10_shape_backward_compatible(self):
         """v1.0 形态（无 write_plan）通过 v1.1 权威校验——纯增量承诺。"""
@@ -307,13 +307,13 @@ class TestE2ERepoYml:
         repo = build_mock_repo(tmp_path_factory.mktemp("repo") / "repo")
         out_base = tmp_path_factory.mktemp("out")
         _run_analyzer_main(["--input", str(repo["group_dir"]),
-                            "--output", str(out_base), "--export", "baseline_v1"])
+                            "--output", str(out_base), "--export", "asset_facts"])
         out_dir = out_base / "DWB_TRADE_ORDER_D"
-        return json.loads((out_dir / "baseline_v1.json").read_text(encoding="utf-8"))
+        return json.loads((out_dir / "asset_facts.json").read_text(encoding="utf-8"))
 
     def test_passes_authoritative_schema(self, exported):
         assert validate_baseline_v1(exported, _load_schema()) == []
-        assert exported["version"] == "1.2"
+        assert exported["version"] == "1.3"
 
     def test_provenance_types(self, exported):
         types = {p["type"] for p in exported["provenance"]}
@@ -376,8 +376,8 @@ class TestE2EXlsx:
         ])
         out_base = tmp_path / "out"
         _run_analyzer_main(["--input", xlsx, "--output", str(out_base),
-                            "--export", "baseline_v1"])
-        data = json.loads((out_base / "DWB_X" / "baseline_v1.json").read_text(encoding="utf-8"))
+                            "--export", "asset_facts"])
+        data = json.loads((out_base / "DWB_X" / "asset_facts.json").read_text(encoding="utf-8"))
         assert "schedule" in data and data["schedule"] is None
         assert "dq_rules" in data and data["dq_rules"] is None
         assert validate_baseline_v1(data, _load_schema()) == []
@@ -400,8 +400,8 @@ class TestE2EMerge:
         from _build_merge_repo import MERGE_ON_CONDITION
         out_base = tmp_path / "out"
         _run_analyzer_main(["--input", str(merge_repo["group_dir"]),
-                            "--output", str(out_base), "--export", "baseline_v1"])
-        data = json.loads((out_base / "DWB_TRADE_MERGE_D" / "baseline_v1.json")
+                            "--output", str(out_base), "--export", "asset_facts"])
+        data = json.loads((out_base / "DWB_TRADE_MERGE_D" / "asset_facts.json")
                           .read_text(encoding="utf-8"))
         assert validate_baseline_v1(data, _load_schema()) == []
         r2 = next(r for r in data["rules"] if r["rule_code"] == "R0002")
@@ -436,7 +436,7 @@ class TestE2EMerge:
         err = io.StringIO()
         old_argv = sys.argv
         sys.argv = ["analyzer.py", "--input", str(broken_group),
-                    "--output", str(out_base), "--export", "baseline_v1"]
+                    "--output", str(out_base), "--export", "asset_facts"]
         try:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                 with pytest.raises(SystemExit) as ei:
@@ -446,7 +446,7 @@ class TestE2EMerge:
             sys.argv = old_argv
         assert ei.value.code == 1
         assert "R0002" in err.getvalue() and "merge_on" in err.getvalue()
-        assert not (out_base / "DWB_TRADE_MERGE_D" / "baseline_v1.json").exists()
+        assert not (out_base / "DWB_TRADE_MERGE_D" / "asset_facts.json").exists()
 
 
 def test_table_fields_from_catalog_skips_table_props():

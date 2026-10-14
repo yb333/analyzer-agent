@@ -4,16 +4,20 @@ last_reviewed: 2026-08-18
 upstream: design-dev-agent docs/specs/opt/09-契约-baseline_v1.md（v1.0 交接基线）
 ---
 
-# baseline_v1 契约（权威版，本仓维护）
+# asset_facts 契约（权威版，本仓维护；v1.3 前名 baseline_v1）
 
-> 本仓（dws-analyzer-skill）是 baseline_v1 契约的**权威侧**：schema 与本文档随投影代码
+> 本仓（dws-analyzer-skill）是 asset_facts 契约的**权威侧**：schema 与本文档随投影代码
 > 同仓演进，消费方（design-dev-agent）vendor 带版本拷贝做消费端校验。v1.0 基线见对方
 > 仓 `docs/specs/opt/09-契约-baseline_v1.md`；**v1.1 起增量由本仓主导**（变更动机与
 > 案例见 `docs/baseline_v1-案例-增量合并.md`）。
+>
+> **v1.3 更名**：产物 baseline_v1.json → **asset_facts.json**，stdout 定位行前缀
+> `baseline_v1:` → **`asset_facts:`**，schema 文件 → `asset_facts.schema.json`。
+> 一波换彻底（不留双名并存），消费方同步见 §七。
 
 ## 一、定位
 
-- baseline_v1 = **纯物理事实包**（逆向产物），优化场景外部资产的存量现状表示。
+- asset_facts（v1.3 前名 baseline_v1）= **纯物理事实包**（逆向产物），优化场景外部资产的存量现状表示。
 - 文件交接，不跨项目调用脚本；消费方从契约校验开始，缺失/版本不符 fail loud。
 - 产物反映线上实跑现状（源文件与平台一致性由交付方保证），消费方不做新鲜度校验。
 
@@ -66,7 +70,35 @@ MERGE SQL 的 ON 解析（`condition_source: query_sql`，等价重排版非逐�
 （`exchange_config`）→ `null` + warning。dm=6 取不到时**导出 fail loud 不落盘**
 （与消费方校验器镜像）。
 
-## 三、v1.2 变更：表级物理属性 + provenance sheet 定位（本仓主导）
+## 三、v1.3 变更：更名 asset_facts + 目录通道两态 + 分拣披露（本仓主导）
+
+### 更名（一波换彻底，不双名并存）
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| 产物默认文件名 | baseline_v1.json | **asset_facts.json** |
+| stdout 定位行前缀 | `baseline_v1:` | **`asset_facts:`** |
+| 权威 schema 文件 | baseline_v1.schema.json | **asset_facts.schema.json** |
+| 面向 agent 的入口 | —（--manifest，已删） | **`run.py facts --dir {制品目录} --output {产物路径}`** |
+
+`--manifest` 通道**删除**（消费方 v3 明确不构造中间结构；三态/资产校验等其特有语义
+一并移除）。`--input`（面向人）通道保留，其 `--export` 参数值改为 `asset_facts`。
+
+### 目录通道 DQ 两态（v3 修正 3）
+
+facts 入口（目录直入）下 DQ 只有两种状态：**检出 → dq_rules 列表**；
+**未检出 → `dq_rules: []` + warnings 带 `dq_not_detected` 披露**（目录即用户所给
+全部，"忘了给"由消费方闸口人扫兜底，不前置停等）。显式声明 declared_absent 的通道
+随 manifest 一并移除。`dq_rules: null` 仅剩一种语义：`--input` 显式形态未提供 DQ 通道。
+
+### 分拣披露进 warnings（v3 修正 1/2）
+
+facts 入口的 warnings 新增三类（第 4 源，经 `ctx.extra_warnings` 透传）：
+`unrecognized_artifact`（无法识别的非必需文件——mapping/说明文档等，不阻断产出）、
+`dq_not_detected`、`lts_not_detected`（增量资产回刷地基提示）。**术加制品判不出仍是
+唯一整体 fail 闸**；同型多个（多义）fail loud 不静默取一；`.sql`/`.ddl` 后缀即型归 DDL。
+
+## 四、v1.2 变更：表级物理属性 + provenance sheet 定位（本仓主导）
 
 ### 动机
 
@@ -93,11 +125,11 @@ baseline_export 原样透传不重排——消费方按原文比对/再生成 DD
 属 docs/12 §2.3 第三项，依赖 DQ excel 模板（平台格式未定稿）；yml 源的 rule_number
 即平台规则编码，excel 模板到位后评估列映射，作为下一增量（v1.2.x 纯补丁或 v1.3） bump。
 
-## 四、内容规格
+## 五、内容规格
 
 ```
 baseline_v1
-├─ version = "1.2"             契约版本（双端校验锚点）
+├─ version = "1.3"             契约版本（双端校验锚点；v1.3=更名+两态+分拣披露）
 ├─ asset                       schema/table/rule_group_code/rule_group_en/dialect/
 │                              source_type/analysis_time/platform_generation
 ├─ provenance[]                实际消费的源文件 {type, path[, sheets]}：rule_yml/
@@ -119,21 +151,25 @@ baseline_v1
 ├─ schedule                    f_tasks/i_tasks/other_tasks（jobs/params 事实原样；
 │                              裁冗余 all_tasks、lts_file 与 _source_sheets——路径/页签
 │                              在 provenance）；xlsx 无 --lts / 批量模式 → 显式 null
-├─ dq_rules[]                  按 rule_number 排序的 7 字段（编号/名/口径/check_type/
-│                              alert_level/sql 原文/target_table）；xlsx 模式 → 显式 null
+├─ dq_rules[]                  按 rule_number 排序的 8 字段（编号/名/口径/check_type/
+│                              alert_level/sql 原文/target_table/target_schema）；
+│                              两态（facts 目录通道）：检出=列表 / 未检出=[]+warnings
+│                              披露；--input 显式形态未提供 DQ → null
 ├─ load_strategy               hint 级原样（非权威，供人参考）
 ├─ patterns[]                  hint 级加工模式提示
-└─ warnings[]                  三类差异事实合流：field_mappings.warnings（原样）+
+└─ warnings[]                  四源合流（v1.3）：field_mappings.warnings（原样）+
                                quality.issues（category→type）+ write_plan_gap（本侧
-                               交叉验证：如 dm=5 无分区条件、未知 dm、条件与写入类型不符）。
-                               消费方式=报告+存档，不参与 patch 决策
+                               交叉验证）+ 分拣披露（unrecognized_artifact /
+                               dq_not_detected / lts_not_detected——目录通道的
+                               "拿不到的事实"显式化）。消费方式=报告+存档+闸口人扫，
+                               不参与 patch 决策
 ```
 
 三级语义分级：**事实**（必填或显式空，逐字保真）/ **结构化**（write_plan——确定性文法翻译，
 非推断）/ **hint**（load_strategy、patterns——非权威）。业务语义（增量字段、驱动表、
 主键、粒度）**永不进契约**。
 
-## 五、信息守恒对账表（输入字段 → 契约去向）
+## 六、信息守恒对账表（输入字段 → 契约去向）
 
 输入侧每个字段必须落在四类之一：**契约字段 / provenance / warnings / 设计上丢弃（+理由）**。
 没有"静默消失"。变更输入格式时同步维护本表。
@@ -150,12 +186,12 @@ baseline_v1
 | TargetFields.加密方式 | 设计上丢弃（v1.2 候选：如消费方需要安全审计请提案） |
 | GroupVariables / 参数变量 | 设计上丢弃（调度参数已随 schedule.params 携带；规则级变量进 v1.2 候选） |
 | LTS 任务/调度/jobs/params | schedule（事实原样；源=yml 发现或 --lts excel，两者同构） |
-| DQ 规则字段（yml 7 字段 / excel 主 sheet 同构列 + 目标表schema） | dq_rules[]（excel 源额外携带 target_schema；附属 sheet 需求未清晰暂不消费） |
+| DQ 规则字段（yml 同构 8 字段 / excel 主 sheet + 目标表schema） | dq_rules[]（检出=列表；facts 目录未检出=[]+dq_not_detected 披露；附属 sheet 需求未清晰暂不消费） |
 | 项目编码/数据源/业务责任人 | source_type 不可知模式暂丢弃（v1.2 候选：asset.owner 等） |
 | 源文件路径（yml/xlsx/DDL/LTS/DQ） | provenance[] |
 | 解析交叉验证差异 | warnings[] |
 
-## 六、CLI 与交接
+## 七、CLI 与交接
 
 ```
 # 文件交接形态（--input，人/流程直接给输入）
@@ -163,19 +199,17 @@ python run.py analyzer --input {xlsx或规则组目录} --output {dir} [--ddl-di
                        [--lts {LTS excel}] [--dq {DQ excel}] \
                        --export baseline_v1 [--platform-generation 1.0]
 
-# 编排合入形态（--manifest，v2：dws-reverser 一次调用一次交卷；与 --input 互斥）
-python run.py analyzer --manifest {manifest.json}
+# facts 入口（面向 agent 的标准合同，v1.3：目录直入，一次调用一次交卷）
+python run.py facts --dir {制品目录} --output {asset_facts.json 绝对路径}
 ```
 
-- `--lts`（v1.8）：LTS 调度任务 excel（平台导出三 sheet：tasks/jobs/taskParams），
-  xlsx/yml 场景均可、优先于代码仓自动发现；loader 产出与 yml 发现同构
-  （`inputs.read_lts_excel`），schedule 段形态不因源差异而变。
-- `--manifest`（v2 编排合入）：manifest 清单装配——术加 excel 必给 + LTS excel +
-  DQ 三态（provided/declared_absent，缺 key 即违规；declared_absent → 契约
-  `dq_rules: []`；provided 待 DQ excel 模板）+ DDL 文件/目录清单（stage 归一，
-  provenance 记原路径）+ 资产一致性校验（防串包）。产物落 `manifest.output`
-  精确路径，中间产物不落盘；失败 = fail loud stderr 错误清单（编排终态，原样
-  退回消费侧流程）。详见 commands/export-baseline.md 编排模式节。
+- **facts 入口**（v1.3）：制品类型识别全在本侧（excel 按 sheet 指纹、.sql/.ddl
+  后缀即型）；DQ 两态（未检出=[]+warnings 披露）；退出码 0=交卷 / 1=制品问题 /
+  2=参数错误；stdout 定位行 `asset_facts: {绝对路径}`。完整调用合同（含错误码
+  含义与提示词模板）见 `docs/14-消费方对接指南.md`。
+- `--lts` / `--dq`（--input 通道）：LTS/DQ excel 显式路径，优先于代码仓自动发现；
+  loader 产出与 yml 发现同构（`inputs.read_lts_excel` / `read_dq_excel`），
+  schedule/dq_rules 段形态不因源差异而变。
 
 - 产物：`{dir}/{规则组英文}/baseline_v1.json`；stdout 单独一行
   `baseline_v1: {绝对路径}`，消费方按该前缀解析定位。
@@ -185,7 +219,7 @@ python run.py analyzer --manifest {manifest.json}
 - 依赖 `jsonschema>=4.0`（仅 export 路径懒加载，不影响既有功能）。
 - 命令封装：`/export-baseline`（commands/export-baseline.md，AI 零介入流程）。
 
-## 七、版本与变更协议
+## 八、版本与变更协议
 
 - schema 改动 → bump version + 通知消费方同步 vendor 拷贝与校验器；breaking change 提前约定。
 - **v1.0 → v1.1 为纯增量**：仅新增可选字段 `rules[].write_plan`（及枚举），未删改任何
@@ -220,9 +254,10 @@ python run.py analyzer --manifest {manifest.json}
    比对可直接用）；不消费也不影响既有 v1.0 读取路径（write_plan 缺席合法）；
 4. 现有 v1.0 fixture 无需改动（向后兼容已验证）。
 
-## 八、本仓实施清单（状态）
+## 九、本仓实施清单（状态）
 
-- [x] `--export baseline_v1` 投影 + 权威 schema + 本契约文档（v1.2）
+- [x] v1.3：更名 asset_facts（产物/前缀/schema/入口一波换彻底）+ facts 目录直入
+  入口 + DQ 两态 + 分拣披露进 warnings + 删 --manifest 通道
 - [x] provenance 采集（rule_yml / xlsx / ddl / lts / dq 实际消费清单 + sheets 定位 v1.2）
 - [x] write_plan 全模式结构化（dm 1-9 + 视图 + 未知），merge_on dm=6 fail loud
 - [x] `/export-baseline` 命令封装（零 AI 介入 + 人回路指引）
