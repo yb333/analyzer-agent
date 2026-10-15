@@ -183,3 +183,57 @@ class TestDqChannelsE2E:
             _run_facts(["--dir", str(bag), "--output", str(out)])
         assert "无有效规则行" in capsys.readouterr().err
         assert not out.exists()
+
+
+class TestBrokenDimension:
+    """dimension 声明容错（真实语料：平台导出写了数据但 dimension=A1 未更新）。
+
+    Excel 人眼正常，read_only 流式读取按声明拿到空——reset_dimensions() 修复。
+    构造方式：正常写 excel 后，改写 zip 内 sheet XML 的 dimension 声明为 A1。
+    """
+
+    @staticmethod
+    def _break_dimension(path):
+        import io
+        import re as _re
+        import zipfile
+        src = path.read_bytes()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(src)) as zin, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename.startswith("xl/worksheets/sheet") and item.filename.endswith(".xml"):
+                    data = _re.sub(rb'<dimension ref="[^"]*"/>', b'<dimension ref="A1"/>', data)
+                zout.writestr(item, data)
+        path.write_bytes(buf.getvalue())
+        return path
+
+    def test_dq_broken_dimension_still_reads(self, tmp_path):
+        xlsx = tmp_path / "dq_broken.xlsx"
+        _write_dq_excel(xlsx, [
+            ["R001", "1", "新增", "空值检查", "主键非空", "空值检查",
+             "u", "dws", "dwb_cust_asset_d", "T1", "SELECT 1", "严重"],
+        ])
+        self._break_dimension(xlsx)
+        rules = read_dq_excel(str(xlsx))
+        assert rules is not None and rules[0]["rule_number"] == "R001"
+
+    def test_lts_broken_dimension_still_reads(self, tmp_path):
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "tasks"
+        ws.append(["项目名称", "任务组名称", "任务名称", "任务类型", "开始时间",
+                   "结束时间", "调度周期", "依赖上一周期", "日历数据", "责任人", "是否一天多调"])
+        ws.append(["P", "G", "T_X_F", "周期任务", None, None, "", None, None, "u", None])
+        wp = wb.create_sheet("taskParams")
+        wp.append(["项目名称", "任务组名称", "任务名称", "参数名称", "参数值"])
+        wp.append(["P", "G", "T_X_F", "V_GROUP_CODE", "RG1"])
+        xlsx = tmp_path / "lts_broken.xlsx"
+        wb.save(str(xlsx))
+        self._break_dimension(xlsx)
+        from inputs import read_lts_excel
+        sched = read_lts_excel(str(xlsx), "RG1")
+        assert sched is not None
+        assert sched["f_tasks"][0]["task_name"] == "T_X_F"
+        assert sched["f_tasks"][0]["group_code"] == "RG1"

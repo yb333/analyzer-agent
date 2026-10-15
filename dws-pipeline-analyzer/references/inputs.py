@@ -467,11 +467,27 @@ def _discover_lts_from_repo(yml_dir: Path, rule_group_code: str) -> dict | None:
 # LTS excel 读取器（平台导出三 sheet，yml 的原始形态）
 # ═══════════════════════════════════════════════════════════════
 
+def _sheet_rows(wb, sheet_name: str) -> list:
+    """读取 sheet 全部行（values_only），带 dimension 声明容错。
+
+    健壮性背景：部分平台导出工具写入了数据但 dimension 声明未更新
+    （如 dimension=A1 而实际多行——Excel 人眼正常，read_only 流式读取
+    却按声明拿到空）。reset_dimensions() 丢弃声明、按实际行遍历
+    （openpyxl 官方修复方式），保留 read_only 的流式优势。
+    """
+    ws = wb[sheet_name]
+    try:
+        ws.reset_dimensions()
+    except AttributeError:
+        pass  # 非 read_only 模式无此方法（read_excel 走 read_only=False，无此问题）
+    return list(ws.iter_rows(values_only=True))
+
+
 def _read_lts_excel_jobs(wb) -> dict:
     """jobs sheet → {任务名称: [job dict]}。sheet 缺失/空 → {}（显式空，不猜）。"""
     if "jobs" not in wb.sheetnames:
         return {}
-    rows = list(wb["jobs"].iter_rows(values_only=True))
+    rows = _sheet_rows(wb, "jobs")
     if not rows:
         return {}
     headers = [_safe_str(h) for h in rows[0]]
@@ -502,7 +518,7 @@ def _read_lts_excel_params(wb) -> dict:
     """taskParams sheet → {任务名称: [{name, value}]}。sheet 缺失/空 → {}。"""
     if "taskParams" not in wb.sheetnames:
         return {}
-    rows = list(wb["taskParams"].iter_rows(values_only=True))
+    rows = _sheet_rows(wb, "taskParams")
     if not rows:
         return {}
     headers = [_safe_str(h) for h in rows[0]]
@@ -557,7 +573,7 @@ def read_lts_excel(excel_path, rule_group_code: str = "") -> dict | None:
     try:
         if "tasks" not in wb.sheetnames:
             return None
-        rows = list(wb["tasks"].iter_rows(values_only=True))
+        rows = _sheet_rows(wb, "tasks")
         if not rows:
             return None
         headers = [_safe_str(h) for h in rows[0]]
@@ -715,7 +731,7 @@ def read_dq_excel(excel_path) -> list | None:
     try:
         if "规则基础信息" not in wb.sheetnames:
             return None
-        rows = list(wb["规则基础信息"].iter_rows(values_only=True))
+        rows = _sheet_rows(wb, "规则基础信息")
     finally:
         wb.close()
     if not rows:
