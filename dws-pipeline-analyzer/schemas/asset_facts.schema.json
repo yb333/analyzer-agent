@@ -9,8 +9,19 @@
   "properties": {
     "version": {
       "type": "string",
-      "description": "契约版本，双端校验锚点。当前权威版本 '1.3'（产物更名 asset_facts + 目录通道 DQ 两态 + warnings 分拣类型；结构对 v1.2 纯增量兼容）。变更需 bump + 双端同步。",
+      "description": "契约版本，双端校验锚点。当前权威版本 '1.4'（交付门：self_check 三态结论 + warnings 严重度两级 structural|noise；对 v1.3 纯增量兼容）。变更需 bump + 双端同步。",
       "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "self_check": {
+      "type": "object",
+      "description": "v1.4 增量（消费方交付门）：自检结论三态，由 warnings 严重度纯派生。verdict: pass=干净或无 warnings / pass_with_noise=仅噪音级差异（登记滞后类常态，对账过即建档） / review=存在结构级矛盾（料可能给错/资产级对不上——人审换料重跑或显式放行；待审不是失败，exit 0 + 产物照常落盘）。分级口径=生产方（制品域知识权威）：structural 误升的代价=流程停一次人放行，误降由消费方审核对账与闸口两道眼兜底。",
+      "required": ["verdict", "structural_count", "noise_count"],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": { "type": "string", "enum": ["pass", "pass_with_noise", "review"] },
+        "structural_count": { "type": "integer", "minimum": 0 },
+        "noise_count": { "type": "integer", "minimum": 0 }
+      }
     },
     "asset": {
       "type": "object",
@@ -207,7 +218,7 @@
         "properties": {
           "type": { "type": "string" },
           "title": { "type": "string" },
-          "severity": { "type": "string" }
+          "severity": { "type": "string", "description": "v1.4：统一两级 structural（料可能给错/资产级对不上，驱动待审与闸口置顶）| noise（平台常态差异，闸口折叠）——生产方按 warning type 定级（权威映射在生产方代码），消费方不自行改判" }
         }
       },
       "description": "逆向交叉验证差异事实（field_name_mismatch / quality 分_category / write_plan_gap；v1.3 新增分拣通道：unrecognized_artifact 无法识别的非必需文件 / dq_not_detected 未检出 DQ 制品 / lts_not_detected 未检出 LTS；必填可空数组）；消费方式=报告+存档+闸口人扫，不参与 patch 决策"

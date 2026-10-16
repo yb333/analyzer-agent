@@ -17,6 +17,13 @@ v1.1（analyzer 侧主导的增量）：
     condition_expr 逐字来自 delete_condition / 交换配置，来自 SQL 解析时为等价
     重排版（condition_source='query_sql' 标记）。
 
+v1.4（交付门，消费方 docs/specs/opt/12 v3.1）：
+    顶层 self_check 三态结论（pass / pass_with_noise / review——由 warnings
+    严重度派生：有 structural 即 review）；warnings.severity 统一归一化为
+    structural（料可能给错/资产级对不上，驱动待审）| noise（平台常态差异）两级，
+    分级口径=本仓（_SEVERITY_BY_TYPE 唯一权威）；stdout 增加结论行
+    `self_check: {verdict}`。
+
 v1.3（更名 + 目录通道两态，消费方 docs/specs/opt/12 v3）：
     产物更名 asset_facts.json（原 baseline_v1.json，stdout 定位行前缀同步
     asset_facts:）；目录通道（facts 入口）DQ 两态——未检出 = dq_rules=[] +
@@ -44,8 +51,8 @@ import json
 import re
 from pathlib import Path
 
-CONTRACT_VERSION = "1.3"
-SUPPORTED_VERSIONS = {"1.0", "1.1", "1.2", "1.3"}
+CONTRACT_VERSION = "1.4"
+SUPPORTED_VERSIONS = {"1.0", "1.1", "1.2", "1.3", "1.4"}
 
 DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "asset_facts.schema.json"
 
@@ -70,6 +77,35 @@ WRITE_KIND_BY_MODE = {
     "8": ("update_by_condition", "where_predicate"),      # UPDATE
     "9": ("exchange_partition", "exchange_table"),        # EXCHANGE PARTITION
 }
+
+# ─────────────────────────────────────────────────────────────────
+# warnings 严重度分级（v1.4，docs/specs/opt/12 v3.1 §九）——唯一权威定义。
+# structural=指向"料可能给错/资产级对不上"（驱动待审：人审换料或显式放行）；
+# noise=平台常态差异（登记滞后等，披露即可）。分级错误的代价消费方已评估：
+# 误升→流程停一次人放行（低成本）；误降→审核对账与闸口两道眼兜底。
+# 新增 warning 类型必须在此定级（缺省 noise）。
+_SEVERITY_BY_TYPE = {
+    # 登记滞后 / 映射差异（TargetFields vs SQL 交叉的既有通道）→ 噪音
+    "field_name_mismatch": "noise",
+    "field_mapping": "noise",
+    "data_lineage": "noise",
+    "scheduling": "noise",
+    "data_quality": "noise",
+    "quality": "noise",
+    # write_plan 缺口（dm=5 无分区条件 / 未知 dm / 条件形态不符）→ 待审
+    "write_plan_gap": "structural",
+    # 分拣披露：无法识别文件=人扫噪音；未检出 DQ/LTS=待审（换料或显式放行）
+    "unrecognized_artifact": "noise",
+    "dq_not_detected": "structural",
+    "lts_not_detected": "structural",
+    # 一致性交叉（crosscheck 模块产出）
+    "dq_target_mismatch": "structural",
+    "ddl_target_missing": "structural",
+    "ddl_duplicate_table": "structural",
+    "lts_group_mismatch": "structural",
+    "crosscheck_internal": "noise",
+}
+_DEFAULT_SEVERITY = "noise"
 
 # 谓词角色：condition_columns 才有意义
 _PREDICATE_ROLES = {"on_predicate", "where_predicate"}
@@ -418,8 +454,9 @@ def _project_dq_rules(meta: dict):
 
 def _project_warnings(draft: dict, write_plan_warnings: list, extra: list = None) -> list:
     """差异事实合流（四源）：field_mappings.warnings（原样）+ quality.issues（category→type）
-    + write_plan_gap（本模块交叉验证）+ extra（装配层分拣披露，v1.3——
-    unrecognized_artifact / dq_not_detected / lts_not_detected，经 ctx.extra_warnings）。"""
+    + write_plan_gap（本模块交叉验证）+ extra（装配层分拣披露与一致性交叉，v1.3/v1.4
+    ——unrecognized_artifact / dq_not_detected / lts_not_detected / *_mismatch 等）。
+    合流后按 _SEVERITY_BY_TYPE 统一归一化 severity（structural|noise，唯一权威）。"""
     out = [dict(w) for w in (draft.get("field_mappings", {}).get("warnings") or [])]
     for iss in (draft.get("quality", {}).get("issues") or []):
         out.append({
@@ -431,7 +468,22 @@ def _project_warnings(draft: dict, write_plan_warnings: list, extra: list = None
         })
     out.extend(write_plan_warnings)
     out.extend(dict(w) for w in (extra or []))
+    # 严重度归一化（v1.4）：按 type 定级覆盖，未登记类型缺省 noise
+    for w in out:
+        w["severity"] = _SEVERITY_BY_TYPE.get(str(w.get("type") or ""), _DEFAULT_SEVERITY)
     return out
+
+
+def _derive_self_check(warnings: list) -> dict:
+    """自检结论三态（v1.4，消费方交付门）：由 warnings 严重度纯派生。
+
+    pass（干净）/ pass_with_noise（仅噪音级差异）/ review（存在结构级矛盾——
+    人审换料或显式放行；"待审"不是失败，exit 0 + 产物照常落盘）。
+    """
+    structural = sum(1 for w in warnings if w.get("severity") == "structural")
+    noise = len(warnings) - structural
+    verdict = "review" if structural else ("pass_with_noise" if noise else "pass")
+    return {"verdict": verdict, "structural_count": structural, "noise_count": noise}
 
 
 def project_baseline_v1(draft: dict, ctx: dict) -> dict:
@@ -440,9 +492,11 @@ def project_baseline_v1(draft: dict, ctx: dict) -> dict:
     ctx = ctx or {}
 
     rules_out, write_plan_warnings = _project_rules(draft)
+    warnings_out = _project_warnings(draft, write_plan_warnings, ctx.get("extra_warnings"))
 
     return {
         "version": CONTRACT_VERSION,
+        "self_check": _derive_self_check(warnings_out),
         "asset": {
             "schema": str(ctx.get("final_target_schema") or ""),
             "table": str(meta.get("target_table") or ""),
@@ -461,7 +515,7 @@ def project_baseline_v1(draft: dict, ctx: dict) -> dict:
         "dq_rules": _project_dq_rules(meta),
         "load_strategy": dict(meta.get("load_strategy") or {}),
         "patterns": [dict(p) for p in (meta.get("patterns") or [])],
-        "warnings": _project_warnings(draft, write_plan_warnings, ctx.get("extra_warnings")),
+        "warnings": warnings_out,
     }
 
 

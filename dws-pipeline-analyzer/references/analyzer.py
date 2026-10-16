@@ -1083,8 +1083,15 @@ def main():
     print(f"输出: {output_file}")
     print(f"摘要: {summary_file}")
     if baseline_path is not None:
-        # 消费方按 "baseline_v1: {绝对路径}" 行定位契约产物（约定见 docs/baseline_v1-契约.md）
+        # 消费方按 "asset_facts: {绝对路径}" 行定位契约产物（约定见 docs/asset_facts-契约.md）
         print(f"asset_facts: {baseline_path.resolve()}")
+        # 自检结论行（v1.4 交付门，机器按行前缀判读）
+        try:
+            verdict = (json.loads(baseline_path.read_text(encoding="utf-8"))
+                       .get("self_check", {}).get("verdict", ""))
+            print(f"self_check: {verdict}")
+        except Exception:
+            pass
     print(f"目标表: {target_name}")
     print(f"步骤数: {len(rules)}")
     print(f"字段数: {stats['total_in_sql']}")

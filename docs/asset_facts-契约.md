@@ -125,11 +125,14 @@ baseline_export 原样透传不重排——消费方按原文比对/再生成 DD
 属 docs/12 §2.3 第三项，依赖 DQ excel 模板（平台格式未定稿）；yml 源的 rule_number
 即平台规则编码，excel 模板到位后评估列映射，作为下一增量（v1.2.x 纯补丁或 v1.3） bump。
 
-## 五、内容规格
+## 六、内容规格
 
 ```
 baseline_v1
-├─ version = "1.3"             契约版本（双端校验锚点；v1.3=更名+两态+分拣披露）
+├─ version = "1.4"             契约版本（双端校验锚点；v1.4=交付门：三态+分级+交叉）
+├─ self_check                  自检结论（v1.4）：{verdict: pass|pass_with_noise|
+│                              review, structural_count, noise_count}——由 warnings
+│                              严重度纯派生；review≠失败（exit 0 + 产物照常落盘）
 ├─ asset                       schema/table/rule_group_code/rule_group_en/dialect/
 │                              source_type/analysis_time/platform_generation
 ├─ provenance[]                实际消费的源文件 {type, path[, sheets]}：rule_yml/
@@ -169,7 +172,7 @@ baseline_v1
 非推断）/ **hint**（load_strategy、patterns——非权威）。业务语义（增量字段、驱动表、
 主键、粒度）**永不进契约**。
 
-## 六、信息守恒对账表（输入字段 → 契约去向）
+## 七、信息守恒对账表（输入字段 → 契约去向）
 
 输入侧每个字段必须落在四类之一：**契约字段 / provenance / warnings / 设计上丢弃（+理由）**。
 没有"静默消失"。变更输入格式时同步维护本表。
@@ -191,7 +194,7 @@ baseline_v1
 | 源文件路径（yml/xlsx/DDL/LTS/DQ） | provenance[] |
 | 解析交叉验证差异 | warnings[] |
 
-## 七、CLI 与交接
+## 八、CLI 与交接
 
 ```
 # 文件交接形态（--input，人/流程直接给输入）
@@ -219,11 +222,13 @@ python run.py facts --dir {制品目录} --output {asset_facts.json 绝对路径
 - 依赖 `jsonschema>=4.0`（仅 export 路径懒加载，不影响既有功能）。
 - 命令封装：`/export-baseline`（commands/export-baseline.md，AI 零介入流程）。
 
-## 八、版本与变更协议
+## 九、版本与变更协议
 
 - schema 改动 → bump version + 通知消费方同步 vendor 拷贝与校验器；breaking change 提前约定。
 - **v1.0 → v1.1 为纯增量**：仅新增可选字段 `rules[].write_plan`（及枚举），未删改任何
   v1.0 字段。v1.0 形态产物通过 v1.1 schema 校验（已验证）。
+- **v1.3 → v1.4 为纯增量**：新增顶层可选 `self_check`；warnings.severity 收两级口径
+  （字段已有）。v1.0-1.3 形态产物通过 v1.4 schema（已验证）。
 - **v1.1 → v1.2 为纯增量**：仅新增可选字段 `tables[].table_props`、
   `tables[].fields[].is_distribute_key`、`provenance[].sheets`，未删改任何既有字段。
   v1.0/v1.1 形态产物通过 v1.2 schema 校验（已验证，测试固化）。
@@ -254,10 +259,12 @@ python run.py facts --dir {制品目录} --output {asset_facts.json 绝对路径
    比对可直接用）；不消费也不影响既有 v1.0 读取路径（write_plan 缺席合法）；
 4. 现有 v1.0 fixture 无需改动（向后兼容已验证）。
 
-## 九、本仓实施清单（状态）
+## 十、本仓实施清单（状态）
 
 - [x] v1.3：更名 asset_facts（产物/前缀/schema/入口一波换彻底）+ facts 目录直入
   入口 + DQ 两态 + 分拣披露进 warnings + 删 --manifest 通道
+- [x] v1.4：交付门（self_check 三态 + severity 两级唯一权威映射 + crosscheck
+  一致性交叉自检层 + stdout 结论行）
 - [x] provenance 采集（rule_yml / xlsx / ddl / lts / dq 实际消费清单 + sheets 定位 v1.2）
 - [x] write_plan 全模式结构化（dm 1-9 + 视图 + 未知），merge_on dm=6 fail loud
 - [x] `/export-baseline` 命令封装（零 AI 介入 + 人回路指引）

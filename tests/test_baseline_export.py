@@ -313,7 +313,7 @@ class TestE2ERepoYml:
 
     def test_passes_authoritative_schema(self, exported):
         assert validate_baseline_v1(exported, _load_schema()) == []
-        assert exported["version"] == "1.3"
+        assert exported["version"] == "1.4"
 
     def test_provenance_types(self, exported):
         types = {p["type"] for p in exported["provenance"]}

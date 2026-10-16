@@ -31,6 +31,7 @@ if sys.platform == "win32":
 
 from analyzer import read_excel
 from engine import analyze_pipeline, detect_dialect
+from crosscheck import run_crosscheck
 from inputs import (ManifestError, assemble_artifact_dir, read_lts_excel,
                     read_dq_excel, stage_ddl_files)
 from inputs import apply_meta_enrichments, build_baseline_export_ctx
@@ -139,6 +140,10 @@ def run_facts(dir_path, output_path) -> Path:
     knowledge.setdefault("meta", {}).setdefault("warnings_extra", []).extend(
         _sorting_warnings(asm["unrecognized"], dq_detected=asm["dq"] is not None,
                           lts_detected=asm["lts"] is not None))
+    # 制品间一致性交叉（v3.1 §十：披露不阻断，经同一 warnings 通道）
+    knowledge["meta"]["warnings_extra"].extend(
+        run_crosscheck(knowledge, engine_ctx, asm,
+                       dq_rules=dq_rules, schedule_info=schedule_info))
 
     # DDL provenance：stage 路径翻译回原路径
     if ddl_map:
@@ -168,6 +173,11 @@ def run_facts(dir_path, output_path) -> Path:
         print(str(e), file=sys.stderr)
         sys.exit(1)
     print(f"asset_facts: {out.resolve()}")
+    # 自检结论行（v1.4 交付门，机器按行前缀判读；与定位行同风格）
+    import json as _json
+    verdict = (_json.loads(out.read_text(encoding="utf-8"))
+               .get("self_check", {}).get("verdict", ""))
+    print(f"self_check: {verdict}")
     return out
 
 

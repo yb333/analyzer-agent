@@ -182,7 +182,7 @@ class TestFactsE2E:
         assert code == 0
         assert any(line.startswith("asset_facts: ") for line in stdout.splitlines())
         data = json.loads(out.read_text(encoding="utf-8"))
-        assert data["version"] == "1.3"
+        assert data["version"] == "1.4"
         assert data["dq_rules"] == []  # 修正3：未检出 = 空数组（非 null）
         assert data["schedule"] is not None
         types = {w["type"] for w in data["warnings"]}
