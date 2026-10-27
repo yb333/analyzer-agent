@@ -104,6 +104,8 @@ _SEVERITY_BY_TYPE = {
     "ddl_duplicate_table": "structural",
     "lts_group_mismatch": "structural",
     "crosscheck_internal": "noise",
+    # ts 草稿调度还原（schedule_recovery/ts_export）
+    "lts_upstream_unresolved": "noise",   # 依赖 job 未匹配到上游任务——原文随行，人确认
 }
 _DEFAULT_SEVERITY = "noise"
 

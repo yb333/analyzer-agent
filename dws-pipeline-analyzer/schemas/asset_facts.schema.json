@@ -139,7 +139,8 @@
               "distribute_columns": { "type": "array", "items": { "type": "string" }, "description": "分布键列（小写）；仅 HASH/列表形式有" },
               "partition_by": { "type": "string", "description": "分区定义子句原文（到下一子句/语句尾）" },
               "with_options": { "type": "string", "description": "WITH(...) 存储参数括号内原文（orientation/compression 等）" },
-              "tablespace": { "type": "string" }
+              "tablespace": { "type": "string" },
+              "to_group": { "type": "string", "description": "TO GROUP 逻辑集群子句原文（v1.4 补：ts 投影 tables.logical_group 的恢复源）" }
             }
           },
           "fields": {

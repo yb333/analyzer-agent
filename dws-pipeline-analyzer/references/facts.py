@@ -32,8 +32,10 @@ if sys.platform == "win32":
 from analyzer import read_excel
 from engine import analyze_pipeline, detect_dialect
 from crosscheck import run_crosscheck
+from schedule_recovery import recover_schedule
+from ts_export import TsDraftError, export_ts_draft
 from inputs import (ManifestError, assemble_artifact_dir, read_lts_excel,
-                    read_dq_excel, stage_ddl_files)
+                    read_dq_excel, stage_ddl_files, discover_i_view_from_ddl)
 from inputs import apply_meta_enrichments, build_baseline_export_ctx
 
 
@@ -61,8 +63,13 @@ def _sorting_warnings(unrecognized: list, dq_detected: bool, lts_detected: bool)
     return out
 
 
-def run_facts(dir_path, output_path) -> Path:
-    """制品目录 → 分析 → asset_facts.json 精确路径落盘（一次调用一次交卷）。"""
+def run_facts(dir_path, output_path, fmt: str = "asset_facts") -> Path:
+    """制品目录 → 分析 → 产物精确路径落盘（一次调用一次交卷）。
+
+    fmt: asset_facts（v1 物理事实包，默认）| ts_draft（v2 ts 草稿=ViewContext JSON 渲染，
+    对齐正向 ts 形态；双支持期按消费方节奏切换）。两格式共用装配/分析/分拣/交叉链路，
+    只在投影层分叉——同源保证内容一致。
+    """
     # ── 分拣（识别职责全在本侧：术加硬闸 / 多义 fail / 其余不阻断）──
     try:
         asm = assemble_artifact_dir(dir_path)
@@ -145,6 +152,17 @@ def run_facts(dir_path, output_path) -> Path:
         run_crosscheck(knowledge, engine_ctx, asm,
                        dq_rules=dq_rules, schedule_info=schedule_info))
 
+    # facts 通道 I 视图识别：DDL 清单里的 CREATE VIEW ... FROM 目标表（docs/16 缺口 1）
+    i_view = discover_i_view_from_ddl(
+        asm["ddl"], engine_ctx.get("final_target_schema", ""),
+        engine_ctx.get("final_target_table", ""))
+    if i_view:
+        knowledge["meta"]["asset_info"] = {
+            "is_view": True, "view_table": i_view["view_name"],
+            "view_schema": i_view["view_schema"], "base_table": engine_ctx.get("final_target_table", ""),
+            "base_schema": engine_ctx.get("final_target_schema", ""), "view_step": ""}
+        print(f"  [DDL] 识别 I 视图: {i_view['view_schema']}.{i_view['view_name']}")
+
     # DDL provenance：stage 路径翻译回原路径
     if ddl_map:
         engine_ctx["ddl_files"] = [ddl_map.get(f, f)
@@ -161,23 +179,47 @@ def run_facts(dir_path, output_path) -> Path:
         group_en_fallback="",
         input_sheets=input_sheets,
     )
-    # warnings 合流：分拣披露挂到 draft 的 field_mappings.warnings 之后
-    # （投影层三源合流之外的第 4 源，经 meta.warnings_extra 透传）
-    export_ctx["extra_warnings"] = knowledge["meta"].pop("warnings_extra", [])
-    try:
-        out = export_baseline_v1(knowledge, export_ctx,
-                                 output_dir=Path(output_path).parent,
-                                 output_file=output_path)
-    except BaselineExportError as e:
-        print("[asset_facts] 导出失败，产物未落盘：", file=sys.stderr)
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
-    print(f"asset_facts: {out.resolve()}")
+    # warnings 合流：分拣披露 + 交叉（投影层三源合流之外的第 4 源）
+    extra_warnings = knowledge["meta"].pop("warnings_extra", [])
+
+    if fmt == "ts_draft":
+        # v2：ViewContext JSON 渲染（与 tech_design 同源）；调度还原 + 进门验 vendor schema
+        group_vars = {}
+        for lst in (raw.get("group_variables") or {}).values():
+            for gv in lst:
+                name = getattr(gv, "var_name", "") or ""
+                if name and name not in group_vars:
+                    group_vars[name] = getattr(gv, "default_value", "") or ""
+        schedule_rec = recover_schedule(schedule_info, group_vars)
+        try:
+            out = export_ts_draft(knowledge, engine_ctx, output_path,
+                                  schedule_rec=schedule_rec,
+                                  dq_detected=bool(dq_rules),
+                                  provenance=export_ctx["provenance"],
+                                  extra_warnings=extra_warnings)
+        except TsDraftError as e:
+            print("[ts_draft] 导出失败，产物未落盘：", file=sys.stderr)
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        print(f"ts_draft: {out.resolve()}")
+        locator = "_reverse"
+    else:
+        export_ctx["extra_warnings"] = extra_warnings
+        try:
+            out = export_baseline_v1(knowledge, export_ctx,
+                                     output_dir=Path(output_path).parent,
+                                     output_file=output_path)
+        except BaselineExportError as e:
+            print("[asset_facts] 导出失败，产物未落盘：", file=sys.stderr)
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        print(f"asset_facts: {out.resolve()}")
+        locator = None
     # 自检结论行（v1.4 交付门，机器按行前缀判读；与定位行同风格）
     import json as _json
-    verdict = (_json.loads(out.read_text(encoding="utf-8"))
-               .get("self_check", {}).get("verdict", ""))
-    print(f"self_check: {verdict}")
+    product = _json.loads(out.read_text(encoding="utf-8"))
+    holder = product.get(locator, {}) if locator else product
+    print(f"self_check: {holder.get('self_check', {}).get('verdict', '')}")
     return out
 
 
@@ -189,9 +231,12 @@ def main():
                         help="制品目录（该资产全部原始制品；类型自动识别：excel 按 sheet 指纹、"
                              ".sql/.ddl 后缀即型；术加制品包必需，其余可选）")
     parser.add_argument("--output", required=True,
-                        help="产物落盘路径（asset_facts.json，父目录自动创建）")
+                        help="产物落盘路径（父目录自动创建）")
+    parser.add_argument("--format", default="asset_facts", choices=("asset_facts", "ts_draft"),
+                        help="产物形态：asset_facts（v1 物理事实包，默认）| ts_draft"
+                             "（v2 ts 草稿，对齐消费方正向 ts 形态，vendor schema 进门验）")
     args = parser.parse_args()
-    run_facts(args.dir, args.output)
+    run_facts(args.dir, args.output, fmt=args.format)
 
 
 if __name__ == "__main__":

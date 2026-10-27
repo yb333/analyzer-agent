@@ -1058,6 +1058,47 @@ def discover_i_view(yml_dir: Path, f_schema: str, f_table: str) -> dict | None:
     return None
 
 
+
+
+def discover_i_view_from_ddl(ddl_files: list, f_schema: str, f_table: str) -> dict | None:
+    """在 DDL 文件清单里识别 F 表对应的 I 视图（CREATE VIEW ... FROM f_table）。
+
+    facts 目录通道用（excel 制品无代码仓 I 视图发现；DDL 目录里混有视图 DDL 时
+    恢复 meta.target.i_view——docs/16 缺口 1）。复用 _extract_view_sql 的提取纪律。
+
+    Returns: {"view_name", "view_schema", "ddl_path"} 或 None（未发现/无 DDL）。
+    """
+    import re
+    if not ddl_files or not f_table:
+        return None
+    f_full = f"{f_schema}.{f_table}".lower() if f_schema else f_table.lower()
+    f_short = f_full.split(".")[-1]
+    for path in ddl_files:
+        f = Path(path)
+        try:
+            content = f.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        cl = content.lower()
+        if "create view" not in cl and "create or replace view" not in cl:
+            continue
+        if f_full not in cl and f_short not in cl:
+            continue
+        # 视图名与 schema（CREATE VIEW schema.name AS）
+        nm = re.search(r'CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+([\w.]+)',
+                       content, re.IGNORECASE)
+        if not nm:
+            continue
+        full = nm.group(1)
+        parts = full.split(".")
+        view_schema = parts[0] if len(parts) > 1 else (f_schema or "")
+        view_name = parts[-1]
+        if view_name.lower() == f_short:
+            continue  # 自引用（非视图）
+        return {"view_name": view_name, "view_schema": view_schema,
+                "ddl_path": str(f)}
+    return None
+
 # ═══════════════════════════════════════════════════════════════
 # 装配函数（原 analyzer.main 内联逻辑收敛于此；行为零变）
 # ═══════════════════════════════════════════════════════════════

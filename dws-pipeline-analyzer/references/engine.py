@@ -5739,6 +5739,11 @@ def _extract_table_props(content: str) -> dict:
     if m:
         props["tablespace"] = m.group(1).rstrip(",")
 
+    # TO GROUP（GaussDB 逻辑集群子句——tables.logical_group 的恢复源）
+    m = re.search(r'\bTO\s+GROUP\s+(\S+)', tail, re.IGNORECASE)
+    if m:
+        props["to_group"] = m.group(1).rstrip(",")
+
     return props
 
 
