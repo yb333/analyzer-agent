@@ -1,0 +1,499 @@
+{
+ "version": "1.0.0",
+ "spec_type": "ts",
+ "generated_at": "2026-10-27T18:57:35",
+ "generated_by": "assemble_ts.py",
+ "meta": {
+  "target": {
+   "f_table": {
+    "schema": "dws",
+    "table": "dwb_test_f",
+    "cn": "测试表"
+   },
+   "i_view": {
+    "schema": "dws",
+    "table": "dwb_test_i",
+    "cn": "测试表"
+   }
+  },
+  "dq_required": 0,
+  "grain": "每行一个测试记录",
+  "load_strategy": {
+   "strategy": "全量调度",
+   "label": "",
+   "delete_mode": ""
+  },
+  "field_count": {
+   "business": 1,
+   "audit": 4,
+   "total": 5
+  },
+  "source_tables": [
+   {
+    "schema": "ods",
+    "table": "ods_test_f",
+    "table_cn": "测试源表",
+    "alias": "t"
+   },
+   {
+    "schema": "ods",
+    "table": "ods_pay_f",
+    "table_cn": "增量源表",
+    "alias": "ods"
+   }
+  ],
+  "schedule": {
+   "schedule_type": "daily",
+   "cron": "0 30 3 * * ?",
+   "exec_params": {
+    "P_CYCLE_ID": {
+     "value_type": "string",
+     "desc": "批次号",
+     "standard": true,
+     "default_value": {
+      "type": "dynamic",
+      "expr": "today_ymdhms"
+     }
+    },
+    "P_START_DATE": {
+     "value_type": "date",
+     "desc": "增量范围起点（上次调度时间，运行时平台注入；UT 用 default 兜底）",
+     "standard": true,
+     "default_value": {
+      "type": "dynamic",
+      "expr": "yesterday_ymd"
+     }
+    },
+    "P_END_DATE": {
+     "value_type": "date",
+     "desc": "增量范围终点（当前时间，运行时平台注入；UT 用 default 兜底）",
+     "standard": true,
+     "default_value": {
+      "type": "dynamic",
+      "expr": "today_ymd"
+     }
+    }
+   },
+   "lts_params": [
+    {
+     "lts_var": "V_CYCLE_ID",
+     "etl_param": "P_CYCLE_ID",
+     "desc": "批次号"
+    },
+    {
+     "lts_var": "V_GROUP_CODE",
+     "etl_param": "",
+     "desc": "规则组编码"
+    }
+   ],
+   "tasks": {
+    "f": {
+     "task_name": "task_dwb_test_f",
+     "job_name": "Pjob_dwb_test_f",
+     "cron": "0 30 3 * * ?",
+     "upstream": [],
+     "project_name": "",
+     "task_group": ""
+    },
+    "view": {
+     "task_name": "task_dwb_test_i",
+     "job_name": "Pjob_dwb_test_i",
+     "cron": "0 30 3 * * ?",
+     "upstream": [
+      {
+       "table": "dwb_test_f",
+       "task": "task_dwb_test_f",
+       "dep_type": "宽依赖"
+      }
+     ],
+     "project_name": "",
+     "task_group": ""
+    }
+   }
+  }
+ },
+ "design": {
+  "complexity_analysis": {
+   "design_approach": "测试设计思路：单规则直灌目标表",
+   "segmentation_decision": "不分段",
+   "segmentation_reason": "",
+   "data_volume": ""
+  },
+  "audit_fields": {
+   "del_flag": {
+    "type": "nvarchar2(1)",
+    "default": "'N'",
+    "source": "mapping"
+   },
+   "crt_cycle_id": {
+    "type": "bigint",
+    "default": "'${P_CYCLE_ID}'",
+    "source": "mapping"
+   },
+   "last_upd_cycle_id": {
+    "type": "bigint",
+    "default": "'${P_CYCLE_ID}'",
+    "source": "mapping"
+   },
+   "dw_last_update_date": {
+    "type": "timestamp(0) without time zone",
+    "default": "CURRENT_TIMESTAMP",
+    "source": "mapping"
+   }
+  },
+  "audit_supplemented": [],
+  "business_key": [
+   "id"
+  ],
+  "business_key_design": {
+   "input_key": [
+    "id"
+   ],
+   "adjusted": false,
+   "reason": "沿用输入主键，产出粒度未变"
+  },
+  "exemptions": []
+ },
+ "tables": {
+  "tmp_ods_test_f": {
+   "type": "intermediate",
+   "business_key": [
+    "id"
+   ],
+   "distribution_key": [
+    "id"
+   ],
+   "distribute_type": "HASH",
+   "partition": "",
+   "storage": "column",
+   "logical_group": "LC_DW1",
+   "fields": [
+    {
+     "target_field": "id",
+     "field_type": "bigint",
+     "field_comment": "ID"
+    },
+    {
+     "target_field": "del_flag",
+     "field_type": "nvarchar2(1)",
+     "field_comment": "删除标识: Y-已删除, N-正常"
+    },
+    {
+     "target_field": "crt_cycle_id",
+     "field_type": "bigint",
+     "field_comment": "创建批次ID"
+    },
+    {
+     "target_field": "last_upd_cycle_id",
+     "field_type": "bigint",
+     "field_comment": "最后更新批次ID"
+    },
+    {
+     "target_field": "dw_last_update_date",
+     "field_type": "timestamp(0) without time zone",
+     "field_comment": "数仓最后更新时间"
+    }
+   ]
+  },
+  "tmp_ods_pay_f": {
+   "type": "intermediate",
+   "business_key": [
+    "id"
+   ],
+   "distribution_key": [
+    "id"
+   ],
+   "distribute_type": "HASH",
+   "partition": "",
+   "storage": "column",
+   "logical_group": "LC_DW1",
+   "fields": [
+    {
+     "target_field": "id",
+     "field_type": "bigint",
+     "field_comment": "ID"
+    },
+    {
+     "target_field": "del_flag",
+     "field_type": "nvarchar2(1)",
+     "field_comment": "删除标识: Y-已删除, N-正常"
+    },
+    {
+     "target_field": "crt_cycle_id",
+     "field_type": "bigint",
+     "field_comment": "创建批次ID"
+    },
+    {
+     "target_field": "last_upd_cycle_id",
+     "field_type": "bigint",
+     "field_comment": "最后更新批次ID"
+    },
+    {
+     "target_field": "dw_last_update_date",
+     "field_type": "timestamp(0) without time zone",
+     "field_comment": "数仓最后更新时间"
+    }
+   ]
+  },
+  "dwb_test_f": {
+   "type": "target",
+   "business_key": [
+    "id"
+   ],
+   "distribution_key": [
+    "id"
+   ],
+   "distribute_type": "HASH",
+   "partition": "",
+   "storage": "column",
+   "logical_group": "LC_DW1",
+   "fields": [
+    {
+     "target_field": "id",
+     "field_type": "bigint",
+     "field_comment": "ID"
+    },
+    {
+     "target_field": "del_flag",
+     "field_type": "nvarchar2(1)",
+     "field_comment": "删除标识"
+    },
+    {
+     "target_field": "crt_cycle_id",
+     "field_type": "bigint",
+     "field_comment": "创建批次"
+    },
+    {
+     "target_field": "last_upd_cycle_id",
+     "field_type": "bigint",
+     "field_comment": "更新批次"
+    },
+    {
+     "target_field": "dw_last_update_date",
+     "field_type": "timestamp(0) without time zone",
+     "field_comment": "更新时间"
+    }
+   ]
+  }
+ },
+ "rules": {
+  "R0001": {
+   "rule_name": "增量取数ods_test_f",
+   "scenario": "default",
+   "exec_sequence": 1,
+   "target_table": "dws.tmp_ods_test_f",
+   "design_intent": "",
+   "load_mode": "truncate_table",
+   "write_condition": "",
+   "step_type": "incremental_extract",
+   "target_role": "intermediate",
+   "produces_for": [
+    "R0003"
+   ],
+   "reads": [],
+   "incremental": {
+    "key": "update_time",
+    "filter": "update_time >= '${P_START_DATE}' AND update_time < '${P_END_DATE}'",
+    "init_filter": "1=1",
+    "init_time_range": "ALL"
+   },
+   "filter": "",
+   "source_tables": [
+    {
+     "schema": "ods",
+     "table": "ods_test_f",
+     "alias": "t"
+    },
+    {
+     "schema": "ods",
+     "table": "ods_pay_f",
+     "alias": "ods"
+    }
+   ],
+   "source_aliases": [],
+   "derived_fields": {},
+   "grain": {},
+   "joins": [],
+   "join_safety": [],
+   "dedup_strategy": {},
+   "field_targets": [
+    "id"
+   ],
+   "fields": {
+    "processed": [],
+    "assign": [
+     {
+      "target": "del_flag",
+      "value": "'N'"
+     },
+     {
+      "target": "crt_cycle_id",
+      "value": "'${P_CYCLE_ID}'"
+     },
+     {
+      "target": "last_upd_cycle_id",
+      "value": "'${P_CYCLE_ID}'"
+     },
+     {
+      "target": "dw_last_update_date",
+      "value": "CURRENT_TIMESTAMP"
+     }
+    ],
+    "direct": [
+     "t.id AS id"
+    ]
+   },
+   "field_count": 5
+  },
+  "R0002": {
+   "rule_name": "增量取数ods_pay_f",
+   "scenario": "default",
+   "exec_sequence": 2,
+   "target_table": "dws.tmp_ods_pay_f",
+   "design_intent": "",
+   "load_mode": "truncate_table",
+   "write_condition": "",
+   "step_type": "incremental_extract",
+   "target_role": "intermediate",
+   "produces_for": [
+    "R0003"
+   ],
+   "reads": [],
+   "incremental": {
+    "key": "dt",
+    "filter": "dt >= '${P_START_DATE}' AND dt < '${P_END_DATE}'",
+    "init_filter": "1=1",
+    "init_time_range": "ALL"
+   },
+   "filter": "",
+   "source_tables": [
+    {
+     "schema": "ods",
+     "table": "ods_test_f",
+     "alias": "t"
+    },
+    {
+     "schema": "ods",
+     "table": "ods_pay_f",
+     "alias": "ods"
+    }
+   ],
+   "source_aliases": [],
+   "derived_fields": {},
+   "grain": {},
+   "joins": [],
+   "join_safety": [],
+   "dedup_strategy": {},
+   "field_targets": [
+    "id"
+   ],
+   "fields": {
+    "processed": [],
+    "assign": [
+     {
+      "target": "del_flag",
+      "value": "'N'"
+     },
+     {
+      "target": "crt_cycle_id",
+      "value": "'${P_CYCLE_ID}'"
+     },
+     {
+      "target": "last_upd_cycle_id",
+      "value": "'${P_CYCLE_ID}'"
+     },
+     {
+      "target": "dw_last_update_date",
+      "value": "CURRENT_TIMESTAMP"
+     }
+    ],
+    "direct": [
+     "t.id AS id"
+    ]
+   },
+   "field_count": 5
+  },
+  "R0003": {
+   "rule_name": "合并目标",
+   "scenario": "default",
+   "exec_sequence": 3,
+   "target_table": "dws.dwb_test_f",
+   "design_intent": "",
+   "load_mode": "merge_into",
+   "write_condition": "T.id=T1.id",
+   "step_type": "merge",
+   "target_role": "target",
+   "produces_for": [],
+   "reads": [
+    "dws.tmp_ods_test_f",
+    "dws.tmp_ods_pay_f"
+   ],
+   "incremental": {},
+   "filter": "",
+   "source_tables": [
+    {
+     "schema": "ods",
+     "table": "ods_test_f",
+     "alias": "t"
+    },
+    {
+     "schema": "ods",
+     "table": "ods_pay_f",
+     "alias": "ods"
+    },
+    {
+     "schema": "dws",
+     "table": "tmp_ods_test_f",
+     "alias": "tmp_ods_test_f",
+     "_from_reads": true
+    },
+    {
+     "schema": "dws",
+     "table": "tmp_ods_pay_f",
+     "alias": "tmp_ods_pay_f",
+     "_from_reads": true
+    }
+   ],
+   "source_aliases": [],
+   "derived_fields": {},
+   "grain": {
+    "input": "源",
+    "output": "目标",
+    "change": "无"
+   },
+   "joins": [],
+   "join_safety": [],
+   "dedup_strategy": {},
+   "field_targets": [
+    "id",
+    "del_flag",
+    "crt_cycle_id",
+    "last_upd_cycle_id",
+    "dw_last_update_date"
+   ],
+   "fields": {
+    "processed": [],
+    "assign": [],
+    "direct": [
+     "tmp_ods_test_f.id AS id",
+     "tmp_ods_test_f.del_flag AS del_flag",
+     "tmp_ods_test_f.crt_cycle_id AS crt_cycle_id",
+     "tmp_ods_test_f.last_upd_cycle_id AS last_upd_cycle_id",
+     "tmp_ods_test_f.dw_last_update_date AS dw_last_update_date"
+    ]
+   },
+   "field_count": 5
+  }
+ },
+ "data_flow": {
+  "dependencies": [],
+  "schedule_groups": [
+   {
+    "sequence": 1,
+    "rules": [
+     "R0001"
+    ]
+   }
+  ]
+ }
+}

@@ -1,0 +1,229 @@
+// ============================================================================
+// TS 制品包 - ts.json 骨架模板
+// 本文件是 ts.json 的权威结构定义。产出时填入实际值，保留结构。
+// 字段含义见各处 // 注释。
+// ============================================================================
+{
+  // --- 顶层 ---
+  "version": "1.0.0",                    // 格式版本
+  "spec_type": "ts",                     // 固定 "ts"
+  "generated_at": "",                    // 产出时间（ISO8601）
+  "generated_by": "dws-designer",        // 产出者标识
+
+  // ============================================================================
+  // meta —— 元信息（§1 概述的数据源）
+  // ============================================================================
+  "meta": {
+    // target —— 目标表。F表(物理表,存数据) + I视图(F表镜像,对外消费),固定成对
+    // 绝大多数场景 I = F 镜像(SELECT * FROM ..._f),字段不变则F逻辑变化不影响I
+    "target": {
+      "f_table": { "schema": "", "table": "", "cn": "" },
+      "i_view":  { "schema": "", "table": "", "cn": "" }
+    },
+    "grain": "",                         // 目标表粒度(自然语言,如"一行=一个合同")
+    "load_strategy": {
+      "strategy": "",                    // overwrite(全量覆盖) | partition(分区) | append(追加)
+      "label": "",                       // 写入策略标签
+      "delete_mode": ""                  // 删除模式
+    },
+    "field_count": {                     // 字段统计
+      "business": 0,                     // 业务字段数
+      "audit": 4,                        // 审计字段数(固定4个)
+      "total": 0                         // 合计
+    },
+
+    "source_tables": [                   // 源表清单(来自 mapping 实体级)
+      { "schema": "", "table": "", "table_cn": "", "alias": "" }
+    ],
+
+    // schedule —— 调度。designer 填 schedule_type + cron + upstream_added，
+    // 脚本标准化构建 F/view/dq 三任务
+    "schedule": {
+      "schedule_type": "daily",          // daily | hourly | realtime（标签，§6展示用）
+      "cron": "",                        // designer 填标准表达式(如 "0 30 3 * * ?")
+      "exec_params": {                    // ETL 参数（SQL 里的 ${占位符}）。P_CYCLE_ID 脚本自动注入
+        "P_CYCLE_ID": { "value_type": "string", "desc": "批次号", "standard": true }
+      },
+      "lts_params": [                    // LTS 调度参数（运行时生成值，赋值给 ETL 参数）
+        { "lts_var": "V_CYCLE_ID", "etl_param": "P_CYCLE_ID", "desc": "批次号" },
+        { "lts_var": "V_GROUP_CODE", "etl_param": "", "desc": "规则组编码" }
+      ],
+      "tasks": {                         // 标准化构建的三任务（脚本派生，designer 不碰 task_name/job_name/upstream）
+        "f": {                           // F 表调度
+          "task_name": "task_{表名}",
+          "job_name": "Pjob_{表名}",
+          "cron": "",
+          "project_name": "",            // ★ 调度项目（来自 schedule_config.json，designer 可在 schedule.task_project_override 覆盖）
+          "task_group": "",              // ★ 调度任务组（同上）
+          "upstream": [                  // 上游依赖（RS湖表调度给 + designer新增）
+            // RS 提供的含 project/group/app/env（跨项目依赖归属）；designer 新增的可选填
+            { "table": "", "task": "", "dep_type": "宽依赖", "project": "", "group": "", "app": "", "env": "" }
+            // dep_type: 宽依赖(默认) | 同周期依赖 | 时间点依赖 | 上周期依赖 | 虚拟依赖
+            // project/group/app/env: RS 湖表调度表提供，跨项目依赖时 exporter 用它写归属
+          ]
+        },
+        "view": {                        // I 视图调度（如有，自动补依赖F表）
+          "task_name": "task_{表名}_i",
+          "job_name": "Pjob_{表名}_i",
+          "cron": "",
+          "project_name": "",            // ★ 调度项目（来自 schedule_config.json 或 designer 覆盖）
+          "task_group": "",
+          "upstream": [{ "table": "{F表}", "task": "task_{F表}", "dep_type": "宽依赖" }]
+        },
+        "dq": {                          // DQ 调度（如有I视图，自动补依赖I视图）
+          "task_name": "task_{表名}_dq",
+          "job_name": "Pjob_{表名}_dq",
+          "cron": "",
+          "project_name": "",            // ★ 调度项目（DQ 可单独项目组，schedule_config.dq_override）
+          "task_group": "",
+          "upstream": [{ "table": "{I视图}", "task": "task_{I视图}", "dep_type": "宽依赖" }]
+        }
+      }
+      // 注意：调度项目/任务组（project_name/task_group）提前到设计阶段确定（schedule_config.json），
+      // export 时直接用 ts.json 里的值（不再从 platform_config 取）。数据源等其余部署配置仍在 platform_config。
+    }
+  },
+
+  // ============================================================================
+  // design —— 设计分析(§2 表模型 / §3 复杂度的数据源)
+  // ============================================================================
+  "design": {
+    // complexity_analysis —— 复杂度评估,决定是否分段、是否建中间表
+    "complexity_analysis": {
+      "join_count": 0,                   // JOIN 表数量
+      "has_grain_change": false,         // 是否有粒度变化(聚合/展开)
+      "grain_change_detail": "",         // 粒度变化说明
+      "multi_step_fields": 0,            // 多步骤加工的字段数
+      "aggregation_after_join": false,   // JOIN 后是否聚合
+      "segmentation_decision": "",       // 不分段 | 分段
+      "segmentation_reason": ""          // 分段决策理由
+    },
+    // audit_fields —— 审计字段（4个标准字段）
+    // 智能处理：来源(mapping)提供了就用来源的(含del_flag逻辑)；没提供的自动补充标准模板
+    // source 字段标记来源："mapping"=来自RS/mapping, "supplemented"=自动补充
+    // audit_supplemented 记录哪些是自动补充的（ts.md 里会标注）
+    "audit_fields": {
+      "del_flag":            { "type": "nvarchar2(1)",                    "default": "'N'",            "source": "mapping|supplemented" },
+      "crt_cycle_id":        { "type": "bigint",                         "default": "'${P_CYCLE_ID}'", "source": "mapping|supplemented" },
+      "last_upd_cycle_id":   { "type": "bigint",                         "default": "'${P_CYCLE_ID}'", "source": "mapping|supplemented" },
+      "dw_last_update_date": { "type": "timestamp(0) without time zone", "default": "CURRENT_TIMESTAMP", "source": "mapping|supplemented" }
+    },
+    "business_key": []                    // 业务主键(业务唯一字段组合,供UT主键唯一检查。≠分布键)
+  },
+
+  // ============================================================================
+  // tables —— ★ 表元数据（纯表实体：字段名/类型/注释 + 物理属性），DDL 生成的唯一源
+  // 每张表（目标F表/中间表）各自定义。I视图不在此（无物理属性，字段=F表镜像）
+  // 字段全集 = 写该表各规则 fields 桶目标并集 + designer 自建声明 + 审计4列（脚本装配）
+  // 加工语义（口径/分类/血缘）不在 tables——在 rules.fields 三桶（两视图分界）
+  // ============================================================================
+  "tables": {
+    "dwb_xxx_f": {
+      "type": "target",                   // target(目标F表) | intermediate(中间表)
+      "distribution_key": ["id"],         // 分布键字段（每表各自）
+      "distribute_type": "HASH",          // 分布方式: HASH(有分布键时默认) | ROUNDROBIN(无分布键) | REPLICATION(复制)
+      "partition": "",                    // 分区表达式（无则空）
+      "storage": "column",                // column | row（默认列存）
+      "logical_group": "LC_DW1",          // TO GROUP（默认按 schema 推断）
+      "build_mode": "",                   // 空 | accumulate（多规则累积共建同一表）
+      "fields": [                         // 字段定义（三键纯元数据，脚本装配）
+        { "target_field": "", "field_type": "", "field_comment": "" }
+      ]
+    }
+  },
+
+  // ============================================================================
+  // rules —— ★ 核心实体:规则集合
+  // 一个规则 = 一条 INSERT = 产出一个表(中间表/目标F表)。按 rule_code 索引,支持切片
+  // ============================================================================
+  "rules": {
+    "R0001": {
+      "rule_name": "",
+      "scenario": "",                    // ★ 场景(单场景名 / 多场景合并标记)
+      "exec_sequence": 1,                // 执行顺序
+      "target_table": "",                // 产出表(中间表/目标F表)，带 schema 如 dws.tmp_x1
+      "design_intent": "",               // 该规则的设计意图(自然语言)
+      "load_mode": "truncate_table",     // 写入方式: truncate_table | no_delete | delete | truncate_partition | merge_into
+      "write_condition": "",             // 写入条件(平台delete_condition)。designer填,脚本只搬运+校验
+      "step_type": "full",               // ★ full | aggregate | incremental_extract | merge
+      "target_role": "target",           // ★ intermediate(中间表) | target(目标F表)
+      "produces_for": [],                // ★ 中间表规则填：产出供哪些规则消费
+      "reads": [],                       // ★ 装配/merge规则填：读哪些中间表(带 schema，如 dws.tmp_x)
+      "filter": "",                      // 规则级行过滤(WHERE)；join级限定在 joins[].filter
+      "source_tables": [                 // 该规则关联的源表（reads 的 tmp 以伪源表 _from_reads 带出别名）
+        { "schema": "", "table": "", "alias": "" }
+      ],
+      "grain": { "input": "", "output": "", "change": "" },
+      "joins": [ { "alias": "", "type": "", "condition": "", "filter": "" } ],
+      "join_safety": [
+        { "table": "", "join_filter": "", "join_key_unique": true, "strategy": "", "reason": "" }
+      ],
+      "dedup_strategy": {},              // 累积共建排重策略（designer 定，coder 翻译）
+      "field_targets": [],               // 字段名投影（三桶目标并集，派生只读）
+      // ★ fields 三桶——coder 唯一消费源（桶名即分类，无细分 transform_type）：
+      //   processed 优先看（要写表达式的：designer 口径/类型转换/兜底，refs=完整血缘）
+      //   assign 固定值（审计3条每规则自动补 + 业务赋值；del_flag 与业务加工同构——
+      //     产出规则 assign/processed、搬运规则 direct）
+      //   direct 一把贴（一行一串 "alias.col AS target"，一律带 AS 粘贴零加工，串即完整血缘）
+      // designer 输入接口 = design_decisions.field_logics，装配展开成桶；
+      // field_logics/source_refs 不落 ts（无双写）
+      "fields": {
+        "processed": [ { "target": "", "logic": "", "refs": [""] } ],
+        "assign":    [ { "target": "", "value": "" } ],
+        "direct":    [ "" ]   // 如 "t.order_no AS order_no"（同名也带 AS）
+      }
+    }
+  },
+
+  // ============================================================================
+  // data_flow —— 规则间关系(§5 数据流图的数据源)
+  // 参照 analyzer:节点=规则(产出表),场景通过节点属性标记,多场景并行用 schedule_groups
+  // ============================================================================
+  "data_flow": {
+    "tables": [                          // 表节点(数据流图的节点)
+      { "schema": "", "name": "", "role": "", "layer": "", "is_view": false }
+      // role: source(源表) | target(目标表)
+      // layer: ODS | DWB | DWL | DIM
+    ],
+    "dependencies": [                    // 规则间数据流向(数据流图的边)
+      { "from": "", "to": "", "type": "data_flow", "intermediate_table": "" }
+    ],
+    "schedule_groups": [                 // 执行顺序/并行(场景并行在此体现)
+      { "sequence": 1, "rules": ["R0001"] }
+    ]
+  },
+
+  // ============================================================================
+  // init —— ★ 初始化管道（与增量管道 rules 平行，写同一目标 F 表）
+  // 增量资产才填。init 和增量是"同一目标表的两个写入管道"：
+  //   - 增量管道(rules)日常跑，目标 load_mode = merge_into/no_delete/...(增量写入方式)
+  //   - init 管道首次全量装载，目标 load_mode 恒 = truncate_table(先删全插)
+  // load_mode 装不下两者（一个 rule 一个 load_mode），故 init 单独成段。
+  //
+  // mode: derive(模式一二,从增量派生,rules留空) | explicit(模式三,独立设计,rules由装配器展开)
+  // group_mode: inline(同组p_flag) | separate(独立规则组独立调度)
+  // rules: explicit 时是装配器展开后的完整 init 规则；derive 时为空(下游物化派生)
+  //        装配器按 7 不变量补全：终态 target=增量F表 / load_mode=truncate_table /
+  //        write_condition空 / field_targets=目标全字段 / tmp复用 / 无 incremental.filter
+  // ============================================================================
+  "init": {
+    "mode": "",                          // explicit | derive（非增量资产留空）
+    "group_mode": "",                    // inline | separate
+    "rules": {}                          // explicit: {INIT_R0001: {...}}；derive: {}
+  },
+
+  // ============================================================================
+  // dq_rules —— DQ（RS 驱动：RS L06 有需求 designer 翻译产入，RS 无则留空）
+  // designer 是翻译者（类比 field_logics）：scope/check_type/rule_name 跟 RS 一致，
+  // violation_condition 写违规条件的 SQL 表达式（检查对象=目标 F 表，coder WHERE 直搬），
+  // rule_desc 写口径说明（阈值来历/告警级/方向备注）。
+  // DQ 完全跟随 RS，无"标准三项系统兜底"（主键/审计/记录数不再无条件产）。
+  // assemble_ts 校验：N_DQ1（硬）RS 有 DQ 但 dq_rules 空；N_DQ4（warn）缺 violation_condition；
+  // N_DQ5（硬）violation_condition 引用目标表没有的字段。
+  // ============================================================================
+  "dq_rules": []
+  // 示例：
+  // [{ "scope": "字段级", "check_type": "空值检查", "rule_name": "订单金额非空",
+  //    "violation_condition": "t.order_amount IS NULL",
+  //    "rule_desc": "违规=order_amount 为空（有空值即告警）" }]
+}

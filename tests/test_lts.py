@@ -234,6 +234,7 @@ class TestReadLtsExcel:
         assert set(f.keys()) == {
             "task_name", "task_type", "schedule_cron", "owner", "start_time",
             "depends_prev_cycle", "multi_day", "task_group", "project",
+            "end_time", "freq_config", "ext_attrs",          # 调度还原扩读（v2）
             "group_code", "jobs", "params", "lts_file",
         }
         assert f["task_name"] == "TASK_X_F"
@@ -244,9 +245,13 @@ class TestReadLtsExcel:
         assert f["project"] == "PROJ"
         assert f["group_code"] == "RG001"  # taskParams 的 V_GROUP_CODE
         assert f["start_time"] == "2026-03-20 10:31:25"  # datetime → str
-        assert f["jobs"] == [{"name": "Pjob_x", "type": "url", "parent": "start",
-                              "retry_count": "3", "retry_interval": "60",
-                              "timeout": "10", "error_handler": "终止"}]
+        job = f["jobs"][0]
+        assert {k: job[k] for k in ("name", "type", "parent", "retry_count",
+                                    "retry_interval", "timeout", "error_handler")} == {
+            "name": "Pjob_x", "type": "url", "parent": "start",
+            "retry_count": "3", "retry_interval": "60", "timeout": "10", "error_handler": "终止"}
+        # 扩读列（本构造未填）显式空串——两源同构的字段集一致
+        assert set(job) >= {"exec_path", "params", "call_method", "desc", "var_settings", "ext_attrs"}
         assert {"name": "V_DT", "value": "20260320"} in f["params"]
         assert f["lts_file"] == str(xlsx)
 

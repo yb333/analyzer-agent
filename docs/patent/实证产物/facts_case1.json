@@ -1,0 +1,588 @@
+{
+  "version": "1.4",
+  "self_check": {
+    "verdict": "review",
+    "structural_count": 2,
+    "noise_count": 9
+  },
+  "asset": {
+    "schema": "dws",
+    "table": "dwb_cust_asset_d",
+    "rule_group_code": "GR_CUST_ASSET",
+    "rule_group_en": "DWB_CUST_ASSET_D",
+    "dialect": "dws",
+    "source_type": "execution_tasks.xlsx",
+    "analysis_time": "2026-10-19T12:21:55.783156",
+    "platform_generation": "1.0"
+  },
+  "provenance": [
+    {
+      "type": "execution_tasks",
+      "path": "/private/tmp/patent-test/mixed-dir/execution_tasks_DWB_CUST_ASSET_D.xlsx",
+      "sheets": [
+        "RULE",
+        "TargetFields",
+        "GroupVariables"
+      ]
+    }
+  ],
+  "rules": [
+    {
+      "rule_code": "R0001",
+      "rule_name": "资产明细加工",
+      "exec_sequence": 1,
+      "scenario_id": "scenario_common",
+      "is_common": true,
+      "target_schema": "dws",
+      "target_table": "tmp_cust_asset_detail",
+      "delete_mode": "1",
+      "delete_condition": "",
+      "write_plan": {
+        "kind": "full_truncate",
+        "condition_role": "none",
+        "condition_expr": null,
+        "condition_columns": [],
+        "condition_source": "none"
+      },
+      "query_sql": "SELECT c.cust_id, c.cust_name, a.asset_type, a.balance, a.acct_date FROM ods.ods_acct_balance_di a JOIN ods.ods_cust_info_di c ON a.cust_id = c.cust_id WHERE a.del_flag = 'N' AND a.acct_date = '20260818'",
+      "source_tables": [
+        "ods.ods_acct_balance_di",
+        "ods.ods_cust_info_di"
+      ],
+      "joins": [
+        {
+          "source_table": "ods.ods_acct_balance_di",
+          "alias": "a",
+          "join_type": "FROM",
+          "join_condition": ""
+        },
+        {
+          "source_table": "ods.ods_cust_info_di",
+          "alias": "c",
+          "join_type": "INNER JOIN",
+          "join_condition": "a.cust_id = c.cust_id"
+        }
+      ],
+      "where_clause": "WHERE a.del_flag = 'N' AND a.acct_date = '20260818'",
+      "group_by": [],
+      "is_view_step": false
+    },
+    {
+      "rule_code": "R0002",
+      "rule_name": "资产汇总加工",
+      "exec_sequence": 2,
+      "scenario_id": "scenario_common",
+      "is_common": true,
+      "target_schema": "dws",
+      "target_table": "tmp_cust_asset_sum",
+      "delete_mode": "1",
+      "delete_condition": "",
+      "write_plan": {
+        "kind": "full_truncate",
+        "condition_role": "none",
+        "condition_expr": null,
+        "condition_columns": [],
+        "condition_source": "none"
+      },
+      "query_sql": "SELECT cust_id, asset_type, SUM(balance) AS total_balance, COUNT(1) AS record_cnt FROM dws.tmp_cust_asset_detail t GROUP BY t.cust_id, t.asset_type HAVING SUM(t.balance) > 0",
+      "source_tables": [
+        "dws.tmp_cust_asset_detail"
+      ],
+      "joins": [
+        {
+          "source_table": "dws.tmp_cust_asset_detail",
+          "alias": "t",
+          "join_type": "FROM",
+          "join_condition": ""
+        }
+      ],
+      "where_clause": "",
+      "group_by": [
+        "t.cust_id",
+        "t.asset_type"
+      ],
+      "is_view_step": false
+    },
+    {
+      "rule_code": "R0003",
+      "rule_name": "当日分区写入",
+      "exec_sequence": 3,
+      "scenario_id": "scenario_1",
+      "is_common": false,
+      "target_schema": "dws",
+      "target_table": "dwb_cust_asset_d",
+      "delete_mode": "5",
+      "delete_condition": "P_CUR",
+      "write_plan": {
+        "kind": "partition_truncate",
+        "condition_role": "partition_expr",
+        "condition_expr": "P_CUR",
+        "condition_columns": [],
+        "condition_source": "delete_condition"
+      },
+      "query_sql": "SELECT s.cust_id, s.asset_type, s.total_balance, 'CUR' AS data_scope FROM dws.tmp_cust_asset_sum s WHERE s.data_flag = 'D'",
+      "source_tables": [
+        "dws.tmp_cust_asset_sum"
+      ],
+      "joins": [
+        {
+          "source_table": "dws.tmp_cust_asset_sum",
+          "alias": "s",
+          "join_type": "FROM",
+          "join_condition": ""
+        }
+      ],
+      "where_clause": "WHERE s.data_flag = 'D'",
+      "group_by": [],
+      "is_view_step": false
+    },
+    {
+      "rule_code": "R0004",
+      "rule_name": "历史分区写入",
+      "exec_sequence": 3,
+      "scenario_id": "scenario_2",
+      "is_common": false,
+      "target_schema": "dws",
+      "target_table": "dwb_cust_asset_d",
+      "delete_mode": "5",
+      "delete_condition": "P_HIS",
+      "write_plan": {
+        "kind": "partition_truncate",
+        "condition_role": "partition_expr",
+        "condition_expr": "P_HIS",
+        "condition_columns": [],
+        "condition_source": "delete_condition"
+      },
+      "query_sql": "SELECT s.cust_id, s.asset_type, s.total_balance, 'HIS' AS data_scope FROM dws.tmp_cust_asset_sum s WHERE s.data_flag = 'H'",
+      "source_tables": [
+        "dws.tmp_cust_asset_sum"
+      ],
+      "joins": [
+        {
+          "source_table": "dws.tmp_cust_asset_sum",
+          "alias": "s",
+          "join_type": "FROM",
+          "join_condition": ""
+        }
+      ],
+      "where_clause": "WHERE s.data_flag = 'H'",
+      "group_by": [],
+      "is_view_step": false
+    }
+  ],
+  "tables": [
+    {
+      "schema": "dws",
+      "name": "tmp_cust_asset_detail",
+      "table_props": null,
+      "fields": [
+        {
+          "name": "cust_id",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        },
+        {
+          "name": "cust_name",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        },
+        {
+          "name": "asset_type",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        },
+        {
+          "name": "balance",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        },
+        {
+          "name": "acct_date",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        }
+      ]
+    },
+    {
+      "schema": "ods",
+      "name": "ods_acct_balance_di",
+      "table_props": null,
+      "fields": []
+    },
+    {
+      "schema": "ods",
+      "name": "ods_cust_info_di",
+      "table_props": null,
+      "fields": []
+    },
+    {
+      "schema": "dws",
+      "name": "tmp_cust_asset_sum",
+      "table_props": null,
+      "fields": [
+        {
+          "name": "cust_id",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        },
+        {
+          "name": "asset_type",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        },
+        {
+          "name": "total_balance",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        },
+        {
+          "name": "record_cnt",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        }
+      ]
+    },
+    {
+      "schema": "dws",
+      "name": "dwb_cust_asset_d",
+      "table_props": null,
+      "fields": [
+        {
+          "name": "cust_id",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        },
+        {
+          "name": "asset_type",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        },
+        {
+          "name": "total_balance",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        },
+        {
+          "name": "data_scope",
+          "type": "",
+          "comment": "",
+          "is_distribute_key": false
+        }
+      ]
+    }
+  ],
+  "lineage": [
+    {
+      "rule_code": "R0001",
+      "target_field": "cust_id",
+      "transform_type": "direct",
+      "raw_expr": "c.cust_id",
+      "physical_sources": [
+        {
+          "table": "ods.ods_cust_info_di",
+          "field": "cust_id"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0001",
+      "target_field": "cust_name",
+      "transform_type": "direct",
+      "raw_expr": "c.cust_name",
+      "physical_sources": [
+        {
+          "table": "ods.ods_cust_info_di",
+          "field": "cust_name"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0001",
+      "target_field": "asset_type",
+      "transform_type": "direct",
+      "raw_expr": "a.asset_type",
+      "physical_sources": [
+        {
+          "table": "ods.ods_acct_balance_di",
+          "field": "asset_type"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0001",
+      "target_field": "balance",
+      "transform_type": "direct",
+      "raw_expr": "a.balance",
+      "physical_sources": [
+        {
+          "table": "ods.ods_acct_balance_di",
+          "field": "balance"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0001",
+      "target_field": "acct_date",
+      "transform_type": "direct",
+      "raw_expr": "a.acct_date",
+      "physical_sources": [
+        {
+          "table": "ods.ods_acct_balance_di",
+          "field": "acct_date"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0002",
+      "target_field": "cust_id",
+      "transform_type": "direct",
+      "raw_expr": "cust_id",
+      "physical_sources": [
+        {
+          "table": "ods.ods_cust_info_di",
+          "field": "cust_id"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0002",
+      "target_field": "asset_type",
+      "transform_type": "direct",
+      "raw_expr": "asset_type",
+      "physical_sources": [
+        {
+          "table": "ods.ods_acct_balance_di",
+          "field": "asset_type"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0002",
+      "target_field": "total_balance",
+      "transform_type": "aggregate",
+      "raw_expr": "SUM(balance) AS total_balance",
+      "physical_sources": [
+        {
+          "table": "ods.ods_acct_balance_di",
+          "field": "balance"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0002",
+      "target_field": "record_cnt",
+      "transform_type": "aggregate",
+      "raw_expr": "COUNT(1) AS record_cnt",
+      "physical_sources": []
+    },
+    {
+      "rule_code": "R0003",
+      "target_field": "cust_id",
+      "transform_type": "direct",
+      "raw_expr": "s.cust_id",
+      "physical_sources": [
+        {
+          "table": "ods.ods_cust_info_di",
+          "field": "cust_id"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0003",
+      "target_field": "asset_type",
+      "transform_type": "direct",
+      "raw_expr": "s.asset_type",
+      "physical_sources": [
+        {
+          "table": "ods.ods_acct_balance_di",
+          "field": "asset_type"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0003",
+      "target_field": "total_balance",
+      "transform_type": "direct",
+      "raw_expr": "s.total_balance",
+      "physical_sources": [
+        {
+          "table": "ods.ods_acct_balance_di",
+          "field": "balance"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0003",
+      "target_field": "data_scope",
+      "transform_type": "value",
+      "raw_expr": "'CUR' AS data_scope",
+      "physical_sources": []
+    },
+    {
+      "rule_code": "R0004",
+      "target_field": "cust_id",
+      "transform_type": "direct",
+      "raw_expr": "s.cust_id",
+      "physical_sources": [
+        {
+          "table": "ods.ods_cust_info_di",
+          "field": "cust_id"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0004",
+      "target_field": "asset_type",
+      "transform_type": "direct",
+      "raw_expr": "s.asset_type",
+      "physical_sources": [
+        {
+          "table": "ods.ods_acct_balance_di",
+          "field": "asset_type"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0004",
+      "target_field": "total_balance",
+      "transform_type": "direct",
+      "raw_expr": "s.total_balance",
+      "physical_sources": [
+        {
+          "table": "ods.ods_acct_balance_di",
+          "field": "balance"
+        }
+      ]
+    },
+    {
+      "rule_code": "R0004",
+      "target_field": "data_scope",
+      "transform_type": "value",
+      "raw_expr": "'HIS' AS data_scope",
+      "physical_sources": []
+    }
+  ],
+  "schedule": null,
+  "dq_rules": [],
+  "load_strategy": {
+    "strategy": "partition",
+    "label": "分区全量",
+    "detail": "分区级覆写（TRUNCATE PARTITION），分区条件：P_HIS",
+    "delete_mode": "5",
+    "delete_mode_label": "TRUNCATE PARTITION"
+  },
+  "patterns": [
+    {
+      "label": "聚合汇总",
+      "category": "transform",
+      "detail": "SUM/COUNT/AVG 聚合"
+    },
+    {
+      "label": "审计字段",
+      "category": "metadata",
+      "detail": "固定值/CURRENT_TIMESTAMP 审计字段"
+    },
+    {
+      "label": "多步骤串行",
+      "category": "structure",
+      "detail": "4 个步骤，有跨步骤数据依赖"
+    }
+  ],
+  "warnings": [
+    {
+      "rule_code": "R0001",
+      "type": "field_name_mismatch",
+      "severity": "noise",
+      "title": "规则 R0001 存在 0 个 TargetFields 字段和 1 个 SQL 列无法通过别名精确匹配",
+      "only_in_excel": [],
+      "only_in_sql": [
+        "acct_date"
+      ]
+    },
+    {
+      "rule_code": "R0002",
+      "type": "field_name_mismatch",
+      "severity": "noise",
+      "title": "规则 R0002 存在 0 个 TargetFields 字段和 1 个 SQL 列无法通过别名精确匹配",
+      "only_in_excel": [],
+      "only_in_sql": [
+        "asset_type"
+      ]
+    },
+    {
+      "rule_code": "R0003",
+      "type": "field_name_mismatch",
+      "severity": "noise",
+      "title": "规则 R0003 存在 0 个 TargetFields 字段和 2 个 SQL 列无法通过别名精确匹配",
+      "only_in_excel": [],
+      "only_in_sql": [
+        "asset_type",
+        "data_scope"
+      ]
+    },
+    {
+      "rule_code": "R0004",
+      "type": "field_name_mismatch",
+      "severity": "noise",
+      "title": "规则 R0004 存在 0 个 TargetFields 字段和 2 个 SQL 列无法通过别名精确匹配",
+      "only_in_excel": [],
+      "only_in_sql": [
+        "asset_type",
+        "data_scope"
+      ]
+    },
+    {
+      "type": "field_mapping",
+      "severity": "noise",
+      "title": "TargetFields(11) 与 SQL SELECT(17) 差异 6 字段",
+      "rule_code": "",
+      "id": "ISS_001"
+    },
+    {
+      "type": "data_lineage",
+      "severity": "noise",
+      "title": "字段 record_cnt 无别名前缀，无法回溯来源表",
+      "rule_code": "R0002",
+      "id": "ISS_002"
+    },
+    {
+      "type": "scheduling",
+      "severity": "noise",
+      "title": "规则 R0004 调度过度约束，不必要等待 1 个步骤",
+      "rule_code": "R0004",
+      "id": "ISS_003"
+    },
+    {
+      "type": "unrecognized_artifact",
+      "title": "无法识别的文件 干扰_缺sheet.xlsx（缺已知指纹 sheet（实际 sheets: ['1业务背景', '2数据源清单', '3表关联', '4需求字段', '5业务样例数据']））——不阻断产出，请人工确认是否遗漏制品",
+      "severity": "noise"
+    },
+    {
+      "type": "unrecognized_artifact",
+      "title": "无法识别的文件 说明文档.txt（非 excel 文件（扩展名 .txt；分拣只认 xlsx/xlsm））——不阻断产出，请人工确认是否遗漏制品",
+      "severity": "noise"
+    },
+    {
+      "type": "dq_not_detected",
+      "title": "未检出 DQ 制品（目录即用户所给全部）——若该资产确有存量 DQ，请补料重跑",
+      "severity": "structural"
+    },
+    {
+      "type": "lts_not_detected",
+      "title": "未检出 LTS 制品——增量资产的回刷地基（增量变量还原），若该资产为增量请补料重跑",
+      "severity": "structural"
+    }
+  ]
+}

@@ -419,6 +419,8 @@ dws-pipeline-analyzer/
 │   ├── excel_utils.py    excel 列定位/取值三件套（唯一权威生产点）
 │   ├── inputs.py         ★ 输入装配层（源发现：DDL/LTS/DQ/I视图 + 装配函数；
 │   │                     manifest/三态/excel loader 按 docs/13 波 1b/3 进入）
+│   ├── schedule_recovery.py 调度设计还原（LTS 事实→调度槽位：cron 频率/tskdep 上游/参数；
+│   │                     多场景：ts 草稿/tech_design/影响分析）
 │   ├── analyzer.py       数据读取 + CLI + re-export兼容层
 │   ├── baseline_export.py baseline_v1 契约投影（优化场景）
 │   ├── batch.py          批量编排（循环调engine）
@@ -426,6 +428,8 @@ dws-pipeline-analyzer/
 │   ├── view_generator.py 文档化渲染
 │   ├── field_search.py   字段检索（复用engine）
 │   └── impact_analyzer.py 关联影响分析
+├── vendor/ts_draft/      消费方 ts 草稿契约交付包 vendor（权威在消费方，方向与 asset_facts 相反；
+│                         test_vendor_sync 指纹联锁）
 ├── run.py                脚本调度器（dispatch到references/*.py）
 
 commands/（每个command = 一个完整任务工作流）

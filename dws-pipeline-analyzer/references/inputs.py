@@ -164,6 +164,14 @@ def _extract_jobs_from_text(text):
             "retry_interval": _find_block(block, r"job重试间隔\s*[:：]\s*'?(\d+)"),
             "timeout": _find_block(block, r"job超时时间\s*[:：]\s*'?(\d+)"),
             "error_handler": _find_block(block, r"job异常处理方式\s*[:：]\s*(\S+)"),
+            # 调度还原扩读（v2 ts 草稿）：依赖/参数载体——tskdep 型 job 的上游指向、
+            # job 参数里的 LTS→ETL 变量映射等都可能在此（信息守恒：先全读进事实）
+            "exec_path": _find_block(block, r"执行路径信息\s*[:：]\s*(.+)"),
+            "params": _find_block(block, r"job参数\s*[:：]\s*(.+)"),
+            "call_method": _find_block(block, r"job调用方法\s*[:：]\s*(.+)"),
+            "desc": _find_block(block, r"job描述\s*[:：]\s*(.+)"),
+            "var_settings": _find_block(block, r"job变量设置\s*[:：]\s*(.+)"),
+            "ext_attrs": _find_block(block, r"job扩展属性\s*[:：]\s*(.+)"),
         })
     return jobs
 
@@ -252,6 +260,12 @@ def _parse_lts_from_dict(data: dict) -> dict | None:
                     "retry_interval": str(j.get("job重试间隔") or ""),
                     "timeout": str(j.get("job超时时间") or ""),
                     "error_handler": str(j.get("job异常处理方式") or ""),
+                    "exec_path": str(j.get("执行路径信息") or ""),
+                    "params": str(j.get("job参数") or ""),
+                    "call_method": str(j.get("job调用方法") or ""),
+                    "desc": str(j.get("job描述") or ""),
+                    "var_settings": str(j.get("job变量设置") or ""),
+                    "ext_attrs": str(j.get("job扩展属性") or ""),
                 })
 
     return _build_lts_result(data, task_name, group_code, params, jobs)
@@ -281,6 +295,10 @@ def _parse_lts_from_text(text: str) -> dict | None:
     multi_day = _find(r"是否一天多调\s*[:：]\s*(\S+)")
     task_group = _find(r"\*?任务组名称['\"]?\s*[:：]\s*(\S+)")
     project = _find(r"\*?项目名称['\"]?\s*[:：]\s*(\S+)")
+    # 调度还原扩读（v2 ts 草稿）
+    end_time = _find(r"结束时间\s*[:：]\s*(.+)")
+    freq_config = _find(r"调度频率配置\s*[:：]\s*(.+)")
+    ext_attrs = _find(r"任务扩展属性\s*[:：]\s*(.+)")
 
     # 任务参数：按行扫描成对提取（参数名称→参数值）
     group_code = ""
@@ -318,6 +336,12 @@ def _parse_lts_from_text(text: str) -> dict | None:
             "retry_interval": _find_block(block, r"job重试间隔\s*[:：]\s*'?(\d+)"),
             "timeout": _find_block(block, r"job超时时间\s*[:：]\s*'?(\d+)"),
             "error_handler": _find_block(block, r"job异常处理方式\s*[:：]\s*(\S+)"),
+            "exec_path": _find_block(block, r"执行路径信息\s*[:：]\s*(.+)"),
+            "params": _find_block(block, r"job参数\s*[:：]\s*(.+)"),
+            "call_method": _find_block(block, r"job调用方法\s*[:：]\s*(.+)"),
+            "desc": _find_block(block, r"job描述\s*[:：]\s*(.+)"),
+            "var_settings": _find_block(block, r"job变量设置\s*[:：]\s*(.+)"),
+            "ext_attrs": _find_block(block, r"job扩展属性\s*[:：]\s*(.+)"),
         })
 
     return {
@@ -330,6 +354,9 @@ def _parse_lts_from_text(text: str) -> dict | None:
         "multi_day": multi_day,
         "task_group": task_group,
         "project": project,
+        "end_time": end_time,
+        "freq_config": freq_config,
+        "ext_attrs": ext_attrs,
         "group_code": group_code,
         "jobs": jobs,
         "params": params,
@@ -356,6 +383,9 @@ def _build_lts_result(data, task_name, group_code, params, jobs):
         "multi_day": str(data.get("是否一天多调") or ""),
         "task_group": str(data.get("*任务组名称") or data.get("任务组名称") or ""),
         "project": str(data.get("*项目名称") or data.get("项目名称") or ""),
+        "end_time": str(data.get("结束时间") or ""),
+        "freq_config": str(data.get("调度频率配置") or ""),
+        "ext_attrs": str(data.get("任务扩展属性") or ""),
         "group_code": group_code,
         "jobs": jobs,
         "params": params,
@@ -494,7 +524,8 @@ def _read_lts_excel_jobs(wb) -> dict:
     col = {h: i for i, h in enumerate(headers) if h}
     idx = {k: _find_col(col, k) for k in
            ("任务名称", "job名称", "job类型", "job的父节点名称",
-            "job重试次数", "job重试间隔", "job超时时间", "job异常处理方式")}
+            "job重试次数", "job重试间隔", "job超时时间", "job异常处理方式",
+            "执行路径信息", "job参数", "job调用方法", "job描述", "job变量设置", "job扩展属性")}
     out: dict = {}
     for row in rows[1:]:
         if not row:
@@ -510,6 +541,13 @@ def _read_lts_excel_jobs(wb) -> dict:
             "retry_interval": _get_val(row, idx["job重试间隔"]),
             "timeout": _get_val(row, idx["job超时时间"]),
             "error_handler": _get_val(row, idx["job异常处理方式"]),
+            # 调度还原扩读（与 yml 源同构）
+            "exec_path": _get_val(row, idx["执行路径信息"]),
+            "params": _get_val(row, idx["job参数"]),
+            "call_method": _get_val(row, idx["job调用方法"]),
+            "desc": _get_val(row, idx["job描述"]),
+            "var_settings": _get_val(row, idx["job变量设置"]),
+            "ext_attrs": _get_val(row, idx["job扩展属性"]),
         })
     return out
 
@@ -580,7 +618,8 @@ def read_lts_excel(excel_path, rule_group_code: str = "") -> dict | None:
         col = {h: i for i, h in enumerate(headers) if h}
         idx = {k: _find_col(col, k) for k in
                ("项目名称", "任务组名称", "任务名称", "任务类型", "开始时间",
-                "调度周期", "依赖上一周期", "责任人", "是否一天多调")}
+                "调度周期", "依赖上一周期", "责任人", "是否一天多调",
+                "结束时间", "调度频率配置", "任务扩展属性")}
         jobs_by_task = _read_lts_excel_jobs(wb)
         params_by_task = _read_lts_excel_params(wb)
         # v1.2 provenance：实际读到的 sheet 清单（私有 key，随 dict 流动到
@@ -611,6 +650,9 @@ def read_lts_excel(excel_path, rule_group_code: str = "") -> dict | None:
                 "multi_day": _get_val(row, idx["是否一天多调"]),
                 "task_group": _get_val(row, idx["任务组名称"]),
                 "project": _get_val(row, idx["项目名称"]),
+                "end_time": _get_val(row, idx["结束时间"]),
+                "freq_config": _get_val(row, idx["调度频率配置"]),
+                "ext_attrs": _get_val(row, idx["任务扩展属性"]),
                 "group_code": group_code,
                 "jobs": jobs_by_task.get(task_name, []),
                 "params": params,
