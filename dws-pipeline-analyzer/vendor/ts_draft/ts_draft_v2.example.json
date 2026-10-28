@@ -1,23 +1,53 @@
 {
-  "version": "2.0",
+  "version": "2.1",
   "spec_type": "ts",
   "generated_at": "2026-10-27T00:00:00",
   "generated_by": "dws-reverser",
   "_说明": "合格草稿样例（v2 契约交付包之三）。作用=说清需求：①恢复槽位的应有形态——物理属性[HASH(cust_id)]/write_condition/调度/源表实际别名；②判断位留空是合法契约形态——grain/business_key/join_safety 依据（制品无显式表达则空，消费方『语义空位』机制消费）；③_reverse 审核材料段填法——self_check/warnings/write_plan 原文/schedule_evidence/evidence 旁证（merge_on 强旁证与 dq_pk_check 显式设计并存示范）；④标准三桶形态（rules.fields direct/processed/assign）。权威分工：ts_draft_v2.schema.json=契约必填面，ts-template.json=完整结构权威，本文件=形态参照。本文件不是生成指令——解析与装配的实现全归逆向侧。",
   "meta": {
     "target": {
-      "f_table": {"schema": "dws", "table": "dwb_cust_asset_d", "cn": "客户资产日表"},
-      "i_view": {"schema": "dws", "table": "dwb_cust_asset_i", "cn": ""}
+      "f_table": {
+        "schema": "dws",
+        "table": "dwb_cust_asset_d",
+        "cn": "客户资产日表"
+      },
+      "i_view": {
+        "schema": "dws",
+        "table": "dwb_cust_asset_i",
+        "cn": ""
+      }
     },
     "grain": "",
     "business_key": [],
     "source_tables": [
-      {"schema": "ods", "table": "ods_acct_balance_di", "table_cn": "账户余额", "alias": "b"},
-      {"schema": "ods", "table": "ods_cust_info_di", "table_cn": "客户信息", "alias": "c"}
+      {
+        "schema": "ods",
+        "table": "ods_acct_balance_di",
+        "table_cn": "账户余额",
+        "alias": "b"
+      },
+      {
+        "schema": "ods",
+        "table": "ods_cust_info_di",
+        "table_cn": "客户信息",
+        "alias": "c"
+      }
     ],
-    "schedule": {"schedule_type": "daily", "cron": "0 2 * * ?", "upstream_added": []},
-    "load_strategy": {"strategy": "overwrite", "label": "全量覆盖", "delete_mode": ""},
-    "field_count": {"business": 10, "audit": 4, "total": 14}
+    "schedule": {
+      "schedule_type": "daily",
+      "cron": "0 2 * * ?",
+      "upstream_added": []
+    },
+    "load_strategy": {
+      "strategy": "overwrite",
+      "label": "全量覆盖",
+      "delete_mode": ""
+    },
+    "field_count": {
+      "business": 10,
+      "audit": 4,
+      "total": 14
+    }
   },
   "tables": {
     "tmp_cust_asset_detail": {
@@ -28,26 +58,74 @@
       "storage": "column",
       "logical_group": "",
       "fields": [
-        {"target_field": "cust_id", "field_type": "VARCHAR(32)", "field_comment": "客户号",
-         "transform_type": "direct", "source_fields": [{"table": "ods_cust_info_di", "field": "cust_id", "alias": "c"}], "design_logic": ""},
-        {"target_field": "asset_type", "field_type": "VARCHAR(16)", "field_comment": "资产类型",
-         "transform_type": "direct", "source_fields": [{"table": "ods_acct_balance_di", "field": "acct_type", "alias": "b"}], "design_logic": ""}
+        {
+          "target_field": "cust_id",
+          "field_type": "VARCHAR(32)",
+          "field_comment": "客户号",
+          "transform_type": "direct",
+          "source_fields": [
+            {
+              "table": "ods_cust_info_di",
+              "field": "cust_id",
+              "alias": "c"
+            }
+          ],
+          "design_logic": ""
+        },
+        {
+          "target_field": "asset_type",
+          "field_type": "VARCHAR(16)",
+          "field_comment": "资产类型",
+          "transform_type": "direct",
+          "source_fields": [
+            {
+              "table": "ods_acct_balance_di",
+              "field": "acct_type",
+              "alias": "b"
+            }
+          ],
+          "design_logic": ""
+        }
       ]
     },
     "dwb_cust_asset_d": {
       "type": "target",
-      "distribution_key": ["cust_id"],
+      "distribution_key": [
+        "cust_id"
+      ],
       "distribute_type": "HASH",
       "partition": "",
       "storage": "column",
       "logical_group": "",
       "fields": [
-        {"target_field": "cust_id", "field_type": "VARCHAR(32)", "field_comment": "客户号",
-         "transform_type": "direct", "source_fields": [{"table": "ods_cust_info_di", "field": "cust_id", "alias": "c"}], "design_logic": ""},
-        {"target_field": "total_asset", "field_type": "NUMERIC(18,2)", "field_comment": "资产总额",
-         "transform_type": "aggregate",
-         "source_fields": [{"table": "tmp_cust_asset_detail", "field": "asset_amt", "alias": ""}],
-         "design_logic": "sum(t.asset_amt)（客户维度资产合计）"}
+        {
+          "target_field": "cust_id",
+          "field_type": "VARCHAR(32)",
+          "field_comment": "客户号",
+          "transform_type": "direct",
+          "source_fields": [
+            {
+              "table": "ods_cust_info_di",
+              "field": "cust_id",
+              "alias": "c"
+            }
+          ],
+          "design_logic": ""
+        },
+        {
+          "target_field": "total_asset",
+          "field_type": "NUMERIC(18,2)",
+          "field_comment": "资产总额",
+          "transform_type": "aggregate",
+          "source_fields": [
+            {
+              "table": "tmp_cust_asset_detail",
+              "field": "asset_amt",
+              "alias": ""
+            }
+          ],
+          "design_logic": "sum(t.asset_amt)（客户维度资产合计）"
+        }
       ]
     }
   },
@@ -59,23 +137,50 @@
       "write_condition": "",
       "step_type": "full",
       "target_role": "intermediate",
-      "produces_for": ["R0002"],
+      "produces_for": [
+        "R0002"
+      ],
       "reads": [],
       "scenario": "",
       "exec_sequence": 1,
       "source_tables": [
-        {"schema": "ods", "table": "ods_acct_balance_di", "alias": "b"},
-        {"schema": "ods", "table": "ods_cust_info_di", "alias": "c"}
+        {
+          "schema": "ods",
+          "table": "ods_acct_balance_di",
+          "alias": "b"
+        },
+        {
+          "schema": "ods",
+          "table": "ods_cust_info_di",
+          "alias": "c"
+        }
       ],
       "joins": [
-        {"alias": "c", "type": "LEFT", "condition": "b.cust_id = c.cust_id", "filter": ""}
+        {
+          "alias": "c",
+          "type": "LEFT",
+          "condition": "b.cust_id = c.cust_id",
+          "filter": ""
+        }
       ],
       "join_safety": [],
       "fields": {
-        "direct": ["b.acct_type AS asset_type", "c.cust_id AS cust_id"],
-        "processed": [{"target": "asset_amt", "logic": "nvl(b.balance,0)", "refs": ["b.balance"]}],
+        "direct": [
+          "b.acct_type AS asset_type",
+          "c.cust_id AS cust_id"
+        ],
+        "processed": [
+          {
+            "target": "asset_amt",
+            "logic": "nvl(b.balance,0)",
+            "refs": [
+              "b.balance"
+            ]
+          }
+        ],
         "assign": []
-      }
+      },
+      "query_sql": "SELECT c.cust_id AS cust_id, c.cust_name AS cust_name, b.acct_type AS asset_type, nvl(b.balance,0) AS asset_amt FROM ods.ods_acct_balance_di b LEFT JOIN ods.ods_cust_info_di c ON b.cust_id = c.cust_id"
     },
     "R0002": {
       "rule_name": "资产汇总",
@@ -85,51 +190,129 @@
       "step_type": "aggregate",
       "target_role": "target",
       "produces_for": [],
-      "reads": ["dws.tmp_cust_asset_detail"],
+      "reads": [
+        "dws.tmp_cust_asset_detail"
+      ],
       "scenario": "",
       "exec_sequence": 2,
       "source_tables": [],
       "joins": [],
       "join_safety": [],
       "fields": {
-        "direct": ["t.cust_id AS cust_id"],
-        "processed": [{"target": "total_asset", "logic": "sum(t.asset_amt)", "refs": ["t.asset_amt"]}],
+        "direct": [
+          "t.cust_id AS cust_id"
+        ],
+        "processed": [
+          {
+            "target": "total_asset",
+            "logic": "sum(t.asset_amt)",
+            "refs": [
+              "t.asset_amt"
+            ]
+          }
+        ],
         "assign": []
-      }
+      },
+      "query_sql": "SELECT t.cust_id AS cust_id, sum(t.asset_amt) AS total_asset FROM dws.tmp_cust_asset_detail t GROUP BY t.cust_id"
     }
   },
   "data_flow": {
     "tables": [
-      {"schema": "ods", "name": "ods_acct_balance_di", "role": "source", "layer": "ods", "is_view": false},
-      {"schema": "dws", "name": "tmp_cust_asset_detail", "role": "intermediate", "layer": "dws", "is_view": false},
-      {"schema": "dws", "name": "dwb_cust_asset_d", "role": "target", "layer": "dws", "is_view": false}
+      {
+        "schema": "ods",
+        "name": "ods_acct_balance_di",
+        "role": "source",
+        "layer": "ods",
+        "is_view": false
+      },
+      {
+        "schema": "dws",
+        "name": "tmp_cust_asset_detail",
+        "role": "intermediate",
+        "layer": "dws",
+        "is_view": false
+      },
+      {
+        "schema": "dws",
+        "name": "dwb_cust_asset_d",
+        "role": "target",
+        "layer": "dws",
+        "is_view": false
+      }
     ],
     "dependencies": [
-      {"from": "R0001", "to": "R0002"}
+      {
+        "from": "R0001",
+        "to": "R0002"
+      }
     ]
   },
   "_baseline": {
     "source": "reverse",
     "provenance": [
-      {"type": "execution_tasks", "path": "内网制品目录/execution_tasks.xlsx"}
+      {
+        "type": "execution_tasks",
+        "path": "内网制品目录/execution_tasks.xlsx"
+      }
     ]
   },
   "_reverse": {
-    "self_check": {"verdict": "pass_with_noise", "structural_count": 0, "noise_count": 1},
+    "self_check": {
+      "verdict": "pass_with_noise",
+      "structural_count": 0,
+      "noise_count": 1
+    },
     "warnings": [
-      {"severity": "noise", "title": "登记滞后：mapping 台账无 total_asset 登记", "detail": "制品 TargetFields 有、台账无——平台先改未登"}
+      {
+        "severity": "noise",
+        "title": "登记滞后：mapping 台账无 total_asset 登记",
+        "detail": "制品 TargetFields 有、台账无——平台先改未登"
+      }
     ],
     "write_plan": [
-      {"rule_code": "R0001", "kind": "full_truncate", "condition_role": "", "condition_expr": "", "condition_columns": [], "condition_source": "", "where_clause": ""},
-      {"rule_code": "R0002", "kind": "merge_upsert", "condition_role": "merge_on", "condition_expr": "T.cust_id=T1.cust_id", "condition_columns": ["cust_id"], "condition_source": "execution_tasks", "where_clause": ""}
+      {
+        "rule_code": "R0001",
+        "kind": "full_truncate",
+        "condition_role": "",
+        "condition_expr": "",
+        "condition_columns": [],
+        "condition_source": "",
+        "where_clause": ""
+      },
+      {
+        "rule_code": "R0002",
+        "kind": "merge_upsert",
+        "condition_role": "merge_on",
+        "condition_expr": "T.cust_id=T1.cust_id",
+        "condition_columns": [
+          "cust_id"
+        ],
+        "condition_source": "execution_tasks",
+        "where_clause": ""
+      }
     ],
     "schedule_evidence": [
-      {"rule_group": "GR_CUST_ASSET", "task_path": "项目组/资产域/GR_CUST_ASSET", "cron": "0 2 * * ?", "upstream": ["上游任务编码"]}
+      {
+        "rule_group": "GR_CUST_ASSET",
+        "task_path": "项目组/资产域/GR_CUST_ASSET",
+        "cron": "0 2 * * ?",
+        "upstream": [
+          "上游任务编码"
+        ]
+      }
     ],
     "evidence": {
       "business_key": [
-        {"source": "merge_on", "expr": "T.cust_id=T1.cust_id", "origin": "R0002"},
-        {"source": "dq_pk_check", "expr": "cust_id", "origin": "DQ_主键唯一检查"}
+        {
+          "source": "merge_on",
+          "expr": "T.cust_id=T1.cust_id",
+          "origin": "R0002"
+        },
+        {
+          "source": "dq_pk_check",
+          "expr": "cust_id",
+          "origin": "DQ_主键唯一检查"
+        }
       ]
     }
   }

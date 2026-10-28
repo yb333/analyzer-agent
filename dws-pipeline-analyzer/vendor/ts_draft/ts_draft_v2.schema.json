@@ -4,57 +4,101 @@
   "title": "ts 草稿契约 v2（逆向产物=最终形态）",
   "description": "权威=消费方（契约方向与 v1 反转：v1 asset_facts 权威在逆向侧、消费方 vendor；v2 草稿权威在消费方、逆向侧 vendor——面向本场景逆向是消费方子模块，契约所有者=消费方）。总要求：制品→ts 的解析+装配归逆向侧；消费方建档=审核+复制零解析（任何消费方需要的变换留在消费侧=契约失败）。三条纪律：①恢复声明进本体——制品显式记载的设计结果回填槽位（调度/物理属性/写入/口径/别名拓扑，映射表见 12 章 §11.1/§11.5）；②推断不冒充声明——制品从未显式表达的判断位留空（grain 论证/join_safety 依据），显式痕迹带 provenance 可回填（DQ 主键判重条件→business_key；MERGE ON→write_condition）；③显式空——缺料=null/[]，不编造。语义槽位空值是合法契约形态（消费方『语义空位』机制消费）。",
   "type": "object",
-  "required": ["version", "meta", "tables", "rules", "_reverse"],
+  "required": [
+    "version",
+    "meta",
+    "tables",
+    "rules",
+    "_reverse"
+  ],
   "properties": {
     "version": {
       "type": "string",
-      "description": "契约版本，双端校验锚点。当前 '2.0'（首版）。变更需 bump + 双端同步（波次流程）。",
+      "description": "契约版本，双端校验锚点。当前 '2.1'（v2.1=增补 rules[].query_sql 必填——逐字保真 SQL 载体，v2.0 漏项）。变更需 bump + 双端同步（波次流程）。",
       "pattern": "^2\\.[0-9]+$"
     },
     "meta": {
       "type": "object",
       "description": "元信息。恢复槽位：target（资产标识）/source_tables（SQL FROM/JOIN 实际别名）/schedule（LTS 调度设计结果——映射表见 12 章 §11.5）。判断位留空：grain（自然语言粒度声明，制品无则空串）/business_key（制品无显式主键设计则 []；有[DQ 主键判重]须带 provenance 同步 _reverse.evidence）。",
-      "required": ["target", "source_tables"],
+      "required": [
+        "target",
+        "source_tables"
+      ],
       "properties": {
         "target": {
           "type": "object",
-          "required": ["f_table"],
+          "required": [
+            "f_table"
+          ],
           "properties": {
             "f_table": {
               "type": "object",
-              "required": ["schema", "table"],
+              "required": [
+                "schema",
+                "table"
+              ],
               "properties": {
-                "schema": {"type": "string"},
-                "table": {"type": "string"},
-                "cn": {"type": "string"}
+                "schema": {
+                  "type": "string"
+                },
+                "table": {
+                  "type": "string"
+                },
+                "cn": {
+                  "type": "string"
+                }
               }
             },
             "i_view": {
               "type": "object",
               "properties": {
-                "schema": {"type": "string"},
-                "table": {"type": "string"},
-                "cn": {"type": "string"}
+                "schema": {
+                  "type": "string"
+                },
+                "table": {
+                  "type": "string"
+                },
+                "cn": {
+                  "type": "string"
+                }
               }
             }
           }
         },
-        "grain": {"type": "string", "description": "目标表粒度（依据类——制品无显式表达则空串）"},
+        "grain": {
+          "type": "string",
+          "description": "目标表粒度（依据类——制品无显式表达则空串）"
+        },
         "business_key": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "业务主键。恢复口径：制品显式记载的主键设计（如 DQ 主键判重条件）可回填，且必须同步 _reverse.evidence.business_key 带 provenance；无显式记载则 []（不推断——MERGE ON/分布键仅旁证，进 _reverse.evidence）"
         },
         "source_tables": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["schema", "table", "alias"],
+            "required": [
+              "schema",
+              "table",
+              "alias"
+            ],
             "properties": {
-              "schema": {"type": "string"},
-              "table": {"type": "string"},
-              "table_cn": {"type": "string"},
-              "alias": {"type": "string", "description": "SQL 实际别名（消费方 view 别名对照直接消费，不再重解析 SQL）"}
+              "schema": {
+                "type": "string"
+              },
+              "table": {
+                "type": "string"
+              },
+              "table_cn": {
+                "type": "string"
+              },
+              "alias": {
+                "type": "string",
+                "description": "SQL 实际别名（消费方 view 别名对照直接消费，不再重解析 SQL）"
+              }
             }
           }
         },
@@ -62,9 +106,18 @@
           "type": "object",
           "description": "恢复：LTS/execution_tasks 的调度设计结果（cron/频率/依赖指向→槽位；依赖语义类型 dep_type 是设计判断制品不可恢复→消费方默认宽依赖）。原文证据进 _reverse.schedule_evidence。映射表见 12 章 §11.5。",
           "properties": {
-            "schedule_type": {"type": "string"},
-            "cron": {"type": "string"},
-            "upstream_added": {"type": "array", "items": {"type": "string"}}
+            "schedule_type": {
+              "type": "string"
+            },
+            "cron": {
+              "type": "string"
+            },
+            "upstream_added": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         }
       }
@@ -74,36 +127,81 @@
       "description": "产出表（短表名→结构）。恢复：DDL 全量物理属性——distribution_key/distribute_type/partition 必须从 table_props（distribute_by/distribute_columns/partition_by/with_options/tablespace）+ is_distribute_key 映射（v1 消费侧曾丢弃=契约设计意图『档案 DDL 走 ts 投影无损再生』以此承载）。中间表由读写拓扑判 type。",
       "additionalProperties": {
         "type": "object",
-        "required": ["type", "distribution_key", "distribute_type", "fields"],
+        "required": [
+          "type",
+          "distribution_key",
+          "distribute_type",
+          "fields"
+        ],
         "properties": {
-          "type": {"type": "string", "enum": ["intermediate", "target"]},
-          "distribution_key": {"type": "array", "items": {"type": "string"}},
-          "distribute_type": {"type": "string", "description": "从 distribute_by 子句取类型段（HASH/REPLICATION/ROUNDROBIN…），无子句且无 is_distribute_key 列=ROUNDROBIN"},
-          "partition": {"type": "string"},
-          "storage": {"type": "string"},
-          "logical_group": {"type": "string"},
+          "type": {
+            "type": "string",
+            "enum": [
+              "intermediate",
+              "target"
+            ]
+          },
+          "distribution_key": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "distribute_type": {
+            "type": "string",
+            "description": "从 distribute_by 子句取类型段（HASH/REPLICATION/ROUNDROBIN…），无子句且无 is_distribute_key 列=ROUNDROBIN"
+          },
+          "partition": {
+            "type": "string"
+          },
+          "storage": {
+            "type": "string"
+          },
+          "logical_group": {
+            "type": "string"
+          },
           "fields": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["target_field"],
+              "required": [
+                "target_field"
+              ],
               "properties": {
-                "target_field": {"type": "string"},
-                "field_type": {"type": "string"},
-                "field_comment": {"type": "string", "description": "DDL 注释中文名（恢复）"},
-                "transform_type": {"type": "string"},
+                "target_field": {
+                  "type": "string"
+                },
+                "field_type": {
+                  "type": "string"
+                },
+                "field_comment": {
+                  "type": "string",
+                  "description": "DDL 注释中文名（恢复）"
+                },
+                "transform_type": {
+                  "type": "string"
+                },
                 "source_fields": {
                   "type": "array",
                   "items": {
                     "type": "object",
                     "properties": {
-                      "table": {"type": "string"},
-                      "field": {"type": "string"},
-                      "alias": {"type": "string"}
+                      "table": {
+                        "type": "string"
+                      },
+                      "field": {
+                        "type": "string"
+                      },
+                      "alias": {
+                        "type": "string"
+                      }
                     }
                   }
                 },
-                "design_logic": {"type": "string", "description": "口径表达式（SQL 恢复）；理解句是设计依据，制品无则仅表达式或空串"}
+                "design_logic": {
+                  "type": "string",
+                  "description": "口径表达式（SQL 恢复）；理解句是设计依据，制品无则仅表达式或空串"
+                }
               }
             }
           }
@@ -115,25 +213,64 @@
       "description": "规则（code→结构）。恢复：load_mode/write_condition（write_plan 词典译，原文进 _reverse.write_plan）/fields 三桶（SQL 投影/口径装配）/joins+source_tables（FROM/JOIN 实际别名与条件）/reads/produces_for（读写拓扑）。判断位留空：join_safety 依据（结构条目可空数组）。不含 DQ（对齐 new-pipe ts 形态——DQ 走独立 dq.json 通道）。",
       "additionalProperties": {
         "type": "object",
-        "required": ["target_table", "load_mode", "fields"],
+        "required": [
+          "target_table",
+          "load_mode",
+          "fields",
+          "query_sql"
+        ],
         "properties": {
-          "target_table": {"type": "string"},
-          "load_mode": {"type": "string", "description": "write_plan kind 词典译；词表外待定则空串+gap 进 _reverse（禁止硬映射）"},
-          "write_condition": {"type": "string", "description": "MERGE ON/删除条件（制品显式写入设计——恢复）"},
-          "step_type": {"type": "string"},
-          "target_role": {"type": "string"},
-          "reads": {"type": "array", "items": {"type": "string"}},
-          "produces_for": {"type": "array", "items": {"type": "string"}},
-          "filter": {"type": "string"},
+          "target_table": {
+            "type": "string"
+          },
+          "load_mode": {
+            "type": "string",
+            "description": "write_plan kind 词典译；词表外待定则空串+gap 进 _reverse（禁止硬映射）"
+          },
+          "write_condition": {
+            "type": "string",
+            "description": "MERGE ON/删除条件（制品显式写入设计——恢复）"
+          },
+          "step_type": {
+            "type": "string"
+          },
+          "target_role": {
+            "type": "string"
+          },
+          "reads": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "produces_for": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "filter": {
+            "type": "string"
+          },
           "source_tables": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["schema", "table", "alias"],
+              "required": [
+                "schema",
+                "table",
+                "alias"
+              ],
               "properties": {
-                "schema": {"type": "string"},
-                "table": {"type": "string"},
-                "alias": {"type": "string"}
+                "schema": {
+                  "type": "string"
+                },
+                "table": {
+                  "type": "string"
+                },
+                "alias": {
+                  "type": "string"
+                }
               }
             }
           },
@@ -141,34 +278,66 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["alias", "condition"],
+              "required": [
+                "alias",
+                "condition"
+              ],
               "properties": {
-                "alias": {"type": "string"},
-                "type": {"type": "string"},
-                "condition": {"type": "string"},
-                "filter": {"type": "string"}
+                "alias": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string"
+                },
+                "condition": {
+                  "type": "string"
+                },
+                "filter": {
+                  "type": "string"
+                }
               }
             }
           },
-          "join_safety": {"type": "array", "description": "存量判断依据留空数组（增量新 JOIN 由消费方 designer 现声明）"},
+          "join_safety": {
+            "type": "array",
+            "description": "存量判断依据留空数组（增量新 JOIN 由消费方 designer 现声明）"
+          },
           "fields": {
             "type": "object",
-            "required": ["direct", "processed", "assign"],
+            "required": [
+              "direct",
+              "processed",
+              "assign"
+            ],
             "properties": {
               "direct": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": {
+                  "type": "string"
+                },
                 "description": "'alias.col AS target' 串（同名也带 AS——装配产物形态）"
               },
               "processed": {
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["target", "logic"],
+                  "required": [
+                    "target",
+                    "logic"
+                  ],
                   "properties": {
-                    "target": {"type": "string"},
-                    "logic": {"type": "string"},
-                    "refs": {"type": "array", "items": {"type": "string"}}
+                    "target": {
+                      "type": "string"
+                    },
+                    "logic": {
+                      "type": "string"
+                    },
+                    "refs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
                   }
                 }
               },
@@ -177,12 +346,20 @@
                 "items": {
                   "type": "object",
                   "properties": {
-                    "target": {"type": "string"},
-                    "value": {"type": "string"}
+                    "target": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
                   }
                 }
               }
             }
+          },
+          "query_sql": {
+            "type": "string",
+            "description": "规则 SQL 原文（**逐字保真**——v1 四纪律延续，禁重排）。消费方建档时落 archive/etl/{rule_code}.sql（coder 底稿/SQL 围栏比对基准）。v2.1 增补：v2.0 漏项——无此字段 baseline etl 无从诞生。"
           }
         }
       }
@@ -202,38 +379,75 @@
     "_reverse": {
       "type": "object",
       "description": "审核材料段（下划线键=非资产语义，消费方围栏/UT/切片忽略；内容= v1.4 产物同源字段重新落位——档案单文件自足由它成立，消费方 view 从档案渲染）。结构定形见 12 章 §11.3。",
-      "required": ["self_check", "warnings"],
+      "required": [
+        "self_check",
+        "warnings"
+      ],
       "properties": {
         "self_check": {
           "type": "object",
-          "required": ["verdict", "structural_count", "noise_count"],
+          "required": [
+            "verdict",
+            "structural_count",
+            "noise_count"
+          ],
           "properties": {
-            "verdict": {"type": "string", "enum": ["pass", "pass_with_noise", "review"]},
-            "structural_count": {"type": "integer", "minimum": 0},
-            "noise_count": {"type": "integer", "minimum": 0}
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "pass",
+                "pass_with_noise",
+                "review"
+              ]
+            },
+            "structural_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "noise_count": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         "warnings": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["severity", "title"],
+            "required": [
+              "severity",
+              "title"
+            ],
             "properties": {
-              "severity": {"type": "string", "enum": ["structural", "noise"]},
-              "title": {"type": "string"},
-              "detail": {"type": "string"}
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "structural",
+                  "noise"
+                ]
+              },
+              "title": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
             }
           },
           "description": "v1.4 同形态（含五类交叉结果）——分级口径归逆向（制品域知识权威）"
         },
         "write_plan": {
           "type": "array",
-          "items": {"type": "object"},
+          "items": {
+            "type": "object"
+          },
           "description": "写入类型原文证据（kind/condition_role/condition_expr/condition_columns/where——本体 load_mode 的词典译源，审核与词表扩展用）"
         },
         "schedule_evidence": {
           "type": "array",
-          "items": {"type": "object"},
+          "items": {
+            "type": "object"
+          },
           "description": "LTS/execution_tasks 调度原文证据（cron 串/任务路径/依赖指向原文——本体 meta.schedule/tasks 的恢复源）"
         },
         "evidence": {
@@ -244,12 +458,26 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["source", "expr"],
+                "required": [
+                  "source",
+                  "expr"
+                ],
                 "properties": {
-                  "source": {"type": "string", "enum": ["merge_on", "dq_pk_check"],
-                             "description": "merge_on=强旁证（upsert 行身份）；dq_pk_check=显式主键设计（可回填本体带 provenance）"},
-                  "expr": {"type": "string"},
-                  "origin": {"type": "string", "description": "出处（规则码/DQ 检查名）"}
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "merge_on",
+                      "dq_pk_check"
+                    ],
+                    "description": "merge_on=强旁证（upsert 行身份）；dq_pk_check=显式主键设计（可回填本体带 provenance）"
+                  },
+                  "expr": {
+                    "type": "string"
+                  },
+                  "origin": {
+                    "type": "string",
+                    "description": "出处（规则码/DQ 检查名）"
+                  }
                 }
               }
             }

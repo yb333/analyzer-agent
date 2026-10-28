@@ -26,7 +26,7 @@ from pathlib import Path
 from viewmodel import build_context
 from baseline_export import (build_write_plan, _project_warnings, _derive_self_check)
 
-TS_VERSION = "2.0"
+TS_VERSION = "2.1"  # v2.1：rules[].query_sql 逐字必填（契约波次随 vendor 同步）
 GENERATED_BY = "dws-pipeline-analyzer"
 VENDOR_SCHEMA_PATH = (Path(__file__).resolve().parent.parent
                       / "vendor" / "ts_draft" / "ts_draft_v2.schema.json")
@@ -164,6 +164,10 @@ def _bucket_fields(ctx, step_id: str) -> tuple[dict, list]:
 
 def _ts_rules(ctx, knowledge: dict, topo: dict, plans: dict) -> dict:
     written = topo["_written"]
+    # query_sql 逐字（v2.1 必填）：source.raw_sql=解析原文附录（与 asset_facts 同源），
+    # 兜底 data_flow.raw_sql——双通道同一优先级口径
+    raw_sql_by_rule = {r.get("rule_code"): r.get("sql", "")
+                       for r in knowledge.get("source", {}).get("raw_sql", [])}
     steps = sorted(knowledge.get("topology", {}).get("steps", []),
                    key=lambda s: (s.get("exec_sequence", 0), s["step_id"]))
     out: dict = {}
@@ -186,6 +190,8 @@ def _ts_rules(ctx, knowledge: dict, topo: dict, plans: dict) -> dict:
         buckets, targets = _bucket_fields(ctx, info["step_id"])
         out[code] = {
             "rule_name": str(s.get("rule_name") or ""),
+            "query_sql": str(raw_sql_by_rule.get(code)
+                             or ctx.df_step(info["step_id"]).get("raw_sql") or ""),  # 逐字
             "scenario": str(s.get("scenario_id") or ""),
             "exec_sequence": s.get("exec_sequence", 0),
             "target_table": info["target_full"],

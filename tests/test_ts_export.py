@@ -83,6 +83,16 @@ class TestTopologyAndBuckets:
         r0 = next(iter(ts["rules"].values()))
         assert {"target": "flag_col", "value": "'N'"} in r0["fields"]["assign"]
 
+    def test_query_sql_verbatim(self):
+        """v2.1：rules[].query_sql 逐字必填——与 source.raw_sql（解析原文附录）字节一致。"""
+        d = _draft("case_03_cte_nested")
+        ts = render_ts_draft(d, {"final_target_schema": "dws",
+                                 "final_target_table": d["meta"]["target_table"]})
+        verbatim = next(r["sql"] for r in d["source"]["raw_sql"] if r["rule_code"] == "UR003")
+        assert ts["rules"]["UR003"]["query_sql"] == verbatim
+        assert ts["version"] == "2.1"
+        assert validate_ts_draft(ts) == []  # v2.1 schema required 含 query_sql
+
     def test_field_targets_union_and_count(self):
         ts = _render("case_07_multi_step_serial")
         r = ts["rules"]["UR007A"]
@@ -212,7 +222,8 @@ class TestFactsFormatE2E:
         assert any(l.startswith("ts_draft: ") for l in stdout.splitlines())
         assert any(l.startswith("self_check: ") for l in stdout.splitlines())
         d = json.loads(out.read_text(encoding="utf-8"))
-        assert d["version"] == "2.0" and d["spec_type"] == "ts"
+        assert d["version"] == "2.1" and d["spec_type"] == "ts"
+        assert all(r["query_sql"] for r in d["rules"].values())   # 四规则逐字 SQL 齐
         assert d["meta"]["target"]["i_view"]["table"] == "dwb_cust_asset_i"   # CREATE VIEW 识别
         t = d["tables"]["dwb_cust_asset_d"]
         assert t["distribution_key"] == ["cust_id"] and t["logical_group"] == "LC_DW1"

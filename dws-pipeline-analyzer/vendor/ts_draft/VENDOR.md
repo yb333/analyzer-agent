@@ -11,7 +11,7 @@
 | ts_sample_forward.json | skills/opt-pipe/schemas/ | 正向设计链路真实产出——**全貌对齐靶** |
 | ts-template.json | skills/dws-design/assets/ | 完整结构权威（JSONC，schema 未描述字段以此为准） |
 
-- 同步锚：消费方 commit `e3a7882`（2026-10-27）
+- 同步锚：消费方 commit `5e4885d`（2026-10-28；v2.1=rules[].query_sql 必填补丁）
 - re-vendor 步骤：拷贝四文件覆盖 → 更新本锚 → 跑 test_vendor_sync + test_ts_export
 - 词表（load_mode 等 ts 域词汇）不在此目录：按本仓标准枚举产（用户决策 2026-10-27），
   消费方遵循本仓枚举
