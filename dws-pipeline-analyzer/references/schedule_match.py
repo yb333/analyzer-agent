@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """schedule_match —— LTS 依赖 job ↔ 源表 调度匹配（SPEC 通道适配层）。
 
-口径（docs/17-SPEC列级映射矩阵.md §六，2026-11-02 实测修订⑧）：
+口径（docs/17 §六，2026-11-02 三轮实测定稿）：
     候选集 = 资产 F 任务的 **tskdep 依赖 job** 指向的上游任务——不是全量任务。
     LTS 任务图（用户口述）：资产 job 的父 job 是 start/getdata 类根节点；
     依赖 job（tskdep 型）的父 job = 资产 job，其 job 名 = 上游任务主 job 名
     （Pjob_X，X 即上游表名）。资产自身任务/主 job 一律不进候选。
 
-    匹配两层：
-        精确层  tskdep job 名解出的表名 == 源表裸名（确定性）
-        模糊层  三档：等值 / 包含 / 相似度 ≥ SIM_THRESHOLD（真实制品 Pjob 命
-                名常与表名有出入，模糊为主力）
-    歧义保护：最佳与次佳得分差 < AMBIGUITY_MARGIN → 不自动填，列举待人工
-    （宁可少填，不错配调度信息）。全档未中 → 尾部列举行。
+    匹配规则（用户口径，一句话）：**job 名（归一化后）包含表名 → 命中；
+    唯一命中就填；多个命中（歧义）或零命中 → 拿出来列举**。
+    - 归一化：小写、去 Pjob_/task_ 前缀、去 schema、去 _/- 分隔符——所以
+      `pjob_x_ods_acct`（工程前缀）、`pjob_ods_acct_di`（后缀）天然命中；
+    - 匹配键 = tskdep job 名 + 上游任务名，任一包含即算该候选命中；
+    - 唯一性是硬约束：宁可列举待人工，不错配调度信息。
 
 分层：本模块是 SPEC 适配层构件，复用 schedule_recovery 的 tskdep 解析口径
 （TSKDEP / _job_table / _main_job_name / _task_table），不重复造轮子。
@@ -23,13 +23,8 @@ Author: 院博
 from __future__ import annotations
 
 import re
-from difflib import SequenceMatcher
 
 from schedule_recovery import TSKDEP, _job_table, _main_job_name, _task_table
-
-# 阈值常量（docs/17 §六缺口 2：初始值，真实 LTS 制品校准后调整）
-SIM_THRESHOLD = 0.6
-AMBIGUITY_MARGIN = 0.1
 
 _STRIP_PREFIXES = ("pjob_", "task_")
 
@@ -97,22 +92,17 @@ def dependency_candidates(schedule_info) -> tuple:
     return candidates, "ok"
 
 
-def _score(key: str, table: str):
-    """单个键 × 单个源表的 (tier, score, label)。tier: 1 等值 / 2 包含 / 3 相似度 / 0 未中。
-
-    返回 score: 1.0（等值）/ 0.9（包含）/ difflib 比值（相似度）。
-    """
+def _hit(key: str, table: str) -> bool:
+    """命中判定（用户口径）：归一化后 job 名包含表名（含相等）。"""
     nk, nt = _norm(key), _norm(table)
-    if not nk or not nt:
-        return 0, 0.0, ""
-    if nk == nt:
-        return 1, 1.0, "调度信息按Pjob名精确匹配"
-    if nk in nt or nt in nk:
-        return 2, 0.9, "模糊匹配(包含)，请人工核对"
-    ratio = SequenceMatcher(None, nk, nt).ratio()
-    if ratio >= SIM_THRESHOLD:
-        return 3, ratio, f"模糊匹配(相似度{ratio:.2f})，请人工核对"
-    return 0, 0.0, ""
+    return bool(nk and nt and nt in nk)
+
+
+def _hit_label(key: str, table: str) -> str:
+    """命中方式的备注标注：等值=精确，包含=含表名。"""
+    if _norm(key) == _norm(table):
+        return "按job名精确匹配（含表名）"
+    return "匹配（job名含表名），请人工核对"
 
 
 def _upstream_row(cand: dict) -> dict:
@@ -139,10 +129,8 @@ def _upstream_row(cand: dict) -> dict:
 def match_schedules(schedule_info, source_tables: list) -> tuple:
     """资产 F 任务的 tskdep 依赖 × 源表清单 → (matched, unmatched, status)。
 
-    匹配两层（docs/17 §六实测修订⑧）：
-    1. 精确层：tskdep job 名解出的表名（_job_table）== 源表裸名（确定性，
-       多候选并列 → 歧义保护不自动填）；
-    2. 模糊层：候选 job 名/上游任务名 × 源表，三档（等值/包含/相似度）。
+    匹配规则（用户口径定稿）：归一化后 job 名/上游任务名**包含**表名 → 该候选
+    命中；**唯一命中自动填**；多个命中（歧义）或零命中 → 候选进尾部列举。
 
     Returns:
         matched: {查找键: 调度列 dict（含 remark）}，键 = "schema.table".lower()
@@ -156,38 +144,35 @@ def match_schedules(schedule_info, source_tables: list) -> tuple:
     tables = [(t.get("schema", ""), t.get("table", ""))
               for t in (source_tables or [])]
 
-    best_for_table: dict = {}   # (schema, table) -> (cand, score, label)
-    for schema, table in tables:
-        bare = (table or "").lower()
-        scores = []
-        for c in candidates:
-            if c["up_task"] is None:
-                continue    # 未解析到上游任务的候选不参与匹配（防半空行），只列举
-            if c["table_key"] and c["table_key"] == bare:
-                scores.append((2.0, 0, "按依赖job（tskdep）表名精确匹配", c))
-                continue
-            best_key = (0, 0.0, "")
-            for k in (c["job"],
-                      (c["up_task"].get("task_name") or "")):
-                tier, sc, label = _score(k, table)
-                if sc > best_key[1]:
-                    best_key = (tier, sc, label)
-            if best_key[1] > 0:
-                scores.append((best_key[1], best_key[0], best_key[2], c))
-        scores.sort(key=lambda x: (-x[0], x[1]))
-        if not scores:
-            continue
-        top = scores[0]
-        second = scores[1][0] if len(scores) > 1 else 0.0
-        if top[0] - second < AMBIGUITY_MARGIN:
-            continue            # 歧义保护：近并列不自动填
-        best_for_table[(schema, table)] = (top[3], top[0], top[2])
+    # 只参与匹配的候选：已解析到上游任务的（未解析的只列举，防半空行）
+    usable = [c for c in candidates if c["up_task"] is not None]
+
+    def _cand_hits(c, table):
+        """候选命中 + 命中键（job 名或上游任务名，含表名即中）。"""
+        keys = [c["job"], (c["up_task"].get("task_name") or "")]
+        hit_keys = [k for k in keys if _hit(k, table)]
+        if not hit_keys:
+            return None
+        # 等值优先出标注（job 名先于任务名）
+        for k in hit_keys:
+            if _norm(k) == _norm(table):
+                return k
+        return hit_keys[0]
 
     matched = {}
     used = set()
-    for (schema, table), (cand, _sc, label) in best_for_table.items():
+    for schema, table in tables:
+        hits = []
+        for c in usable:
+            k = _cand_hits(c, table)
+            if k is not None:
+                hits.append((c, k))
+        if len(hits) != 1:
+            # 零命中（源表侧无事发生）或多命中（歧义，候选留待列举）
+            continue
+        cand, key = hits[0]
         row = _upstream_row(cand)
-        row["remark"] = label
+        row["remark"] = _hit_label(key, table)
         used.add(id(cand))
         if schema:
             matched[f"{schema}.{table}".lower()] = row
@@ -205,7 +190,7 @@ def match_schedules(schedule_info, source_tables: list) -> tuple:
                              f"对应上游任务，请人工核对")
         else:
             row["remark"] = (f"依赖job（tskdep）指向表 {c['table_key']}，"
-                             f"未匹配到本资产源表，仅列举供人工核对")
+                             f"未唯一匹配到本资产源表（零命中或歧义），仅列举供人工核对")
         unmatched.append(row)
 
     return matched, unmatched, "ok"

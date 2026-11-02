@@ -1,7 +1,7 @@
-"""schedule_match 依赖 job 匹配测试（docs/17 §六实测修订⑧）。
+"""schedule_match 依赖 job 匹配测试（docs/17 §六，2026-11-02 三轮定稿）。
 
-候选集 = 资产 F 任务的 tskdep 依赖 job（不是全量任务）；
-精确层（tskdep 表名）+ 模糊层三档 + 歧义保护 + 未匹配列举。
+规则一句话：job 名（归一化后）包含表名 → 命中；唯一命中就填；
+多个命中（歧义）或零命中 → 拿出来列举。
 
 运行:
     pytest tests/test_schedule_match.py -v
@@ -13,8 +13,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "dws-pipeline-analyzer" / "references"))
 
-from schedule_match import (_norm, _score, dependency_candidates,
-                            match_schedules, SIM_THRESHOLD, AMBIGUITY_MARGIN)
+from schedule_match import (_hit, _norm, dependency_candidates,
+                            match_schedules)
 
 SOURCES = [
     {"schema": "ods", "table": "ods_acct_balance_di"},
@@ -49,18 +49,22 @@ class TestNorm:
         assert _norm("task__ODS-ACCT-BALANCE-DI") == "odsacctbalancedi"
 
 
-class TestTiers:
-    def test_tier1_exact(self):
-        tier, score, label = _score("Pjob_ods_acct_balance_di", "ods_acct_balance_di")
-        assert tier == 1 and score == 1.0 and "精确" in label
+class TestHit:
+    """包含即命中（用户口径）：pjob_x_表名 / 表名_后缀 / 等值 全部命中。"""
 
-    def test_tier2_contains(self):
-        tier, score, label = _score("Pjob_acct_bal", "ods_acct_balance_di")
-        assert tier == 2 and "包含" in label
+    def test_equality(self):
+        assert _hit("Pjob_ods_acct_balance_di", "ods_acct_balance_di")
 
-    def test_tier3_similarity(self):
-        tier, score, label = _score("Pjob_cust_asset_dly", "dwb_cust_asset_di")
-        assert tier == 3 and score >= SIM_THRESHOLD and "相似度" in label
+    def test_prefix_segment(self):
+        assert _hit("Pjob_x_ods_acct_balance_di", "ods_acct_balance_di")
+
+    def test_suffix_segment(self):
+        assert _hit("Pjob_ods_acct_di", "ods_acct")
+        assert _hit("Pjob_ods_acct_balance_di", "ods_acct_balance")
+
+    def test_no_match(self):
+        assert not _hit("Pjob_unrelated", "ods_acct")
+        assert not _hit("Pjob_ods_acct_balance_dx", "ods_acct_balance_di")
 
 
 class TestDependencyCandidates:
@@ -102,24 +106,46 @@ class TestDependencyCandidates:
 
 class TestMatchSchedules:
 
-    def test_exact_layer_by_tskdep_table(self):
-        """精确层：tskdep job 名的表名 == 源表裸名，直接命中。"""
+    def test_unique_hit_fills(self):
+        """唯一命中自动填：等值出精确标注，包含形变出含表名标注。"""
         matched, unmatched, status = match_schedules(
             _info(_f_task("A_F", ["Pjob_ods_acct_balance_di",
-                                  "Pjob_ods_cust_info_di",
+                                  "Pjob_x_ods_cust_info_di",
                                   "Pjob_ods_order_di"]),
                   _task("task_ods_acct_balance_di", "Pjob_ods_acct_balance_di"),
-                  _task("task_ods_cust_info_di", "Pjob_ods_cust_info_di"),
+                  _task("task_ods_cust", "Pjob_x_ods_cust_info_di"),
                   _task("task_ods_order_di", "Pjob_ods_order_di")),
             SOURCES)
         assert status == "ok"
-        row = matched["ods.ods_acct_balance_di"]
-        assert row["task_name"] == "task_ods_acct_balance_di"
-        assert row["pjob"] == "Pjob_ods_acct_balance_di"
-        assert row["project"] == "PRJ" and row["group"] == "GRP"
-        assert "精确匹配" in row["remark"]
-        assert len(unmatched) == 1                     # ods_order_di 列举
-        assert "未匹配到本资产源表" in unmatched[0]["remark"]
+        r1 = matched["ods.ods_acct_balance_di"]
+        assert r1["task_name"] == "task_ods_acct_balance_di"
+        assert r1["pjob"] == "Pjob_ods_acct_balance_di"
+        assert "精确匹配" in r1["remark"]
+        r2 = matched["ods.ods_cust_info_di"]
+        assert r2["pjob"] == "Pjob_x_ods_cust_info_di"      # 工程前缀段命中
+        assert "job名含表名" in r2["remark"]
+        assert len(unmatched) == 1                          # ods_order_di 列举
+        assert "未唯一匹配" in unmatched[0]["remark"]
+
+    def test_task_name_key_also_hits(self):
+        """匹配键含上游任务名：job 名不含但任务名含表名也命中。"""
+        matched, _, status = match_schedules(
+            _info(_f_task("A_F", ["Pjob_acct_bal"]),
+                  _task("task_ods_acct_balance_di", "Pjob_acct_bal")),
+            SOURCES[:1])
+        row = matched.get("ods.ods_acct_balance_di")
+        assert row and row["task_name"] == "task_ods_acct_balance_di"
+
+    def test_multiple_hits_listed_not_filled(self):
+        """多个候选都包含表名（歧义）→ 不自动填，全部列举（用户口径）。"""
+        matched, unmatched, status = match_schedules(
+            _info(_f_task("A_F", ["Pjob_x_ods_acct", "Pjob_ods_acct_y"]),
+                  _task("t1", "Pjob_x_ods_acct"),
+                  _task("t2", "Pjob_ods_acct_y")),
+            [{"schema": "ods", "table": "ods_acct"}])
+        assert matched == {}
+        assert {u["pjob"] for u in unmatched} == {"Pjob_x_ods_acct",
+                                                  "Pjob_ods_acct_y"}
 
     def test_unresolved_upstream_listed(self):
         """tskdep 指向的任务不在制品内 → 未解析列举（不编造任务名）。"""
@@ -131,25 +157,3 @@ class TestMatchSchedules:
         assert len(unmatched) == 1
         assert unmatched[0]["unresolved"] is True
         assert "未找到对应上游任务" in unmatched[0]["remark"]
-
-    def test_fuzzy_layer_fills_and_labels(self):
-        """模糊层：tskdep 表名不精确命中时，job 名/任务名三档兜底。"""
-        matched, unmatched, status = match_schedules(
-            _info(_f_task("A_F", ["Pjob_acct_bal"]),
-                  _task("task_acct_bal", "Pjob_acct_bal")),
-            SOURCES[:1])
-        row = matched.get("ods.ods_acct_balance_di")
-        assert row and "模糊匹配(包含)" in row["remark"]
-        assert row["task_name"] == "task_acct_bal"
-
-    def test_ambiguity_guard(self):
-        """两个依赖得分近并列（差 < AMBIGUITY_MARGIN）→ 都不自动填。"""
-        matched, unmatched, status = match_schedules(
-            _info(_f_task("A_F", ["Pjob_ods_acct_balance_dx",
-                                  "Pjob_ods_acct_balance_dy"]),
-                  _task("t1", "Pjob_ods_acct_balance_dx"),
-                  _task("t2", "Pjob_ods_acct_balance_dy")),
-            SOURCES[:1])
-        assert matched == {}
-        assert {u["pjob"] for u in unmatched} == {
-            "Pjob_ods_acct_balance_dx", "Pjob_ods_acct_balance_dy"}
