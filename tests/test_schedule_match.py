@@ -96,6 +96,17 @@ class TestMatchSchedules:
         row = matched.get("ods.ods_acct_balance_di")
         assert row and "模糊匹配(包含)" in row["remark"] and "请人工核对" in row["remark"]
 
+    def test_pjob_prefers_pjob_naming_over_first_job(self):
+        """实测修订①：任务挂多 job（start 链）时，Pjob名称 优先 Pjob_ 前缀的
+        主 job，不取链上首个（曾表现为父节点名）。"""
+        t = {"task_name": "task_x", "task_type": "周期任务", "schedule_cron": "",
+             "project": "P", "task_group": "G",
+             "jobs": [{"name": "Job_pre"}, {"name": "Pjob_ods_x"}, {"name": "Job_post"}]}
+        matched, _ = match_schedules({"all_tasks": [t]},
+                                     [{"schema": "ods", "table": "ods_x"}])
+        row = matched.get("ods.ods_x")
+        assert row and row["pjob"] == "Pjob_ods_x"
+
     def test_no_jobs_falls_back_to_task_name(self):
         """任务无 jobs 行 → 用任务名做匹配键兜底。"""
         matched, _ = match_schedules(

@@ -56,7 +56,7 @@ python dws-pipeline-analyzer/run.py spec --dir {制品目录} --output {xlsx路�
 
 | 列 | 标 | 来源 | 规则 |
 |---|---|---|---|
-| 记录ID | **N** | — | 不填（用户决策 Q6） |
+| 记录ID | D | — | 顺序生成 1..n（2026-11-02 实测修订，推翻 Q6「不填」） |
 | *源系统 | R | 术加→VC | 源表 schema 大写（`entity_source_tables`） |
 | *源表 | R | 术加→VC | **仅表名**；不编造 `库类型//库` 前缀（Q3，沿 154c435） |
 | *源表中文说明 | R / E | DDL | catalog 表注释；无 DDL → 留空 + 两态披露 |
@@ -80,10 +80,10 @@ python dws-pipeline-analyzer/run.py spec --dir {制品目录} --output {xlsx路�
 
 | 列 | 标 | 来源 | 规则 |
 |---|---|---|---|
-| 记录ID | **N** | — | 不填 |
+| 记录ID | D | — | 顺序生成 1..n（实测修订） |
 | *左表 / 左表别名 | R | 术加→VC | 物理表名 + SQL 内真实别名；左表=主表（驱动表） |
 | *右表 / 右表别名 | R | 术加→VC | **右表=物理表名**（CTE/子查询不是表）；右别名=该表在预处理代码**内部**的别名，无则空（D2） |
-| *关联方式 | R | VC | join 类型（INNER/LEFT…） |
+| *关联方式 | D | VC | **归一标准枚举**（实测修订）：LEFT/RIGHT/INNER/FULL/CROSS JOIN（裸 JOIN→INNER，去 OUTER，2026-11-02） |
 | *关联条件&限制条件 | R | VC | **行集语义全包**，分段见下 |
 
 **G 列段式语法**（`;` 分段，按需出现）：
@@ -111,13 +111,20 @@ python dws-pipeline-analyzer/run.py spec --dir {制品目录} --output {xlsx路�
   （E1 决策，微调并取代 C1 的「Sheet4 备注」方案）。
 - **多物理源 CTE 场景**（case_17 形态）：主表=驱动表，其余物理源各一行；
   预处理贴码只贴**与该右表相关的 CTE 定义链**（含其依赖的上游 CTE），不贴全量 WITH。
+- **嵌套子查询场景**（case_27 形态，`a JOIN ((e⋈g WHERE …) GROUP BY …) b JOIN f`，
+  2026-11-02 方案）：**与 CTE 完全同构**——main-subquery 行：右表=子查询主物理源
+  （join_paths.subquery_tables 的 main 项），右别名=外层别名（ON 里真实引用的样子），
+  ON 原文 + 预处理贴子查询原文（从 raw_sql 括号配平提取，逐字）；子查询内部的
+  关联/过滤/分组**不单独成行**（信息全收贴码）；引擎展开的 JOIN_SUBQUERY_* 空条件
+  行移除（会造成「a 直接关联 e/g」的误导）；外层 join 关键字从 raw_sql 回看前置词
+  归一（引擎 join_type 只记 JOIN_SUBQUERY 无方向）。
 
 ## 四、Sheet 4 需求字段（终态字段 × 物理源穿透）
 
 | 列 | 标 | 来源 | 规则 |
 |---|---|---|---|
-| 记录ID | **N** | — | 不填 |
-| *业务需求字段(源表字段) | D | — | **copy 源表字段值**（Q5）；无物理源（常量字段）→ 留空 |
+| 记录ID | D | — | 顺序生成 1..n（实测修订） |
+| *业务需求字段(源表字段) | D | — | **copy 源表字段值**（Q5，多源为合并串）；无物理源（常量字段）→ 留空 |
 | *源表 | R | VC | `resolve_field_sources` 物理穿透结果 |
 | 源表别名 | R | VC | 源表在 SQL 中的真实别名 |
 | *源表字段 | R | VC | 穿透到物理源字段 |
@@ -130,6 +137,8 @@ python dws-pipeline-analyzer/run.py spec --dir {制品目录} --output {xlsx路�
 | *资产字段中文名称 | R / E | DDL | **列注释**（新增渲染，数据源已有）；无 → 留空 |
 | *备注 | D | — | 穿透链说明（`tmp_x(R1)→tmp_y(R2)→终态`）、常量字段口径、表3 引用等 |
 
+- **资产字段列零重复（实测修订③）**：多来源字段（如 CASE WHEN 引用 a/b）合并为
+  一行——源表/别名/源字段列内「、」合并，逻辑列整表达式一条。
 - 终态口径：中间产物字段（如 record_cnt 进 tmp 未进终态）**不进本表**（Q2），
   交付门 info 级清单披露。
 - 直取字段加工逻辑列留空；**字段逻辑拆解器**为 SPEC 适配层新构件：输入引擎跨步骤
@@ -155,6 +164,8 @@ python dws-pipeline-analyzer/run.py spec --dir {制品目录} --output {xlsx路�
   进尾部列举行待人工（避免错配调度信息）。
 - 全档未中 → 尾部列举行。
 - 常量 `SIM_THRESHOLD` / `AMBIGUITY_MARGIN` 可调，实现后以真实 LTS 制品校准（缺口 2）。
+- **Pjob 选取**（实测修订）：任务可挂多 job（start→Pjob→… 链），主 Pjob 按
+  `Pjob_` 前缀优先，无则首个非空 job 名——首行 job 可能是链上父节点。
 
 ## 七、披露与交付门
 
@@ -200,10 +211,16 @@ python dws-pipeline-analyzer/run.py spec --dir {制品目录} --output {xlsx路�
 ## 十一、决策记录（2026-10-30，用户拍板）
 
 Q2 调度模糊匹配+未匹配列举 / Q3 源表只填 schema+表名 / Q4 主键=分布键+标识 /
-Q5 业务需求字段 copy / Q6 记录ID 不填 / Q1 业务背景人工 / Q7 不跨资产 /
+Q5 业务需求字段 copy / ~~Q6 记录ID 不填~~（2026-11-02 实测推翻→顺序生成） /
+Q1 业务背景人工 / Q7 不跨资产 /
 Q8 DQ 不接入 / A1 拆解式字段逻辑 / A2 终态口径 / A4 默认模糊匹配 /
 B1 CTE 贴码+预处理后别名 / C1→E1 防重落 Sheet3 单表行 / D1 字段级不带表级条件 /
 D2 右表物理真名+内部别名 / 场景=整体粒度、v1 单场景（方案 A）。
+
+**实测修订（2026-11-02 首轮真实使用反馈）**：①Pjob 选取按 Pjob_ 前缀优先
+（首行 job 曾取到父节点）；②关联方式归一标准枚举；③资产字段零重复（多源单行
+合并，「、」连接）；④类型列换模板 v2 四枚举（直接复制/数据加工/赋值/序列）；
+⑤记录ID 顺序生成。
 
 ## 十二、实现落地记录（2026-11-02，波 0~C 全量落地）
 
@@ -216,6 +233,7 @@ D2 右表物理真名+内部别名 / 场景=整体粒度、v1 单场景（方案
 | 匹配器 | `references/schedule_match.py`（三档+歧义保护，阈值常量待真实制品校准） | ✅ |
 | 模板基准 | `templates/需求SPEC模板.xlsx`（指纹三方一致测试锁） | ✅ |
 | sdd 退役 | `generate_sdd` 删除；chain/batch/commands 迁移说明就位 | ✅ |
+| 嵌套子查询 | `main-subquery` 行（case_27 fixture + e2e，2026-11-02 实测反馈闭环） | ✅ |
 | 测试 | test_spec_contract / test_spec_export / test_schedule_match（30 项） | ✅ |
 
 实现中固化的补充口径：

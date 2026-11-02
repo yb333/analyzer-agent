@@ -45,7 +45,8 @@ SPEC_TEMPLATE_HEADERS = {
     ],
     "4需求字段": [
         "记录ID", "*业务需求字段(源表字段)", "*源表", "源表别名", "*源表字段",
-        "*类型（直取字段/加工字段）", "非直取字段加工逻辑", "*资产设计参考_新增优化判断",
+        "*类型(直接复制/数据加工/赋值/序列)", "非直取字段加工逻辑",
+        "*资产设计参考_新增优化判断",
         "*资产表名(schema.表名)", "*资产中文名称", "*资产字段", "*资产字段中文名称", "*备注",
     ],
     "5业务样例数据": [],
@@ -278,9 +279,20 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
         t, _a = ctx._cte_primary_physical(cte)
         return t
 
+    def _spec_type_label(tt, ps_transforms):
+        """类型列四枚举（模板 v2，2026-11-02）：直接复制/数据加工/赋值/序列。
+
+        direct→直接复制；value→赋值；其余（含穿透 transform≠direct 的跨步加工）
+        →数据加工。序列 = DDL 层生成列，静态分析不产（模板枚举占位）。
+        """
+        if tt == "value":
+            return "赋值"
+        if tt == "direct" and all((t or "direct") == "direct" for t in ps_transforms):
+            return "直接复制"
+        return "数据加工"
+
     for f in ctx.final_fields(group_by_scenario=False):
         tt = f.get("transform_type", "expression")
-        type_label = "直取字段" if tt == "direct" else "加工字段"
         fname = f.get("target_field", "")
         phys = ctx.resolve_field_sources(f)
         common_tail = [None,                      # *资产设计参考（E 留空，154c435）
@@ -288,52 +300,74 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
                        ctx.target_cn,             # *资产中文名称
                        fname,                     # *资产字段
                        _field_cn(fname)]          # *资产字段中文名称（DDL 列注释）
-        if not phys:
-            logic = ""
-            if tt != "direct" and f.get("lineage"):
-                logic = decompose_field_logic(
-                    f["lineage"][0].get("raw_sql", ""), tt)
-            sheet4.append([
-                None, None, None, None, None,     # 记录ID/业务需求字段/源表/别名/源字段
-                type_label, logic,
-                *common_tail,
-                "常量字段，无物理源" if tt != "direct" else "",
-            ])
-        else:
-            for ps in phys:
-                ps_table_full = ps.get("table", "") or ""
-                remark = ""
-                # CTE 内加工字段的穿透缺口（docs/17 §十缺口3）：table 为空 / CTE 名 /
-                # 主查询 CTE 别名 → 解析 CTE 主物理源回填；解析不出 → 留空+备注
-                resolved = _resolve_cte_physical(ps_table_full)
-                if not resolved and ps_table_full.upper() not in ctx.cte_names_upper:
-                    resolved = _resolve_cte_physical(ps.get("alias", ""))
-                if resolved:
-                    ps_table_full = resolved
-                    remark = "源表经CTE预处理，物理源见表3预处理段"
-                elif (not ps_table_full
-                      or ps_table_full.upper() in ctx.cte_names_upper
-                      or ps.get("alias", "").lower() in cte_alias_to_name):
-                    remark = "无物理源表（经CTE加工，见表3预处理段）"
-                    if ps_table_full.upper() in ctx.cte_names_upper:
-                        ps_table_full = ""
-                _, ps_table = split_schema_table(ps_table_full)
-                ps_field = ps.get("field", fname)
-                # 行级判型（§四）：终态步骤 direct 但穿透带 transform（跨步加工，
-                # 如 SUM 后直取）→ 该来源行按加工字段记
-                ps_transform = ps.get("transform", "")
-                row_is_processed = (tt != "direct"
-                                    or (ps_transform and ps_transform != "direct"))
-                row_type = "加工字段" if row_is_processed else "直取字段"
-                logic = (decompose_field_logic(ps.get("raw_sql", ""),
-                                               ps_transform or tt)
-                         if row_is_processed else "")
-                sheet4.append([
-                    None, ps_field, ps_table, ps.get("alias", ""), ps_field,
-                    row_type, logic,
-                    *common_tail,
-                    remark,
-                ])
+
+        # ── 多源合并为一行（资产字段列不可重复，2026-11-02 实测修订）──
+        # CASE WHEN a,b 之类多来源字段：源表/别名/源字段列内 "、" 合并，逻辑列一条
+        tables, aliases, src_fields, remarks = [], [], [], []
+        ps_transforms = []
+        best_raw = ""
+        seen_tf = set()
+        for ps in phys:
+            ps_table_full = ps.get("table", "") or ""
+            remark = ""
+            # CTE 内加工字段的穿透缺口（docs/17 §十缺口3）：table 为空 / CTE 名 /
+            # 主查询 CTE 别名 → 解析 CTE 主物理源回填；解析不出 → 留空+备注
+            resolved = _resolve_cte_physical(ps_table_full)
+            if not resolved and ps_table_full.upper() not in ctx.cte_names_upper:
+                resolved = _resolve_cte_physical(ps.get("alias", ""))
+            if resolved:
+                ps_table_full = resolved
+                remark = "源表经CTE预处理，物理源见表3预处理段"
+            elif (not ps_table_full
+                  or ps_table_full.upper() in ctx.cte_names_upper
+                  or ps.get("alias", "").lower() in cte_alias_to_name):
+                remark = "无物理源表（经CTE加工，见表3预处理段）"
+                if ps_table_full.upper() in ctx.cte_names_upper:
+                    ps_table_full = ""
+            _, ps_table = split_schema_table(ps_table_full)
+            ps_field = ps.get("field", fname) or ""
+            key = (ps_table, ps_field)
+            if key not in seen_tf:
+                seen_tf.add(key)
+                if ps_table and ps_table not in tables:
+                    tables.append(ps_table)
+                src_fields.append(ps_field)
+            a = ps.get("alias", "")
+            if a and a not in aliases:
+                aliases.append(a)
+            if remark and remark not in remarks:
+                remarks.append(remark)
+            t_ps = ps.get("transform", "")
+            ps_transforms.append(t_ps)
+            if (t_ps and t_ps != "direct" and ps.get("raw_sql") and not best_raw):
+                best_raw = ps["raw_sql"]
+        # 逻辑原文优先级：穿透加工段 raw → 字段 raw_expr → lineage 首条（拆不出就贴原文）
+        if not best_raw:
+            best_raw = f.get("raw_expr") or ""
+        if not best_raw and tt != "direct" and f.get("lineage"):
+            best_raw = f["lineage"][0].get("raw_sql", "")
+
+        type_label = _spec_type_label(tt, ps_transforms)
+        logic = decompose_field_logic(best_raw, tt) if type_label != "直接复制" else ""
+        merged_sources = "、".join(src_fields) if src_fields else None
+        remark_out = "；".join(remarks)
+        if not phys and tt != "direct" and not remark_out:
+            remark_out = "常量字段，无物理源"
+        sheet4.append([
+            None,
+            merged_sources,                          # *业务需求字段 = copy 源字段（Q5）
+            "、".join(tables) if tables else None,   # *源表（多源合并）
+            "、".join(aliases) if aliases else None, # 源表别名
+            merged_sources,                          # *源表字段（多源合并）
+            type_label, logic,
+            *common_tail,
+            remark_out,
+        ])
+
+    # ── 记录ID（2026-11-02 实测修订：生成，每 sheet 顺序编号 1..n）──
+    for rows_ in (sheet2, sheet3, sheet4):
+        for i, r in enumerate(rows_, 1):
+            r[0] = i
 
     # 谓词守恒（docs/17 §七）：漏放任一 WHERE/HAVING → structural → verdict review
     for warn in predicate_conservation(ctx, sheet3, sheet4):

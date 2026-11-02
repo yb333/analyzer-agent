@@ -24,6 +24,118 @@ from viewmodel import resolve_on_condition_aliases, split_schema_table, norm_nam
 
 _NO_JOIN_PLACEHOLDER = "—（无关联）"
 
+# 关联方式标准枚举（docs/17 §三，2026-11-02 实测修订：只保留这几种）
+_JOIN_ENUM = ("LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN")
+
+
+def _join_kind(jt: str) -> str:
+    """引擎 join_type → 标准枚举（LEFT/RIGHT/INNER/FULL/CROSS JOIN）。
+
+    归一规则：大写、去 OUTER 词、裸 JOIN → INNER JOIN；认不出的形态原样大写
+    （不编造枚举外的值）。
+    """
+    import re as _re
+    s = _re.sub(r"\s+", " ", (jt or "").strip().upper()).strip()
+    if not s:
+        return ""
+    s = _re.sub(r"\bOUTER\b", "", s).strip()
+    s = _re.sub(r"\s+", " ", s)
+    if s == "JOIN":
+        return "INNER JOIN"
+    if s in _JOIN_ENUM:
+        return s
+    return (jt or "").strip().upper()
+
+
+# ════════════════════════════════════════════════════════════
+# 子查询关联（main-subquery，2026-11-02 嵌套子查询方案）
+# ════════════════════════════════════════════════════════════
+
+def _locate_subquery(raw_sql: str, subquery_sql: str) -> int:
+    """引擎 subquery_sql 是归一化文本（空白可能不同）→ 用 token 序列空白不敏感
+    定位其开头在 raw_sql 中的位置；返回子查询首 "(" 的下标，失败 -1。"""
+    if not raw_sql or not subquery_sql:
+        return -1
+    head = re.sub(r"^\(", "", subquery_sql.strip())[:40].split()
+    if not head:
+        return -1
+    pattern = r"\s+".join(re.escape(t) for t in head)
+    m = re.search(pattern, raw_sql, re.S)
+    if not m:
+        return -1
+    open_idx = raw_sql.rfind("(", 0, m.start())
+    return open_idx if open_idx != -1 else -1
+
+
+def _subquery_verbatim(raw_sql: str, subquery_sql: str, alias: str) -> tuple:
+    """(外层 join 关键字, 贴码用子查询原文)。
+
+    原文优先从 raw_sql 括号配平提取（贴码纪律：逐字）；定位失败回退引擎
+    subquery_sql（归一化文本，信息等价）。join 关键字读不出时兜底 INNER JOIN。
+    """
+    idx = _locate_subquery(raw_sql, subquery_sql)
+    if idx >= 0:
+        depth, span_end = 0, -1
+        for i in range(idx, len(raw_sql)):
+            if raw_sql[i] == "(":
+                depth += 1
+            elif raw_sql[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    span_end = i
+                    break
+        sql_text = raw_sql[idx:span_end + 1] if span_end > idx else subquery_sql
+        m = re.search(r"(LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\s*$",
+                      raw_sql[:idx], re.I | re.S)
+        if m:
+            kw = (m.group(1) + " JOIN") if m.group(1) else "JOIN"
+            return _join_kind(kw), sql_text
+        return "INNER JOIN", sql_text
+    return "INNER JOIN", subquery_sql
+
+
+def _subquery_index(ctx) -> dict:
+    """join_paths 子查询索引：{step_id: {外层别名: {sql/main_table/tables/on}}}。
+
+    数据源 = data_flow.join_paths[*].subquery_sql / subquery_tables / df joins
+    的 ON 条件（引擎结构化产出，零二次解析）。
+    """
+    out: dict = {}
+    for s in ctx.data_flow_steps:
+        sid = s.get("step_id", "")
+        for alias, info in (s.get("join_paths", {}) or {}).items():
+            if not isinstance(info, dict):
+                continue
+            sql = info.get("subquery_sql", "")
+            if not sql:
+                continue
+            main_tbl, tables = "", set()
+            for t in info.get("subquery_tables") or []:
+                if isinstance(t, (list, tuple)) and len(t) >= 2 and t[0]:
+                    tables.add(t[0].lower())
+                    if not main_tbl and (len(t) < 3 or t[2] == "main"):
+                        main_tbl, _ma = t[0], t[1]
+            on = ""
+            for j in s.get("joins", []):
+                if j.get("alias") == alias:
+                    on = j.get("join_condition", "")
+                    break
+            kind, sql_text = _subquery_verbatim(s.get("raw_sql", ""), sql, alias)
+            out.setdefault(sid, {})[alias] = {
+                "sql": sql_text, "main_table": main_tbl, "tables": tables,
+                "on": on, "kind": kind,
+            }
+    return out
+
+
+def _step_main_table(ctx, sid: str) -> tuple:
+    """步骤主表（FROM 驱动表）：df joins 首个非子查询物理表 (表名, 别名)。"""
+    for j in ctx.df_step(sid).get("joins", []):
+        st = j.get("source_table", "")
+        if st and not st.startswith("(subquery:"):
+            return st, j.get("alias", "")
+    return "", ""
+
 
 def _squeeze(s: str) -> str:
     return re.sub(r"\s+", "", s or "")
@@ -129,11 +241,26 @@ def build_sheet3_rows(ctx) -> list:
     E1：无任何关联行时，每物理源表一行（右表=—（无关联）），行级限制落首行。
     """
     base = ctx.logic_join_rows()
-    rows = []
-    attached_wheres = []
+    sq_index = _subquery_index(ctx)
     raw_sqls = [s.get("raw_sql", "") for s in ctx.data_flow_steps]
 
-    for row in base:
+    def _expanded_subquery_alias(row):
+        """该行是否为某子查询的引擎展开行（JOIN_SUBQUERY_*，条件为空）——
+        其信息将由 main-subquery 行的预处理贴码整体承载。"""
+        if row.origin != "main" or "SUBQUERY" not in (row.join_type or ""):
+            return None
+        for alias, info in sq_index.get(row.step_id, {}).items():
+            if norm_name(row.right_table) in info["tables"]:
+                return alias
+        return None
+
+    survivors = [r for r in base if _expanded_subquery_alias(r) is None]
+
+    rows = []
+    attached_wheres = []
+    last_pos_by_step: dict = {}
+
+    for row in survivors:
         cond = row.on_condition or ""
         if row.origin == "main":
             rewritten, note = resolve_on_condition_aliases(
@@ -161,7 +288,33 @@ def build_sheet3_rows(ctx) -> list:
         if row.origin.startswith("main-cte:"):
             right_alias = _inner_alias(ctx, row.origin.split(":", 1)[1], row.right_table)
         rows.append([None, l_tbl, row.left_alias, r_tbl, right_alias,
-                     row.join_type, "；".join(parts)])
+                     _join_kind(row.join_type), "；".join(parts)])
+        last_pos_by_step[row.step_id] = len(rows) - 1
+
+    # ── main-subquery 行（嵌套子查询，docs/17 §三）：右表=子查询主物理源，
+    #    右别名=外层别名（ON 里真实引用的样子），预处理贴子查询原文——
+    #    子查询内部的关联/过滤/分组信息全部收进贴码，不单独成行 ──
+    for sid, by_alias in sq_index.items():
+        for alias, info in by_alias.items():
+            main_tbl, main_alias = _step_main_table(ctx, sid)
+            if not main_tbl:
+                continue
+            parts = [info["on"]] if info["on"] else []
+            sw = ctx.step_where(sid)
+            if sw and sw not in attached_wheres:
+                parts.append(f"限制：{sw}")      # 展开行被移除时 WHERE 随主承载行落位
+                attached_wheres.append(sw)
+            parts.append("预处理：" + info["sql"])
+            _, l_tbl = split_schema_table(main_tbl)
+            _, r_tbl = split_schema_table(info["main_table"] or "")
+            row = [None, l_tbl, main_alias, r_tbl, alias, info["kind"],
+                   "；".join(parts)]
+            pos = last_pos_by_step.get(sid)
+            if pos is None:
+                rows.append(row)
+            else:
+                rows.insert(pos + 1, row)
+                last_pos_by_step[sid] = pos + 1
 
     # 未被附着的步骤 WHERE（logic_join_rows 对无 JOIN 步骤不产出承载行）
     unattached = []

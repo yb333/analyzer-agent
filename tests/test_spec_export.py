@@ -145,7 +145,7 @@ class TestGoldenCase:
         tables = [r[2] for r in rows]
         assert tables == ["ods_acct_balance_di", "ods_cust_info_di"]
         assert all(r[1] == "ODS" for r in rows)          # 源系统 = schema 大写
-        assert all(r[0] is None for r in rows)           # 记录ID（N 不填）
+        assert [r[0] for r in rows] == [1, 2]         # 记录ID 顺序生成
         assert all("tmp_" not in str(r) for r in rows)   # 中间表零出现
         assert all("LTS制品未提供" in (r[12] or "") for r in rows)  # 两态备注
 
@@ -167,26 +167,27 @@ class TestGoldenCase:
         assert "保留 SUM(t.balance) > 0" in g
 
     def test_sheet4_field_typing_and_constants(self, golden_run):
-        """需求字段：终态 4 字段；跨步加工按穿透 transform 判型；常量无源。"""
+        """需求字段：资产字段不重复（单行合并）；四枚举类型；记录ID 顺序生成。"""
         out, _ = golden_run
         rows = _rows(out, "4需求字段")
         assert len(rows) == 4
+        assert [r[10] for r in rows] == ["cust_id", "asset_type",
+                                         "total_balance", "data_scope"]  # 资产字段零重复
+        assert [r[0] for r in rows] == [1, 2, 3, 4]     # 记录ID 顺序生成
         by_target = {r[10]: r for r in rows}
-        assert set(by_target) == {"cust_id", "asset_type",
-                                  "total_balance", "data_scope"}
-        # 跨步加工：终态步骤 direct，但穿透 transform=aggregate → 加工字段，
+        # 跨步加工：终态步骤 direct，但穿透 transform=aggregate → 数据加工，
         # 逻辑列 = 拆解式（无规则编码、无表级条件、AS 尾巴剥离）
         tb = by_target["total_balance"]
-        assert tb[5] == "加工字段"
+        assert tb[5] == "数据加工"
         assert tb[6] == "表达式：SUM(balance)"
         assert (tb[2], tb[4]) == ("ods_acct_balance_di", "balance")
         assert tb[1] == "balance"                        # 业务需求字段 = copy 源字段（Q5）
-        # 常量字段：无物理源，源表列留空（mock data_scope 长相）
+        # 常量字段：value → 赋值；无物理源，源表列留空
         ds = by_target["data_scope"]
-        assert ds[5] == "加工字段" and ds[6] == "常量：'CUR'"
+        assert ds[5] == "赋值" and ds[6] == "常量：'CUR'"
         assert ds[2] is None and "无物理源" in (ds[12] or "")
         # 直取
-        assert by_target["asset_type"][5] == "直取字段"
+        assert by_target["asset_type"][5] == "直接复制"
         assert by_target["asset_type"][6] in (None, "")
         # 终态列
         assert all(r[8] == "dws.dwb_cust_asset_d" for r in rows)
@@ -218,7 +219,7 @@ class TestSingleScenarioCase:
 
         frows = _rows(out, "4需求字段")
         assert {r[10] for r in frows} == {"order_id", "order_date", "amount"}
-        assert all(r[5] == "直取字段" for r in frows)
+        assert all(r[5] == "直接复制" for r in frows)
         assert all(r[8] == "dws.dwb_incremental_f" for r in frows)
 
     def test_e1_single_table_row_with_verbatim_not_exists(self, tmp_path):
@@ -357,11 +358,11 @@ class TestCteCase:
         frows = _rows(out, "4需求字段")
         by_target = {r[10]: r for r in frows}
         assert by_target["user_name"][2] == "dim_user"     # 直取不受影响
-        assert by_target["user_name"][5] == "直取字段"
+        assert by_target["user_name"][5] == "直接复制"
         cnt = by_target["cnt"]
         assert cnt[2] == "events"                          # CTE 主物理源回填
         assert "表3预处理" in (cnt[12] or "")
-        assert by_target["total"][5] == "加工字段"
+        assert by_target["total"][5] == "数据加工"
         assert "SUM(amount)" in (by_target["total"][6] or "")
 
 
@@ -405,3 +406,86 @@ class TestPredicateConservation:
         warns2 = predicate_conservation(
             ctx, [[None] * 6 + [g_tampered2]], model["sheet4"])
         assert any(w["type"] == "predicate_missing_having" for w in warns2)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 多源合并（case_18_many_case_when：CASE WHEN 双来源字段，实测修订③）
+# ═══════════════════════════════════════════════════════════════
+
+class TestMultiSourceMerge:
+
+    def test_case_when_two_sources_single_row(self, tmp_path):
+        """CASE WHEN 引用同表两字段（amount+month）：资产字段一行，源字段列内合并。"""
+        et = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / \
+            "case_18_many_case_when" / "execution_tasks.xlsx"
+        bag = _bag(tmp_path, et)
+        out = tmp_path / "spec.xlsx"
+        _run_spec(["--dir", str(bag), "--output", str(out)])
+
+        rows = _rows(out, "4需求字段")
+        targets = [r[10] for r in rows]
+        assert len(targets) == len(set(targets)), f"资产字段重复: {targets}"
+        by_target = {r[10]: r for r in rows}
+        amt = by_target["amt_01"]
+        assert (amt[2], amt[4]) == ("monthly_sales", "amount、month")  # 多源列内合并
+        assert amt[5] == "数据加工"
+        assert "SUM(CASE WHEN" in (amt[6] or "")               # 逻辑为整表达式
+        assert [r[0] for r in rows] == list(range(1, len(rows) + 1))
+
+
+class TestJoinKindNormalization:
+
+    def test_join_kind_enum(self):
+        """关联方式归一（实测修订②）：只出标准枚举。"""
+        from spec_extract import _join_kind
+        assert _join_kind("JOIN") == "INNER JOIN"
+        assert _join_kind("INNER JOIN") == "INNER JOIN"
+        assert _join_kind("LEFT OUTER JOIN") == "LEFT JOIN"
+        assert _join_kind("left join") == "LEFT JOIN"
+        assert _join_kind("") == ""
+
+
+# ═══════════════════════════════════════════════════════════════
+# 嵌套子查询（case_27：a JOIN ((e⋈g WHERE) GROUP BY) b JOIN f，2026-11-02 方案）
+# ═══════════════════════════════════════════════════════════════
+
+class TestNestedSubquery:
+
+    def test_subquery_join_row_shape(self, tmp_path):
+        """main-subquery 行：右表=子查询主物理源、右别名=外层别名、ON 原文、
+        预处理贴子查询原文（e⋈g/WHERE/GROUP BY 全收贴码，不单独成行）。"""
+        et = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / \
+            "case_27_nested_subquery_join" / "execution_tasks.xlsx"
+        bag = _bag(tmp_path, et)
+        out = tmp_path / "spec.xlsx"
+        _run_spec(["--dir", str(bag), "--output", str(out)])
+
+        # Sheet2：四张物理源表（a/e/g/f），子查询伪名零出现
+        srows = _rows(out, "2数据源清单")
+        assert [r[2] for r in srows] == ["dwd_cust_main", "ods_order_pay",
+                                         "ods_pay_channel", "dim_cust_grade"]
+
+        # Sheet3：两行，关联方式全在标准枚举内
+        jrows = _rows(out, "3表关联")
+        assert len(jrows) == 2
+        assert all(r[5] in ("LEFT JOIN", "RIGHT JOIN", "INNER JOIN",
+                            "FULL JOIN", "CROSS JOIN", "") for r in jrows)
+        sq = next(r for r in jrows if r[3] == "ods_order_pay")
+        assert (sq[1], sq[2], sq[4], sq[5]) == ("dwd_cust_main", "a", "b", "LEFT JOIN")
+        g = sq[6]
+        assert "a.cust_id = b.cust_id" in g                       # ON 原文（外层别名）
+        assert "限制：a.stat_date = '20261031'" in g              # 外层 WHERE 落限制段
+        assert "预处理：(" in g
+        for frag in ("JOIN ods.ods_pay_channel g ON e.channel_id = g.channel_id",
+                     "WHERE e.del_flag = 'N'", "GROUP BY e.cust_id"):
+            assert frag in g, f"子查询贴码缺: {frag}"
+        f_row = next(r for r in jrows if r[3] == "dim_cust_grade")
+        assert f_row[5] == "INNER JOIN" and "a.grade_id = f.grade_id" in f_row[6]
+
+        # Sheet4：穿透不受子查询嵌套影响
+        frows = _rows(out, "4需求字段")
+        by = {r[10]: r for r in frows}
+        assert by["total_amt"][5] == "数据加工"
+        assert "SUM(e.pay_amt)" in by["total_amt"][6]
+        assert (by["total_amt"][2], by["total_amt"][4]) == ("ods_order_pay", "pay_amt")
+        assert by["cust_id"][5] == "直接复制"

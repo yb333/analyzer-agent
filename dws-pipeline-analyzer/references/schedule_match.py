@@ -47,11 +47,21 @@ def _norm(s: str) -> str:
 def _task_row(task: dict) -> dict:
     """LTS 任务 → Sheet2 调度七列（docs/17 §二；调度应用列 LTS 无对应字段，留空）。"""
     jobs = task.get("jobs") or []
+    # Pjob 选取（2026-11-02 实测修订）：任务可挂多个 job（start→Pjob→…链），
+    # 首个 job 未必是主 Pjob（曾取到父节点链上的 job）→ 优先 Pjob_ 命名惯例，
+    # 无则回退首个非空 job 名
     pjob = ""
     for j in jobs:
-        if j.get("name"):
-            pjob = j["name"]
+        n = (j.get("name") or "").strip()
+        if n and n.lower().startswith("pjob"):
+            pjob = n
             break
+    if not pjob:
+        for j in jobs:
+            n = (j.get("name") or "").strip()
+            if n:
+                pjob = n
+                break
     return {
         "task_name": task.get("task_name", ""),
         "app": "",  # 缺口 1：LTS 制品无「调度应用」对应字段
