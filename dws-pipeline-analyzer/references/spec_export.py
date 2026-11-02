@@ -469,6 +469,14 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
         disclosures.append({"severity": "structural",
                             "type": warn["type"], "title": warn["title"]})
 
+    # 引用闭包 + 物化零痕迹（docs/14 §六性质1/7，四轮修订⑫）
+    for warn in _reference_closure(ctx, sheet2, sheet3, sheet4):
+        disclosures.append({"severity": "structural",
+                            "type": warn["type"], "title": warn["title"]})
+    for warn in _materialization_trace_check(ctx, sheet2, sheet3, sheet4):
+        disclosures.append({"severity": "structural",
+                            "type": warn["type"], "title": warn["title"]})
+
     return {
         "sheet1": [],       # 业务背景全人工（E 留空）
         "sheet2": sheet2,
@@ -493,6 +501,85 @@ _SHEET_ORDER = [
     ("sheet4", "4需求字段"),
     ("sheet5", "5业务样例数据"),
 ]
+
+
+def _reference_closure(ctx, sheet2: list, sheet3: list, sheet4: list) -> list:
+    """引用闭包（docs/14 §六性质1）：Sheet4 表达式本体（剥除（说明段））里的
+    全部 别名.字段 引用 ⊆ 登记别名集（数据源清单 + 表关联左右别名，含锚）。
+    违规 → structural（读者按表达式找不到引用行 = 断链）。
+    """
+    aliases = set()
+    for es in ctx.entity_source_tables():
+        if es.alias:
+            aliases.add(es.alias.lower())
+    for r in sheet3:
+        for cell in (r[2], r[4]):
+            if cell:
+                aliases.add(str(cell).strip().lower())
+    warnings = []
+    for r in sheet4:
+        logic = r[6] if len(r) > 6 else None
+        if not logic:
+            continue
+        body = re.sub(r"（[^）]*）", "", str(logic))   # 剥说明段
+        for m in re.finditer(r"([A-Za-z_]\w*)\.(\w+)", body):
+            alias = m.group(1).lower()
+            if alias not in aliases:
+                warnings.append({
+                    "type": "reference_closure",
+                    "title": f"引用闭包：表达式引用 {m.group(0)}（资产字段 "
+                             f"{r[10]}）未在数据源清单/表关联的别名集中——断链，"
+                             f"请人工核对",
+                })
+    return warnings
+
+
+def _materialization_trace_check(ctx, sheet2: list, sheet3: list,
+                                 sheet4: list) -> list:
+    """物化零痕迹（docs/14 §六性质7）：登记值里不出现 tmp 表名与规则编号
+    （片段原文除外——逐字性的必然豁免位：Sheet3 G 列）。
+    """
+    from engine import _is_intermediate_table
+    tmp_names, rule_codes = set(), set()
+    for s in ctx.steps_list:
+        t = s.get("target_table", "")
+        if t and _is_intermediate_table(t):
+            sch, tbl = split_schema_table(t)
+            tmp_names.add(tbl.lower())
+            if sch:
+                tmp_names.add(f"{sch}.{tbl}".lower())
+        rc = s.get("rule_code", "")
+        if rc:
+            rule_codes.add(rc)
+    warnings = []
+
+    def _scan(cells, where):
+        for c in cells:
+            if not c:
+                continue
+            cv = str(c)
+            for tn in tmp_names:
+                if tn and tn in cv.lower():
+                    warnings.append({
+                        "type": "materialization_trace",
+                        "title": f"物化零痕迹违规：{where} 出现中间表名 "
+                                 f"「{tn}」——tmp 应压平为逻辑从表（锚+片段）",
+                    })
+            for rc in rule_codes:
+                if rc in cv:
+                    warnings.append({
+                        "type": "materialization_trace",
+                        "title": f"物化零痕迹违规：{where} 出现规则编号 "
+                                 f"「{rc}」——SPEC 不携带物化实现事实",
+                    })
+
+    for r in sheet2:
+        _scan(r, "数据源清单")
+    for r in sheet3:
+        _scan(r[:6], "表关联登记值")     # G 列（片段原文）豁免
+    for r in sheet4:
+        _scan(r, "需求字段")
+    return warnings
 
 
 def render_spec_xlsx(model: dict, template_path, output_path) -> Path:

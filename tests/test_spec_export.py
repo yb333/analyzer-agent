@@ -443,6 +443,47 @@ class TestPredicateConservation:
             ctx, [[None] * 6 + [g_tampered2]], model["sheet4"])
         assert any(w["type"] == "predicate_missing_having" for w in warns2)
 
+    def test_reference_closure_and_trace_checks(self, tmp_path):
+        """引用闭包 + 物化零痕迹（docs/14 §六性质1/7）：干净模型零告警；
+        伪造断链引用 / tmp 痕迹 → structural 检出。"""
+        import contextlib
+        import io as _io
+        from pipeline_core import run_from_dir
+        from spec_export import (_materialization_trace_check,
+                                 _reference_closure, build_spec_model,
+                                 find_scenario, select_scenario)
+        from viewmodel import build_context
+
+        bag = _bag(tmp_path, GOLDEN_ET)
+        with contextlib.redirect_stdout(_io.StringIO()):
+            core = run_from_dir(str(bag), include_dq=False, channel="spec",
+                                entry_title="")
+        k = select_scenario(core["knowledge"],
+                            find_scenario(core["knowledge"], "P_CUR"))
+        model = build_spec_model(k, core["engine_ctx"])
+        ctx = build_context(k)
+        sheet2, sheet3, sheet4 = model["sheet2"], model["sheet3"], model["sheet4"]
+
+        # 干净模型：零违规（黄金在 W1 已物化无关化）
+        assert _reference_closure(ctx, sheet2, sheet3, sheet4) == []
+        assert _materialization_trace_check(ctx, sheet2, sheet3, sheet4) == []
+
+        # 断链引用：表达式引用未登记别名 → 闭包检出（说明段豁免）
+        bad4 = [None] * 6 + ["SUM(z.unknown)（经逻辑从表 s）"] + [None] * 6
+        warns = _reference_closure(ctx, sheet2, sheet3, [bad4])
+        assert any(w["type"] == "reference_closure" and "z.unknown" in w["title"]
+                   for w in warns)
+        ok4 = [None] * 6 + ["SUM(a.balance)（经逻辑从表 s）"] + [None] * 6
+        assert _reference_closure(ctx, sheet2, sheet3, [ok4]) == []
+
+        # 物化痕迹：登记值出现 tmp 名/规则编号 → 检出；G 列片段豁免
+        bad2 = [None] * 4 + ["tmp_cust_asset_sum 链"] + [None] * 8
+        warns2 = _materialization_trace_check(ctx, [bad2], sheet3, sheet4)
+        assert any(w["type"] == "materialization_trace"
+                   and "tmp_cust_asset_sum" in w["title"] for w in warns2)
+        frag3 = [None] * 6 + ["【逻辑从表 s · 定义】SELECT … FROM dws.tmp_cust_asset_sum t"]
+        assert _materialization_trace_check(ctx, sheet2, [frag3], sheet4) == []
+
 
 # ═══════════════════════════════════════════════════════════════
 # 多源合并（case_18_many_case_when：CASE WHEN 双来源字段，实测修订③）
@@ -541,9 +582,9 @@ class TestNestedSubquery:
         assert [r[2] for r in srows] == ["dwd_cust_main", "ods_order_pay",
                                          "ods_pay_channel", "dim_cust_grade"]
 
-        # Sheet3：两行，关联方式全在标准枚举内
+        # Sheet3：三行（每表一行），关联方式全在标准枚举内
         jrows = _rows(out, "3表关联")
-        assert len(jrows) == 2
+        assert len(jrows) == 3
         assert all(r[5] in ("LEFT JOIN", "RIGHT JOIN", "INNER JOIN",
                             "FULL JOIN", "CROSS JOIN", "") for r in jrows)
         sq = next(r for r in jrows if r[3] == "ods_order_pay")
@@ -557,6 +598,12 @@ class TestNestedSubquery:
             assert frag in g, f"子查询贴码缺: {frag}"
         f_row = next(r for r in jrows if r[3] == "dim_cust_grade")
         assert f_row[5] == "INNER JOIN" and "a.grade_id = f.grade_id" in f_row[6]
+        # 子查询内非驱动表：每表一行，【锚 内】ON 原文 + 指回（W2/C3）
+        g_row = next(r for r in jrows if r[3] == "ods_pay_channel")
+        assert (g_row[1], g_row[2], g_row[4], g_row[5]) == (
+            "ods_order_pay", "e", "g", "INNER JOIN")
+        assert "【b 内】e.channel_id = g.channel_id" in g_row[6]
+        assert "参与逻辑从表 b，定义见 ods_order_pay 行" in g_row[6]
 
         # Sheet4：穿透不受子查询嵌套影响
         frows = _rows(out, "4需求字段")

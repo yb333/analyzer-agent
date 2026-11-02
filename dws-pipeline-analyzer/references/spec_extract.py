@@ -117,6 +117,7 @@ def _subquery_index(ctx) -> dict:
             if not sql:
                 continue
             main_tbl, main_alias, tables, table_list = "", "", set(), []
+            inner_tables = []      # 子查询内的非驱动物理表 [(表全名, 别名)]
             for t in info.get("subquery_tables") or []:
                 if isinstance(t, (list, tuple)) and len(t) >= 2 and t[0]:
                     tables.add(t[0].lower())
@@ -124,6 +125,8 @@ def _subquery_index(ctx) -> dict:
                         table_list.append(t[0])
                     if not main_tbl and (len(t) < 3 or t[2] == "main"):
                         main_tbl, main_alias = t[0], t[1]
+                    else:
+                        inner_tables.append((t[0], t[1]))
             on = ""
             join_type = ""
             for j in s.get("joins", []):
@@ -135,7 +138,8 @@ def _subquery_index(ctx) -> dict:
             out.setdefault(sid, {})[alias] = {
                 "sql": sql_text, "main_table": main_tbl,
                 "main_alias": main_alias, "tables": tables,
-                "table_list": table_list, "on": on, "kind": kind,
+                "table_list": table_list, "inner_tables": inner_tables,
+                "on": on, "kind": kind,
                 "is_from_wrap": (join_type or "").upper().startswith("FROM"),
             }
     return out
@@ -148,6 +152,20 @@ def _step_main_table(ctx, sid: str) -> tuple:
         if st and not st.startswith("(subquery:"):
             return st, j.get("alias", "")
     return "", ""
+
+
+def _inner_join_of(fragment: str, alias: str) -> tuple:
+    """从子查询片段原文提内部表的 verbatim ON 与 join 关键字。
+
+    Returns: (kind, on)；找不到 → ("", "")（行仍出，ON 由片段兜底）。
+    """
+    pat = (rf"(LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\s+\S+\s+{re.escape(alias)}"
+           rf"\s+ON\s+(.+?)(?=\s+(?:LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\b"
+           rf"|\bWHERE\b|\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\)|$)")
+    m = re.search(pat, fragment or "", re.S | re.I)
+    if not m:
+        return "", ""
+    return _join_kind((m.group(1) or "JOIN") + " JOIN"), m.group(2).strip()
 
 
 def _squeeze(s: str) -> str:
@@ -461,6 +479,18 @@ def build_sheet3_rows(ctx) -> list:
             else:
                 rows.insert(pos + 1, row)
                 last_pos_by_step[sid] = pos + 1
+            # 子查询内其余物理表：每表一行（【锚 内】ON 原文 + 指回锚行）——
+            # 引擎对子查询内 JOIN 不带条件（JOIN_SUBQUERY_* 空条件展开），
+            # ON 从片段原文提 verbatim（贴原文原则；提不到由片段兜底）
+            for it_tbl, it_alias in info.get("inner_tables", []):
+                kind2, on2 = _inner_join_of(info["sql"], it_alias or "")
+                _, it_short = split_schema_table(it_tbl)
+                g2 = (f"【{alias} 内】{on2}；" if on2 else "") + \
+                     f"参与逻辑从表 {alias}，定义见 {r_tbl} 行"
+                rows.append([None, r_tbl, info.get("main_alias", ""),
+                             it_short, it_alias,
+                             kind2 or "INNER JOIN", g2])
+                last_pos_by_step[sid] = len(rows) - 1
 
     # ── tmp 链物化无关行（docs/14 P1，C2/C3 拍板）：主表行（驱动表+定义挂载）
     #    + 生产步内物理表每表一行（【锚 内】ON 原文 + 指回）──
