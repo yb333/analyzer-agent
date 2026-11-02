@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 
 from viewmodel import resolve_on_condition_aliases, split_schema_table, norm_name
+from engine import _is_intermediate_table
 
 _NO_JOIN_PLACEHOLDER = "—（无关联）"
 
@@ -190,19 +191,117 @@ def _strip_as_alias(expr_sql: str) -> str:
 
 
 def decompose_field_logic(raw_sql: str, transform_type: str = "") -> str:
-    """raw 表达式 → 拆解式字段逻辑（成值语义，不带表级条件/规则编码，A1+D1）。
+    """raw 表达式 → 裸成值表达式（展开态本体，docs/14 P3 / C1 拍板）。
 
-    transform_type=value（常量赋值）→ `常量：'CUR'`；其余 → `表达式：SUM(balance)`。
-    拆不动（空 raw）→ 空串（直取字段逻辑列本就留空）。
+    只做 AS 尾巴剥离；前缀（表达式：/常量：）已随展开态取消——说明段、
+    物理根别名前缀由组装层（spec_export）加。拆不动（空 raw）→ 空串。
     """
     if not raw_sql:
         return ""
-    expr = _strip_as_alias(raw_sql)
-    if not expr:
-        return ""
-    if (transform_type or "").lower() == "value":
-        return f"常量：{expr}"
-    return f"表达式：{expr}"
+    return _strip_as_alias(raw_sql)
+
+
+# ════════════════════════════════════════════════════════════
+# tmp 链物化无关模型（docs/14 P1 内联等价，C2/C3 拍板 2026-11-02）
+# ════════════════════════════════════════════════════════════
+
+def _short_lower(t: str) -> str:
+    return split_schema_table(t or "")[1].lower()
+
+
+def _producer_of(ctx, table_full: str):
+    """产出某表的步骤（target_table 匹配；短名比较——生产步登记短名、
+    消费侧引用可带 schema，两形态都真实存在）。"""
+    for s in ctx.steps_list:
+        t = s.get("target_table", "")
+        if t and _short_lower(t) == _short_lower(table_full):
+            return s
+    return None
+
+
+def _tmp_chain_index(ctx) -> dict:
+    """跨规则 tmp 产消链 → 物化无关挂载模型（旗舰形态：终端步骤主 FROM 是 tmp）。
+
+    压平规则（内联等价）：tmp 链呈现为「逻辑从表」——锚 = 消费 SQL 引用它的别名
+    （tmp 表名永不进登记值）；定义片段 = 各生产步 query_sql 逐字（多跳 = 嵌套锚，
+    深层在前同挂载位）；驱动表 = 最深层生产步的首物理表（定义挂载行）；
+    生产步内的物理 JOIN 表 → 每表一行素材（【锚 内】ON 原文 + 指回驱动表行）。
+
+    Returns: {终端step_id: {
+        "driving": (表全名, 别名),            # 主表行（含定义挂载）
+        "mounts": [{"anchor", "sql"}],       # 深层在前，逐字
+        "inner": [{"table","alias","on","anchor"}],
+        "producer_ids": [生产步 step_id],
+    }}
+    """
+    out: dict = {}
+    for s in ctx.steps_list:
+        sid = s.get("step_id", "")
+        # 终端 = 写终态表的步骤（自身 target 是中间表的属于链内生产步，
+        # 不作为挂载终端——否则整链会被中间消费者重复呈现）
+        if _is_intermediate_table(s.get("target_table", "")):
+            continue
+        joins = ctx.df_step(sid).get("joins") or []
+        if not joins:
+            continue
+        first = joins[0].get("source_table", "")
+        if not first or not _is_intermediate_table(first):
+            continue
+        if _producer_of(ctx, first) is None:
+            continue
+        mounts, inner, producer_ids, seen = [], [], [], set()
+        driving = ["", ""]
+
+        def visit(tmp_full, consumer_alias):
+            prod = _producer_of(ctx, tmp_full)
+            if prod is None or prod.get("step_id") in seen:
+                return
+            seen.add(prod.get("step_id"))
+            producer_ids.append(prod.get("step_id"))
+            pdf = ctx.df_step(prod.get("step_id"))
+            pjoins = pdf.get("joins") or []
+            deeper = next((j for j in pjoins
+                           if j.get("source_table")
+                           and _is_intermediate_table(j["source_table"])), None)
+            if deeper is not None:
+                visit(deeper["source_table"], deeper.get("alias", ""))
+            # 深层已入列，自身片段随后（保证 mounts 深层在前）
+            mounts.append({"anchor": consumer_alias,
+                           "sql": pdf.get("raw_sql", "")})
+            for j in pjoins:
+                jst = j.get("source_table", "")
+                if (not jst or jst.startswith("(subquery:")
+                        or _is_intermediate_table(jst)):
+                    continue
+                if (j.get("join_type") or "FROM") == "FROM":
+                    if not driving[0]:
+                        driving[0], driving[1] = jst, j.get("alias", "")
+                else:
+                    inner.append({"table": jst, "alias": j.get("alias", ""),
+                                  "on": j.get("join_condition", ""),
+                                  "anchor": consumer_alias})
+
+        visit(first, joins[0].get("alias", ""))
+        if not driving[0]:
+            continue    # 链上无物理驱动表（异常形态）→ 走既有分支
+        out[sid] = {"driving": (driving[0], driving[1]), "mounts": mounts,
+                    "inner": inner, "producer_ids": producer_ids}
+    return out
+
+
+def strip_alias_prefix(expr: str) -> str:
+    """去表达式里的 别名. 前缀（说明段口径：分组键/保留条件用裸字段）。"""
+    return re.sub(r"\b[\w]+\.", "", expr or "")
+
+
+def prefix_root_fields(expr: str, roots: list) -> str:
+    """展开态：表达式里裸根字段加 别名. 前缀（已限定/非常量名不动）。"""
+    out = expr or ""
+    for alias, field in roots:
+        if not alias or not field:
+            continue
+        out = re.sub(rf"(?<![\w.]){re.escape(field)}\b", f"{alias}.{field}", out)
+    return out
 
 
 # ════════════════════════════════════════════════════════════
@@ -228,11 +327,18 @@ def _inner_alias(ctx, cte_name: str, right_table: str) -> str:
     return ""
 
 
-def _chain_group_segments(ctx) -> list:
-    """主表链预处理段：聚合步骤的 分组 + 分组保留（HAVING），按步骤序。"""
+def _chain_group_segments(ctx, exclude=None) -> list:
+    """主表链预处理段：聚合步骤的 分组 + 分组保留（HAVING），按步骤序。
+
+    exclude：tmp 链成员步骤（其 GROUP BY/HAVING 已在定义片段内逐字，
+    不重复成段——物化无关模型）。
+    """
     segs = []
     for s in ctx.steps_list:
-        df = ctx.df_step(s.get("step_id", ""))
+        sid = s.get("step_id", "")
+        if exclude and sid in exclude:
+            continue
+        df = ctx.df_step(sid)
         gb = df.get("group_by") or []
         if not gb:
             continue
@@ -254,6 +360,11 @@ def build_sheet3_rows(ctx) -> list:
     """
     base = ctx.logic_join_rows()
     sq_index = _subquery_index(ctx)
+    tmp_chains = _tmp_chain_index(ctx)
+    # 链成员步骤（终端 + 各生产步）：其 base 行由链模型接管（物化无关）
+    chain_step_ids = set(tmp_chains)
+    for _info in tmp_chains.values():
+        chain_step_ids.update(_info["producer_ids"])
     raw_sqls = [s.get("raw_sql", "") for s in ctx.data_flow_steps]
 
     def _expanded_subquery_alias(row):
@@ -266,7 +377,9 @@ def build_sheet3_rows(ctx) -> list:
                 return alias
         return None
 
-    survivors = [r for r in base if _expanded_subquery_alias(r) is None]
+    survivors = [r for r in base
+                 if _expanded_subquery_alias(r) is None
+                 and r.step_id not in chain_step_ids]
 
     rows = []
     attached_wheres = []
@@ -349,6 +462,53 @@ def build_sheet3_rows(ctx) -> list:
                 rows.insert(pos + 1, row)
                 last_pos_by_step[sid] = pos + 1
 
+    # ── tmp 链物化无关行（docs/14 P1，C2/C3 拍板）：主表行（驱动表+定义挂载）
+    #    + 生产步内物理表每表一行（【锚 内】ON 原文 + 指回）──
+    for sid, chain in tmp_chains.items():
+        drive_tbl, drive_alias = chain["driving"]
+        parts = []
+        # 生产步的表级 WHERE → 主表行限定段（片段内逐字已有，行上可检索）
+        prod_wheres = []
+        for pid in chain["producer_ids"]:
+            w = ctx.step_where(pid)
+            if w:
+                prod_wheres.append(_maybe_verbatim(w, raw_sqls))
+                attached_wheres.append(w)
+        if prod_wheres:
+            parts.append("限定：" + "；".join(prod_wheres))
+        # 定义片段：嵌套锚逐字（深层在前）
+        for m in chain["mounts"]:
+            if m["sql"]:
+                parts.append(f"【逻辑从表 {m['anchor']} · 定义】{m['sql']}")
+        # 终端步骤的行级 WHERE → 写入前限制（锚前缀即合法引用）
+        tw = ctx.step_where(sid)
+        if tw:
+            parts.append("写入前限制：" + _maybe_verbatim(tw, raw_sqls))
+            attached_wheres.append(tw)
+        _, d_short = split_schema_table(drive_tbl)
+        rows.append([None, None, d_short, drive_alias, None, "主表",
+                     "；".join(parts)])
+        last_pos_by_step[sid] = len(rows) - 1
+        # 生产步内的物理 JOIN 表：每表一行
+        for it in chain["inner"]:
+            _, t_short = split_schema_table(it["table"])
+            g = (f"【{it['anchor']} 内】{it['on']}；"
+                 f"参与逻辑从表 {it['anchor']}，定义见 {drive_alias} 行"
+                 if it["on"] else
+                 f"参与逻辑从表 {it['anchor']}，定义见 {drive_alias} 行")
+            rows.append([None, d_short, drive_alias, t_short, it["alias"],
+                         "INNER JOIN", g])
+        # 终端步骤自有的直接物理 JOIN（tmp 之外的）照常成行
+        for j in (ctx.df_step(sid).get("joins") or [])[1:]:
+            jst = j.get("source_table", "")
+            if (jst and not jst.startswith("(subquery:")
+                    and not _is_intermediate_table(jst)):
+                _, r_short = split_schema_table(jst)
+                rows.append([None, d_short, drive_alias, r_short,
+                             j.get("alias", ""), _join_kind(j.get("join_type", "")),
+                             j.get("join_condition", "")])
+                last_pos_by_step[sid] = len(rows) - 1
+
     # 未被附着的步骤 WHERE（logic_join_rows 对无 JOIN 步骤不产出承载行）
     unattached = []
     for s in ctx.steps_list:
@@ -356,7 +516,7 @@ def build_sheet3_rows(ctx) -> list:
         if w and w not in attached_wheres:
             unattached.append(_maybe_verbatim(w, raw_sqls))
 
-    chain_group = _chain_group_segments(ctx)
+    chain_group = _chain_group_segments(ctx, exclude=chain_step_ids)
 
     if rows:
         # 有关联行：未附着 WHERE 全部按「写入前限制」挂主表行（首行左表=驱动表）

@@ -149,22 +149,32 @@ class TestGoldenCase:
         assert all("tmp_" not in str(r) for r in rows)   # 中间表零出现
         assert all("LTS制品未提供" in (r[12] or "") for r in rows)  # 两态备注
 
-    def test_sheet3_segment_syntax(self, golden_run):
-        """表关联 G 列段式（docs/17 §三）：ON/限制/写入前限制/主表链预处理四段。"""
+    def test_sheet3_materialization_invariant(self, golden_run):
+        """物化无关模型（docs/14 P1/C2/C3 拍板）：tmp 链压平为嵌套锚，每表一行，
+        登记值零 tmp 名/规则编号；GROUP BY/HAVING 在定义片段内逐字。"""
         out, _ = golden_run
         rows = _rows(out, "3表关联")
-        assert len(rows) == 1
-        r = rows[0]
-        assert (r[1], r[2], r[3], r[4], r[5]) == (
-            "ods_acct_balance_di", "a", "ods_cust_info_di", "c", "INNER JOIN")
-        g = r[6]
-        assert "a.cust_id = c.cust_id" in g
-        assert "限制：a.del_flag = 'N' AND a.acct_date = '20260818'" in g
-        # 写入前限制：无 JOIN 步骤（场景写入 R0003）的 WHERE 不得丢（谓词守恒）
+        assert len(rows) == 2
+        main, inner = rows
+        # 主表行：驱动表（tmp 链最深层 FROM 首表）
+        assert (main[2], main[3], main[5]) == ("ods_acct_balance_di", "a", "主表")
+        g = main[6]
+        assert "限定：a.del_flag = 'N' AND a.acct_date = '20260818'" in g
+        # 嵌套锚定义挂载：深层（t=R0001）在前，外层（s=R0002）随后，逐字原文
+        assert "【逻辑从表 t · 定义】SELECT" in g
+        assert "JOIN ods.ods_cust_info_di c ON a.cust_id = c.cust_id" in g
+        assert "【逻辑从表 s · 定义】SELECT" in g
+        assert "GROUP BY t.cust_id, t.asset_type HAVING SUM(t.balance) > 0" in g
+        # 场景写入过滤（锚 s 引用合法形态）
         assert "写入前限制：s.data_flag = 'D'" in g
-        # 主表链预处理：中间表聚合步的分组+保留（引擎 group_by/having_clause）
-        assert "主表链预处理：按 t.cust_id, t.asset_type 分组" in g
-        assert "保留 SUM(t.balance) > 0" in g
+        # 生产步内物理表：每表一行，【锚 内】ON 原文 + 指回驱动表行
+        assert (inner[1], inner[2], inner[3], inner[4], inner[5]) == (
+            "ods_acct_balance_di", "a", "ods_cust_info_di", "c", "INNER JOIN")
+        assert "【t 内】a.cust_id = c.cust_id" in inner[6]
+        assert "参与逻辑从表 t，定义见 a 行" in inner[6]
+        # 物化零痕迹（登记值/关联方式列）：tmp 名与规则编号零出现
+        for r in rows:
+            assert "tmp_" not in str(r[:6]) and "R000" not in str(r[:6])
 
     def test_sheet4_field_typing_and_constants(self, golden_run):
         """需求字段：资产字段不重复（单行合并）；四枚举类型；记录ID 顺序生成。"""
@@ -179,13 +189,17 @@ class TestGoldenCase:
         # 逻辑列 = 拆解式（无规则编码、无表级条件、AS 尾巴剥离）
         tb = by_target["total_balance"]
         assert tb[5] == "数据加工"
-        assert tb[6] == "表达式：SUM(balance)"
+        # 展开态（C1）：物理根别名前缀 + 说明段（分组/保留/锚），无前缀词
+        assert tb[6] == ("SUM(a.balance)（按 cust_id, asset_type 分组，"
+                         "保留 SUM(balance) > 0；经逻辑从表 s）")
         assert (tb[2], tb[4]) == ("ods_acct_balance_di", "balance")
         assert tb[1] == "balance"                        # 业务需求字段 = copy 源字段（Q5）
-        # 常量字段：value → 赋值；无物理源，源表列留空
+        # 常量字段：value → 赋值；说明段=锚+场景（不带分组口径）
         ds = by_target["data_scope"]
-        assert ds[5] == "赋值" and ds[6] == "常量：'CUR'"
+        assert ds[5] == "赋值" and ds[6] == "'CUR'（经逻辑从表 s；场景 P_CUR 常量）"
         assert ds[2] is None and "无物理源" in (ds[12] or "")
+        # 直取穿链：备注指锚
+        assert "经逻辑从表 s" in (by_target["cust_id"][12] or "")
         # 直取
         assert by_target["asset_type"][5] == "直接复制"
         assert by_target["asset_type"][6] in (None, "")
@@ -423,8 +437,8 @@ class TestPredicateConservation:
         warns = predicate_conservation(ctx, [tampered_row], model["sheet4"])
         assert any(w["type"] == "predicate_missing_where" for w in warns)
 
-        # 剪掉主表链预处理段 → R0002 HAVING 漏放被检出
-        g_tampered2 = g.split("；主表链预处理")[0]
+        # 剪掉定义片段（HAVING 所在）→ R0002 HAVING 漏放被检出
+        g_tampered2 = g.split("；【逻辑从表 s · 定义】")[0]
         warns2 = predicate_conservation(
             ctx, [[None] * 6 + [g_tampered2]], model["sheet4"])
         assert any(w["type"] == "predicate_missing_having" for w in warns2)

@@ -24,7 +24,9 @@ from pathlib import Path
 from viewmodel import (build_context, resolve_on_condition_aliases, norm_name,
                        split_schema_table)
 from spec_extract import (build_sheet3_rows, decompose_field_logic,
-                          predicate_conservation, _subquery_index)
+                          predicate_conservation, _subquery_index,
+                          _tmp_chain_index, prefix_root_fields,
+                          strip_alias_prefix)
 
 # 打包基准（docs/需求SPEC.xlsx 的入库副本；列头指纹测试锁两者一致）
 DEFAULT_TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "需求SPEC模板.xlsx"
@@ -298,6 +300,33 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
             return "直接复制"
         return "数据加工"
 
+    # tmp 链物化无关上下文（展开态说明段素材：外层锚 + 分组/保留口径）
+    chain_by_step: dict = {}
+    for _sid, _ch in _tmp_chain_index(ctx).items():
+        outer_anchor = _ch["mounts"][-1]["anchor"] if _ch["mounts"] else ""
+        notes = []
+        for _pid in _ch["producer_ids"]:
+            _df = ctx.df_step(_pid)
+            _gb = _df.get("group_by") or []
+            if _gb:
+                _seg = "按 " + ", ".join(
+                    strip_alias_prefix(g) for g in _gb) + " 分组"
+                _hv = (_df.get("having_clause") or "").strip()
+                if _hv:
+                    _hv_body = re.sub(r"^HAVING\s+", "", _hv, flags=re.I)
+                    _seg += f"，保留 {strip_alias_prefix(_hv_body)}"
+                notes.append(_seg)
+        entry = {"anchor": outer_anchor, "note": "；".join(notes)}
+        chain_by_step[_sid] = entry
+        for _pid in _ch["producer_ids"]:
+            chain_by_step.setdefault(_pid, entry)
+
+    def _step_partition(step_id):
+        """步骤场景分区名（"场景1 (分区: P_CUR)" → P_CUR；默认场景无分区）。"""
+        name = ctx.topo_step(step_id).get("scenario_name", "") or ""
+        m = re.match(r"场景\d+\s*\(分区:\s*(.+?)\)", name)
+        return m.group(1) if m else ""
+
     for f in ctx.final_fields(group_by_scenario=False):
         tt = f.get("transform_type", "expression")
         fname = f.get("target_field", "")
@@ -385,16 +414,38 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
             best_raw = f["lineage"][0].get("raw_sql", "")
 
         type_label = _spec_type_label(tt, ps_transforms)
-        logic = decompose_field_logic(best_raw, tt) if type_label != "直接复制" else ""
+        # 展开态表达式（C1 拍板，2026-11-02）：裸表达式 + 物理根别名.字段前缀
+        # + （说明段：分组/保留/锚/场景）——引用位只允许物理根别名
+        expr_bare = (decompose_field_logic(best_raw, tt)
+                     if type_label != "直接复制" else "")
+        roots = [(a, fl) for a, fl in src_ref_parts if a and fl]
+        expr = prefix_root_fields(expr_bare, roots) if expr_bare else ""
+        _chain = chain_by_step.get(f.get("producing_step", ""))
+        note_parts = []
+        if _chain:
+            # 分组/保留口径只挂数据加工（聚合/表达式）——常量与分组行集无关
+            if _chain["note"] and type_label == "数据加工":
+                note_parts.append(_chain["note"])
+            if _chain["anchor"]:
+                note_parts.append(f"经逻辑从表 {_chain['anchor']}")
+        if type_label == "赋值":
+            _part = _step_partition(f.get("producing_step", ""))
+            if _part:
+                note_parts.append(f"场景 {_part} 常量")
+        logic = f"{expr}（{'；'.join(note_parts)}）" if (expr and note_parts) else expr
         # 多字段形态（2026-11-02 实测修订⑥）：英文分号分隔，且每字段带 别名.字段
         # （多源时物理来源不唯一，裸字段名有歧义）；单字段保持裸字段名
         if len(src_ref_parts) > 1:
             merged_sources = ";".join(
                 f"{a}.{fl}" if a else fl for a, fl in src_ref_parts)
-            multi_field = True
         else:
             merged_sources = src_ref_parts[0][1] if src_ref_parts else None
         remark_out = "；".join(remarks)
+        # 直取字段穿过逻辑从表 → 备注指锚（说明段只挂逻辑列）
+        if (_chain and _chain["anchor"] and type_label == "直接复制"
+                and "经逻辑从表" not in remark_out):
+            remark_out = "；".join(x for x in [remark_out,
+                                               f"经逻辑从表 {_chain['anchor']}"] if x)
         if not phys and tt != "direct" and not remark_out:
             remark_out = "常量字段，无物理源"
         sheet4.append([
