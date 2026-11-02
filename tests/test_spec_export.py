@@ -242,10 +242,12 @@ class TestSingleScenarioCase:
 # LTS 调度匹配端到端（docs/17 §二/§六）
 # ═══════════════════════════════════════════════════════════════
 
-def _write_lts_excel(path, tasks):
-    """构造 LTS 制品（tasks/jobs/taskParams 三 sheet，列头对齐平台导出）。
+def _write_lts_excel(path, upstreams, f_name, deps, group_code="GR_CUST_ASSET"):
+    """构造 LTS 制品（任务图：上游任务 + 资产 F 任务 + tskdep 依赖，实测⑧口径）。
 
-    tasks: [(task_name, pjob, project, group, cron)]，pjob 为空则不写 jobs 行。
+    upstreams: [(task_name, pjob, project, group, cron)] 上游（被依赖）任务
+    f_name: 资产 F 任务名（需 *_F 结尾才会被分类为 f_tasks）
+    deps: 资产 F 任务的 tskdep job 名列表（= 上游任务主 job 名）
     """
     import openpyxl
     wb = openpyxl.Workbook()
@@ -253,16 +255,24 @@ def _write_lts_excel(path, tasks):
     ws.title = "tasks"
     ws.append(["项目名称", "任务组名称", "任务名称", "任务类型", "开始时间",
                "结束时间", "调度周期", "依赖上一周期", "责任人", "调度频率配置"])
-    for name, pjob, project, group, cron in tasks:
+    f_row = ["PRJ_CUST_DAILY", "GRP_ASSET", f_name, "周期任务", "", "",
+             "0 0 3 * * ?", "", "zhang_san", ""]
+    ws.append(f_row)
+    for name, pjob, project, group, cron in upstreams:
         ws.append([project, group, name, "周期任务", "", "", cron, "", "zhang_san", ""])
     wsj = wb.create_sheet("jobs")
-    wsj.append(["项目名称", "任务组名称", "任务名称", "job名称"])
-    for name, pjob, project, group, cron in tasks:
+    wsj.append(["项目名称", "任务组名称", "任务名称", "job名称", "job类型"])
+    # 资产 F 任务：主 job（父为 getdata 类根）+ tskdep 依赖 job
+    wsj.append(["PRJ_CUST_DAILY", "GRP_ASSET", f_name,
+                f"Pjob_{f_name[:-2]}", "url"])
+    for d in deps:
+        wsj.append(["PRJ_CUST_DAILY", "GRP_ASSET", f_name, d, "tskdep"])
+    for name, pjob, project, group, cron in upstreams:
         if pjob:
-            wsj.append([project, group, name, pjob])
+            wsj.append([project, group, name, pjob, "url"])
     wsp = wb.create_sheet("taskParams")
     wsp.append(["项目名称", "任务组名称", "任务名称", "参数名称", "参数值"])
-    wsp.append(["p", "g", tasks[0][0], "V_GROUP_CODE", ""])
+    wsp.append(["PRJ_CUST_DAILY", "GRP_ASSET", f_name, "V_GROUP_CODE", group_code])
     wb.save(str(path))
 
 
@@ -271,14 +281,20 @@ class TestLtsScheduleMatching:
     def test_matched_unmatched_and_remarks(self, tmp_path):
         """三档之精确档：命中 2 源表填调度 7 列；未匹配任务尾部列举。"""
         bag = _bag(tmp_path, GOLDEN_ET)
-        _write_lts_excel(bag / "lts.xlsx", [
-            ("task_ods_acct_balance_di", "Pjob_ods_acct_balance_di",
-             "PRJ_CUST_DAILY", "GRP_ASSET", "0 30 2 * * ?"),
-            ("task_ods_cust_info_di", "Pjob_ods_cust_info_di",
-             "PRJ_CUST_DAILY", "GRP_ASSET", "0 40 2 * * ?"),
-            ("task_ods_order_di", "Pjob_ods_order_di",
-             "PRJ_CUST_DAILY", "GRP_ASSET", "0 50 2 * * ?"),
-        ])
+        _write_lts_excel(
+            bag / "lts.xlsx",
+            upstreams=[
+                ("task_ods_acct_balance_di", "Pjob_ods_acct_balance_di",
+                 "PRJ_CUST_DAILY", "GRP_ASSET", "0 30 2 * * ?"),
+                ("task_ods_cust_info_di", "Pjob_ods_cust_info_di",
+                 "PRJ_CUST_DAILY", "GRP_ASSET", "0 40 2 * * ?"),
+                ("task_ods_order_di", "Pjob_ods_order_di",
+                 "PRJ_CUST_DAILY", "GRP_ASSET", "0 50 2 * * ?"),
+            ],
+            f_name="DWB_CUST_ASSET_D_F",
+            deps=["Pjob_ods_acct_balance_di", "Pjob_ods_cust_info_di",
+                  "Pjob_ods_order_di"],
+        )
         out = tmp_path / "spec.xlsx"
         stdout = _run_spec(["--dir", str(bag), "--output", str(out),
                             "--scenario", "P_CUR"])
@@ -294,7 +310,9 @@ class TestLtsScheduleMatching:
         assert r0[11] == "0 30 2 * * ?" and r0[10] == "周期任务"
         assert r0[7] == "PRJ_CUST_DAILY" and r0[8] == "GRP_ASSET"
         assert not r0[6]                                  # 调度应用留空（缺口1）
-        assert "精确匹配" in (r0[12] or "")
+        assert "精确匹配" in (r0[12] or "")            # 按依赖job（tskdep）表名精确匹配
+        assert all(r[5] != "DWB_CUST_ASSET_D_F" for r in rows)      # 资产自身任务不进匹配
+        assert all(r[9] != "Pjob_DWB_CUST_ASSET_D" for r in rows)    # 资产自身主 job 不进匹配
         assert all("LTS制品未提供" not in (r[12] or "") for r in src)  # 两态不混淆
         um = [r for r in rows if not r[2]]
         assert len(um) == 1 and um[0][5] == "task_ods_order_di"
@@ -303,9 +321,13 @@ class TestLtsScheduleMatching:
     def test_lts_provided_but_zero_match_disclosure(self, tmp_path):
         """两态之「给了没匹配上」：全未命中 → 调度列空 + 披露（区别于没给）。"""
         bag = _bag(tmp_path, CASE08_ET)
-        _write_lts_excel(bag / "lts.xlsx", [
-            ("task_unrelated", "Pjob_somewhere_else", "P", "G", "0 0 3 * * ?"),
-        ])
+        _write_lts_excel(
+            bag / "lts.xlsx",
+            upstreams=[("task_unrelated", "Pjob_somewhere_else",
+                        "P", "G", "0 0 3 * * ?")],
+            f_name="DWB_INCREMENTAL_F_F",
+            deps=["Pjob_somewhere_else"],
+        )
         out = tmp_path / "spec.xlsx"
         stdout = _run_spec(["--dir", str(bag), "--output", str(out)])
         assert "命中 0" in stdout
@@ -427,10 +449,50 @@ class TestMultiSourceMerge:
         assert len(targets) == len(set(targets)), f"资产字段重复: {targets}"
         by_target = {r[10]: r for r in rows}
         amt = by_target["amt_01"]
-        assert (amt[2], amt[4]) == ("monthly_sales", "amount、month")  # 多源列内合并
+        assert (amt[2], amt[4]) == ("monthly_sales", "t.amount;t.month")  # 英文分号+别名.字段
         assert amt[5] == "数据加工"
         assert "SUM(CASE WHEN" in (amt[6] or "")               # 逻辑为整表达式
         assert [r[0] for r in rows] == list(range(1, len(rows) + 1))
+
+
+# ═══════════════════════════════════════════════════════════════
+# 包裹形态（case_28：FROM (整个关联逻辑) s WHERE，实测修订⑦）
+# ═══════════════════════════════════════════════════════════════
+
+class TestWrappedFromSubquery:
+
+    def test_virtual_logical_table_row(self, tmp_path):
+        """FROM 包裹：右表写「虚拟逻辑表 s」不写物理表名；G 段列出全部来源表
+        + 贴整段原文（引擎此形态 joins 全是空条件展开行，ON 只在原文里）。"""
+        et = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / \
+            "case_28_wrapped_from_subquery" / "execution_tasks.xlsx"
+        bag = _bag(tmp_path, et)
+        out = tmp_path / "spec.xlsx"
+        _run_spec(["--dir", str(bag), "--output", str(out)])
+
+        srows = _rows(out, "2数据源清单")
+        assert {r[2] for r in srows} == {"dwd_cust_main", "ods_order_pay",
+                                         "ods_pay_channel", "dim_cust_grade"}
+        jrows = _rows(out, "3表关联")
+        assert len(jrows) == 1
+        r = jrows[0]
+        assert (r[1], r[2]) == ("dwd_cust_main", "a")
+        assert r[3] == "虚拟逻辑表 s" and r[4] == "s"
+        assert r[5] in ("", None)   # 包裹形态无关联方式
+        g = r[6]
+        assert "预处理（虚拟表 s 由 dwd_cust_main、ods_order_pay、ods_pay_channel、dim_cust_grade 关联加工而来）" in g
+        assert "JOIN ods.ods_pay_channel g ON e.channel_id = g.channel_id" in g
+        assert "GROUP BY e.cust_id" in g
+        assert "限制：NOT s.cust_id IS NULL" in g
+        # Sheet4：主表直传字段正常；经子查询加工字段保守呈现（穿透缺口⑥，
+        # 物理源在表3贴码，不编造）
+        frows = _rows(out, "4需求字段")
+        by = {r[10]: r for r in frows}
+        assert by["total_amt"][5] == "数据加工"          # 经虚拟表保守判加工
+        assert "虚拟表 b" in (by["total_amt"][2] or "")
+        assert "表3预处理" in (by["total_amt"][12] or "")
+        assert by["cust_id"][5] == "直接复制"
+        assert by["cust_id"][2] == "dwd_cust_main"
 
 
 class TestJoinKindNormalization:

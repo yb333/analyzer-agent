@@ -90,21 +90,27 @@ def run_spec(dir_path, output_path, scenario: str = None) -> Path:
     # ── LTS 两态（§二/§七：没给 ≠ 给了没匹配上，措辞必须区分）──
     schedule_lookup, schedule_unmatched = {}, None
     if core["schedule_info"]:
-        # 匹配器：全量任务 × 物理源表，三档模糊 + 歧义保护（docs/17 §六）
+        # 匹配器：资产 F 任务的 tskdep 依赖 × 物理源表（docs/17 §六实测修订⑧）
         from viewmodel import build_context as _build_ctx
         _ctx = _build_ctx(knowledge)
         _sources = [{"schema": e.schema, "table": e.table}
                     for e in _ctx.entity_source_tables()]
-        schedule_lookup, schedule_unmatched = match_schedules(
+        schedule_lookup, schedule_unmatched, mstatus = match_schedules(
             core["schedule_info"], _sources)
-        hit = sum(1 for s in _sources
-                  if (f"{s['schema']}.{s['table']}".lower() in schedule_lookup
-                      if s["schema"] else s["table"].lower() in schedule_lookup))
-        print(f"  [调度匹配] 源表 {len(_sources)} 张：命中 {hit}；"
-              f"未匹配任务 {len(schedule_unmatched)} 个列于清单尾部")
-        lts_remark = ""
+        if mstatus != "ok":
+            reason = ("LTS制品未含资产F任务（命名需 *_F），依赖job无法提取"
+                      if mstatus == "no_f_task"
+                      else "资产F任务无 tskdep 依赖job，依赖无法提取")
+            lts_remark = f"{reason}，调度信息留空"
+            print(f"  [调度匹配] {lts_remark}")
+        else:
+            hit = sum(1 for s in _sources
+                      if (f"{s['schema']}.{s['table']}".lower() in schedule_lookup
+                          if s["schema"] else s["table"].lower() in schedule_lookup))
+            print(f"  [调度匹配] 依赖job × 源表 {len(_sources)} 张：命中 {hit}；"
+                  f"未匹配依赖 {len(schedule_unmatched)} 个列于清单尾部")
+            lts_remark = ""
     elif asm["lts"]:
-        # LTS 文件在但 read_lts_excel 无有效任务（结构问题已在装配层披露口径外）
         schedule_unmatched = []
         lts_remark = ""
     else:

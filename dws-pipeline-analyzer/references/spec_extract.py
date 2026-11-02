@@ -95,10 +95,16 @@ def _subquery_verbatim(raw_sql: str, subquery_sql: str, alias: str) -> tuple:
 
 
 def _subquery_index(ctx) -> dict:
-    """join_paths 子查询索引：{step_id: {外层别名: {sql/main_table/tables/on}}}。
+    """join_paths 子查询索引：{step_id: {外层别名: {sql/main_table/tables/on/...}}}。
 
     数据源 = data_flow.join_paths[*].subquery_sql / subquery_tables / df joins
     的 ON 条件（引擎结构化产出，零二次解析）。
+
+    两形态（2026-11-02 实测拆分）：
+    - JOIN 子查询（a JOIN (…) b）→ main-subquery 行（右表=主物理源）
+    - FROM 包裹（FROM (…) s，整个 FROM 是子查询）→ 虚拟逻辑表行（右表不写
+      物理表名——s 是多表加工出的虚拟表；引擎此形态 joins 全是空条件展开行，
+      ON 只存在于子查询原文里）
     """
     out: dict = {}
     for s in ctx.data_flow_steps:
@@ -109,21 +115,27 @@ def _subquery_index(ctx) -> dict:
             sql = info.get("subquery_sql", "")
             if not sql:
                 continue
-            main_tbl, tables = "", set()
+            main_tbl, main_alias, tables, table_list = "", "", set(), []
             for t in info.get("subquery_tables") or []:
                 if isinstance(t, (list, tuple)) and len(t) >= 2 and t[0]:
                     tables.add(t[0].lower())
+                    if t[0] not in table_list:
+                        table_list.append(t[0])
                     if not main_tbl and (len(t) < 3 or t[2] == "main"):
-                        main_tbl, _ma = t[0], t[1]
+                        main_tbl, main_alias = t[0], t[1]
             on = ""
+            join_type = ""
             for j in s.get("joins", []):
                 if j.get("alias") == alias:
                     on = j.get("join_condition", "")
+                    join_type = j.get("join_type", "")
                     break
             kind, sql_text = _subquery_verbatim(s.get("raw_sql", ""), sql, alias)
             out.setdefault(sid, {})[alias] = {
-                "sql": sql_text, "main_table": main_tbl, "tables": tables,
-                "on": on, "kind": kind,
+                "sql": sql_text, "main_table": main_tbl,
+                "main_alias": main_alias, "tables": tables,
+                "table_list": table_list, "on": on, "kind": kind,
+                "is_from_wrap": (join_type or "").upper().startswith("FROM"),
             }
     return out
 
@@ -291,11 +303,32 @@ def build_sheet3_rows(ctx) -> list:
                      _join_kind(row.join_type), "；".join(parts)])
         last_pos_by_step[row.step_id] = len(rows) - 1
 
-    # ── main-subquery 行（嵌套子查询，docs/17 §三）：右表=子查询主物理源，
-    #    右别名=外层别名（ON 里真实引用的样子），预处理贴子查询原文——
-    #    子查询内部的关联/过滤/分组信息全部收进贴码，不单独成行 ──
+    # ── 子查询关联行（嵌套子查询，docs/17 §三），两形态 ──
     for sid, by_alias in sq_index.items():
         for alias, info in by_alias.items():
+            if info["is_from_wrap"]:
+                # FROM 包裹（FROM (…) s）：虚拟逻辑表行——右表不写物理表名，
+                # G 段列出全部来源表 + 贴整段子查询原文（内部关联/过滤全收贴码）
+                if not info["table_list"]:
+                    continue
+                short_tables = [split_schema_table(t)[1] for t in info["table_list"]]
+                parts = [
+                    f"预处理（虚拟表 {alias} 由 {'、'.join(short_tables)} "
+                    f"关联加工而来）：{info['sql']}"
+                ]
+                sw = ctx.step_where(sid)
+                if sw and sw not in attached_wheres:
+                    parts.append(f"限制：{sw}")
+                    attached_wheres.append(sw)
+                _, l_tbl = split_schema_table(info["main_table"] or "")
+                rows.append([None, l_tbl, info["main_alias"],
+                             f"虚拟逻辑表 {alias}", alias, "",
+                             "；".join(parts)])
+                last_pos_by_step[sid] = len(rows) - 1
+                continue
+            # JOIN 子查询（a JOIN (…) b）：右表=子查询主物理源，
+            # 右别名=外层别名（ON 里真实引用的样子），预处理贴子查询原文——
+            # 子查询内部的关联/过滤/分组信息全部收进贴码，不单独成行
             main_tbl, main_alias = _step_main_table(ctx, sid)
             if not main_tbl:
                 continue

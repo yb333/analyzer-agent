@@ -671,6 +671,10 @@ def read_lts_excel(excel_path, rule_group_code: str = "") -> dict | None:
     # 与 yml 发现的候选集语义一致
     result = _classify_lts_tasks(matched, {t["task_name"]: t for t in tasks})
     result["_source_sheets"] = source_sheets
+    # 全量任务（组过滤前）私有键：spec 通道的依赖匹配要用——上游任务通常不带
+    # 本规则组的 V_GROUP_CODE，不随 all_tasks 流动（私有键随 dict 流动，
+    # 消费方按需读取，同 _source_sheets 先例）
+    result["_all_raw_tasks"] = tasks
     return result
 
 

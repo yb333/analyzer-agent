@@ -18,11 +18,13 @@ Author: 院博
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from viewmodel import (build_context, resolve_on_condition_aliases, norm_name,
                        split_schema_table)
-from spec_extract import build_sheet3_rows, decompose_field_logic, predicate_conservation
+from spec_extract import (build_sheet3_rows, decompose_field_logic,
+                          predicate_conservation, _subquery_index)
 
 # 打包基准（docs/需求SPEC.xlsx 的入库副本；列头指纹测试锁两者一致）
 DEFAULT_TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "需求SPEC模板.xlsx"
@@ -265,6 +267,11 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
             if a and n:
                 cte_alias_to_name[a.lower()] = n
 
+    # 子查询外层别名集合（包裹形态下穿透会停在子查询别名，如 b.total_amt）
+    subq_alias_set = set()
+    for _sid, _by in _subquery_index(ctx).items():
+        subq_alias_set.update(a.lower() for a in _by)
+
     def _resolve_cte_physical(name_or_alias: str):
         """CTE 名/主查询 CTE 别名 → 主物理源表名（解析不出 → ""）。"""
         key = (name_or_alias or "").lower()
@@ -303,7 +310,7 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
 
         # ── 多源合并为一行（资产字段列不可重复，2026-11-02 实测修订）──
         # CASE WHEN a,b 之类多来源字段：源表/别名/源字段列内 "、" 合并，逻辑列一条
-        tables, aliases, src_fields, remarks = [], [], [], []
+        tables, aliases, src_ref_parts, remarks = [], [], [], []
         ps_transforms = []
         best_raw = ""
         seen_tf = set()
@@ -315,6 +322,28 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
             resolved = _resolve_cte_physical(ps_table_full)
             if not resolved and ps_table_full.upper() not in ctx.cte_names_upper:
                 resolved = _resolve_cte_physical(ps.get("alias", ""))
+            is_sq_alias = bool(ps_table_full) and ps_table_full.lower() in subq_alias_set
+            if (not is_sq_alias and not resolved and ps_table_full
+                    and "." not in ps_table_full and ps.get("step_id")):
+                # 包裹形态下嵌套子查询别名可能不在任何引擎结构里（只在 SQL 文本）
+                # → 按 ") 别名 ON" 形态从步骤原文识别
+                raw = ctx.df_step(ps["step_id"]).get("raw_sql", "")
+                if re.search(rf"\)\s*{re.escape(ps_table_full)}\s+ON", raw):
+                    is_sq_alias = True
+            if not resolved and is_sq_alias:
+                # 包裹形态穿透缺口（docs/17 §十缺口6）：引擎穿透停在子查询别名
+                # （b.total_amt），底层物理源/加工只在子查询原文里 → 保守呈现：
+                # 源表标虚拟表+指路表3，类型保守判数据加工，不编造物理源
+                marker = f"（虚拟表 {ps_table_full}）"
+                if marker not in tables:
+                    tables.append(marker)
+                remark = "字段经子查询加工，物理源与加工逻辑见表3预处理贴码"
+                src_ref_parts.append((ps.get("alias", ""),
+                                      ps.get("field", fname) or ""))
+                ps_transforms.append("subquery")
+                if remark not in remarks:
+                    remarks.append(remark)
+                continue
             if resolved:
                 ps_table_full = resolved
                 remark = "源表经CTE预处理，物理源见表3预处理段"
@@ -331,7 +360,15 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
                 seen_tf.add(key)
                 if ps_table and ps_table not in tables:
                     tables.append(ps_table)
-                src_fields.append(ps_field)
+                # 别名：穿透项自带；缺失（pivot 等形态）用步骤别名表反查兜底
+                a = ps.get("alias", "")
+                if not a and ps.get("step_id"):
+                    amap = ctx.step_alias_map(ps["step_id"])
+                    for _al, _tbl in amap.items():
+                        if norm_name(_tbl) == norm_name(ps_table_full):
+                            a = _al.lower()   # 步骤别名表键为大写，呈现贴原文小写
+                            break
+                src_ref_parts.append((a, ps_field))
             a = ps.get("alias", "")
             if a and a not in aliases:
                 aliases.append(a)
@@ -349,7 +386,14 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
 
         type_label = _spec_type_label(tt, ps_transforms)
         logic = decompose_field_logic(best_raw, tt) if type_label != "直接复制" else ""
-        merged_sources = "、".join(src_fields) if src_fields else None
+        # 多字段形态（2026-11-02 实测修订⑥）：英文分号分隔，且每字段带 别名.字段
+        # （多源时物理来源不唯一，裸字段名有歧义）；单字段保持裸字段名
+        if len(src_ref_parts) > 1:
+            merged_sources = ";".join(
+                f"{a}.{fl}" if a else fl for a, fl in src_ref_parts)
+            multi_field = True
+        else:
+            merged_sources = src_ref_parts[0][1] if src_ref_parts else None
         remark_out = "；".join(remarks)
         if not phys and tt != "direct" and not remark_out:
             remark_out = "常量字段，无物理源"
