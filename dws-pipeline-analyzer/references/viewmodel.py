@@ -1,4 +1,4 @@
-"""视图模型层 — mapping / sdd / tech_design 三视图的公共数据构建层。
+"""视图模型层 — mapping / tech_design 渲染与 spec 通道的公共数据构建层。
 
 职责边界：
     knowledge_draft.json ──build_context()──> ViewContext ──> 渲染层(generate_*)
@@ -275,7 +275,7 @@ class EntitySource:
 
 
 class ViewContext:
-    """三视图（mapping/sdd/tech_design）共享的视图上下文。
+    """mapping/tech_design 渲染与 spec 通道（docs/17）共享的视图上下文。
 
     用 build_context(knowledge) 构建，不要直接实例化。
     """
@@ -401,7 +401,7 @@ class ViewContext:
         """最终目标表字段（过滤视图步骤/中间表步骤，同名字段保留加工版本）。
 
         group_by_scenario=True: 返回 {scenario: [fields]}（mapping 口径）
-        group_by_scenario=False: 返回 [fields]（sdd 口径）
+        group_by_scenario=False: 返回 [fields]（spec 需求字段口径）
         tech_design 按步骤全量展示字段是有意设计，不走本方法。
         """
         step_scenario = {s.get("step_id", ""): s.get("scenario_name", "")

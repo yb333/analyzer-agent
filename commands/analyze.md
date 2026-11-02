@@ -135,7 +135,10 @@ python {skill_dir}/run.py view_generator \
 - mapping.xlsx          — 字段映射（实体级+属性级，CTE穿透）
 - asset_report.html     — 资产说明书（交互式，含血缘图+SQL高亮）
 - tech_design.md        — 技术设计文档（9 章节）
-- sdd.xlsx              — 业务需求分析（SDD，逆向自 mapping，面向优化场景）
+
+需求 SPEC（原 sdd.xlsx 已退役）单独走 spec 通道：
+`python run.py spec --dir {制品目录} --output {路径} [--scenario {场景}]`
+（制品目录直入：术加必选 + LTS/DDL 可选；列口径见 docs/17）
 
 路径：{output_dir}/
 ```

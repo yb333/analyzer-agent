@@ -422,6 +422,14 @@ dws-pipeline-analyzer/
 │   ├── schedule_recovery.py 调度设计还原（LTS 事实→调度槽位：cron 频率/tskdep 上游/参数；
 │   │                     多场景：ts 草稿/tech_design/影响分析）
 │   ├── analyzer.py       数据读取 + CLI + re-export兼容层
+│   ├── pipeline_core.py  ★ facts/spec 双通道共享装配核（run_from_dir 唯一定义，
+│   │                     docs/17 §九：一条装配解析链，通道策略归各通道）
+│   ├── facts.py          facts 通道入口（agent 向：asset_facts/ts_draft JSON 契约）
+│   ├── spec.py           spec 通道入口（人向：需求SPEC.xlsx，docs/17；独立命令
+│   │                     run.py spec --dir，场景门 --scenario，退出码+locator）
+│   ├── spec_export.py    spec 投影层（SpecModel + 模板列头指纹 + 渲染 + self_check）
+│   ├── spec_extract.py   spec 语义提取器（表3段式重组/拆解式字段逻辑/谓词守恒）
+│   ├── schedule_match.py LTS↔源表三档模糊匹配（spec 适配层，不进 schedule_recovery）
 │   ├── baseline_export.py baseline_v1 契约投影（优化场景）
 │   ├── batch.py          批量编排（循环调engine）
 │   ├── viewmodel.py      视图模型层（三视图公共数据构建，v1.7 收敛）
@@ -437,6 +445,7 @@ commands/（每个command = 一个完整任务工作流）
 ├── analyze-batch.md      批量文档化
 ├── analyze-chain.md      多规则组链路分析
 ├── export-baseline.md    baseline_v1 契约导出
+├── export-spec.md        需求SPEC.xlsx 导出（人向：场景选择/补料引导/人工位清单）
 ├── field-search.md       字段检索
 └── impact-analysis.md    关联影响分析
 ```

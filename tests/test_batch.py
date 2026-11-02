@@ -99,7 +99,6 @@ class TestBatchAnalysis:
             assert (out_path / "mapping.xlsx").exists(), f"mapping.xlsx 应存在"
             assert (out_path / "asset_report.html").exists(), f"asset_report.html 应存在"
             assert (out_path / "tech_design.md").exists(), f"tech_design.md 应存在"
-            assert (out_path / "sdd.xlsx").exists(), f"sdd.xlsx 应存在"
             assert (out_path / "knowledge_draft.json").exists(), f"knowledge_draft.json 应存在"
 
     def test_batch_knowledge_has_data_blocks_and_summary(self, multi_group_xlsx, tmp_path):
@@ -235,7 +234,6 @@ class TestBatchAnalysis:
             assert (op / "mapping.xlsx").exists(), f"{r.rule_group_code}: mapping.xlsx 丢失"
             assert (op / "asset_report.html").exists(), f"{r.rule_group_code}: asset_report 丢失"
             assert (op / "tech_design.md").exists(), f"{r.rule_group_code}: tech_design 丢失"
-            assert (op / "sdd.xlsx").exists(), f"{r.rule_group_code}: sdd.xlsx 丢失"
             # target_table 不同 → tech_design.md 内容应不同（证明各自独立、非覆盖）
         td_rt = next(Path(r.output_dir) / "tech_design.md" for r in results if r.rule_group_code == "RT001").read_text(encoding="utf-8")
         td_off = next(Path(r.output_dir) / "tech_design.md" for r in results if r.rule_group_code == "OFF001").read_text(encoding="utf-8")

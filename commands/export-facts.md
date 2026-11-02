@@ -12,7 +12,7 @@ description: asset_facts 事实包导出（存量资产 → 优化场景机器�
 
 | | /analyze | /export-facts |
 |---|---|---|
-| 产物 | 给人读的交付物（draft + 三视图 + mapping/sdd） | 给机器读的契约（asset_facts.json） |
+| 产物 | 给人读的交付物（draft + 三视图 + mapping；需求SPEC 走独立 spec 通道） | 给机器读的契约（asset_facts.json） |
 | AI 角色 | 必须补充业务理解（knowledge_ai.md） | **零参与**——契约是纯物理事实，任何 AI 补写都是假信息风险 |
 | 流程 | 4 步 | 1 步纯脚本 |
 

@@ -8,13 +8,12 @@ Usage:
         --input knowledge_draft.json \
         --output docs/output/{target_table}/ \
         [--ai-input knowledge_ai.md] \
-        [--views mapping,asset,techspec,sdd]
+        [--views mapping,asset,techspec]
 
 支持的视图:
     mapping   → mapping.xlsx        (实体级+属性级字段映射)
     asset     → asset_report.html   (资产说明书，交互式 HTML)
     techspec  → tech_design.md      (技术设计文档)
-    sdd       → sdd.xlsx            (业务需求分析，逆向自 mapping)
 
 默认: all (生成全部视图)
 """
@@ -44,7 +43,6 @@ from viewmodel import (  # noqa: E402
     build_context,
     build_cte_index as _build_cte_index,
     resolve_physical_sources as _resolve_physical_sources,
-    resolve_on_condition_aliases as _resolve_on_condition_aliases,
     norm_name as _norm,
     schema_table as _schema_table,
     split_schema_table as _split_schema_table,
@@ -1722,201 +1720,6 @@ def generate_mapping(knowledge, output_dir):
     return True
 
 
-def generate_sdd(knowledge, output_dir):
-    """生成 SDD（业务需求分析）Excel — 逆向自 mapping，面向"未来优化场景"。
-
-    五个 Sheet 严格对齐模板工作簿1.xlsx：
-    - 1业务背景：5 行纵向标题（业务背景/使用场景/使用角色/下游消费方/需求价值），值留空
-    - 2数据源清单：物理源表清单（A/B/C 填，D–M 调度/主键/数据量留空）
-    - 3表关联：左/右表 + 别名 + 关联方式 + ON/WHERE 条件
-    - 4需求字段：穿透到物理源表的字段级需求（源表/源字段/直取or加工/加工逻辑/资产表/资产字段）
-    - 5业务样例数据：空 Sheet
-
-    取不到的列统一留空（静态 SQL 分析不产出：主键唯一性/数据量/空值率/源表调度/样例数据）。
-    """
-    try:
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment
-    except ImportError:
-        print("  错误: 缺少 openpyxl，请 pip install openpyxl", file=sys.stderr)
-        return False
-
-    # ── 视图上下文：所有口径唯一定义在 viewmodel.ViewContext ──
-    ctx = build_context(knowledge)
-    steps_list = ctx.steps_list
-    data_flow_steps = ctx.data_flow_steps
-    ddl_types = ctx.meta.get("target_field_types", {})
-    ddl_comments = ctx.meta.get("target_field_comments", {})
-
-    target_schema = ctx.target_schema
-    target_table = ctx.target_table
-    target_table_full = ctx.target_table_full
-    target_cn = ctx.target_cn
-    dialect = ctx.meta.get("dialect", "")
-
-    # ════════════════════════════════════════════════════════════
-    # 公共：表头样式（复用 field_search.py 的蓝色表头先例）
-    # ════════════════════════════════════════════════════════════
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_font = Font(color="FFFFFF", bold=True, size=11)
-
-    def _style_header(ws, headers):
-        ws.append(headers)
-        for col in range(1, len(headers) + 1):
-            cell = ws.cell(row=1, column=col)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws.row_dimensions[1].height = 32
-        ws.freeze_panes = "A2"
-
-    def _set_widths(ws, widths):
-        for i, w in enumerate(widths, 1):
-            if i <= ws.max_column:
-                ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
-
-    wb = Workbook()
-
-    # ════════════════════════════════════════════════════════════
-    # Sheet 1: 业务背景 — 5 行纵向标题，值留空
-    # ════════════════════════════════════════════════════════════
-    ws1 = wb.active
-    ws1.title = "1业务背景"
-    bg_labels = ["业务背景", "使用场景", "使用角色", "下游消费方", "需求价值"]
-    for label in bg_labels:
-        ws1.append([label, ""])  # A=标题, B=待填值
-    # 标题列样式（加粗左对齐）
-    label_font = Font(bold=True, size=11)
-    for r in range(1, len(bg_labels) + 1):
-        c = ws1.cell(row=r, column=1)
-        c.font = label_font
-        c.alignment = Alignment(horizontal="left", vertical="center")
-    ws1.column_dimensions["A"].width = 16
-    ws1.column_dimensions["B"].width = 60
-
-    # ════════════════════════════════════════════════════════════
-    # Sheet 2: 数据源清单 — 物理源表（A/B/C 填，余下留空）
-    # ════════════════════════════════════════════════════════════
-    ws2 = wb.create_sheet("2数据源清单")
-    headers2 = [
-        "*源系统",
-        "*源表（格式：数据库类型//数据库/schema/表名）",
-        "*源表中文说明（逻辑实体名称）",
-        "*主键字段",
-        "主键唯一性检查",
-        "源表数据量",
-        "*数据源调度任务名",
-        "*数据源调度应用",
-        "*数据源调度项目",
-        "*数据源调度任务组",
-        "*数据源调度Pjob名称",
-        "*数据源调度方式",
-        "*数据源调度频率",
-    ]
-    _style_header(ws2, headers2)
-
-    # 收集物理源表（口径统一在 viewmodel.entity_source_tables：
-    # UNION 分支/主查询 JOIN/CTE 内部，排除中间表/CTE 名/目标表自身，全局去重）
-    for es in ctx.entity_source_tables():
-        # 源系统：用 schema 大写作为系统标识
-        src_system = es.schema.upper() if es.schema else ""
-        # 源表：只填表名（数据库类型/数据库/schema 拿不到，按模板格式不强行编造）
-        ws2.append([src_system, es.table, "", "", "", "", "", "", "", "", "", "", ""])
-
-    _set_widths(ws2, [12, 42, 28, 18, 16, 12, 22, 18, 18, 18, 18, 14, 14])
-
-    # ════════════════════════════════════════════════════════════
-    # Sheet 3: 表关联 — 左/右表 + 别名 + 关联方式 + 条件
-    # ════════════════════════════════════════════════════════════
-    ws3 = wb.create_sheet("3表关联")
-    headers3 = ["*左表", "左表别名", "*右表", "右表别名", "*关联方式", "*关联条件&限制条件"]
-    _style_header(ws3, headers3)
-
-    # 逻辑关联清单（统一口径 viewmodel.logic_join_rows）：
-    # 左右表为真实物理表，CTE 坍缩为「预处理」属性（查询体原文链），
-    # 有多少个关联就有多少行 —— 拿本表可解释回原 SQL。
-    # ON 条件里的中间表别名改写（物理表关联行）仍走 join_key_lineage。
-    for row in ctx.logic_join_rows():
-        condition = row.on_condition
-        if row.origin == "main":
-            df_step = ctx.df_step(row.step_id)
-            step_alias_map = ctx.step_alias_map(row.step_id)
-            step_jkl = df_step.get("join_key_lineage", {})
-            rewritten, transfer_note = _resolve_on_condition_aliases(
-                row.on_condition, step_alias_map, step_jkl)
-            if transfer_note:
-                rewritten = rewritten + transfer_note
-            condition = rewritten
-        if row.preprocess:
-            condition = (condition + "\n" if condition else "") + row.preprocess
-        ws3.append([row.left_table, row.left_alias, row.right_table, row.right_alias,
-                    row.join_type, condition])
-
-    _set_widths(ws3, [28, 12, 28, 12, 16, 50])
-
-    # ════════════════════════════════════════════════════════════
-    # Sheet 4: 需求字段 — 穿透到物理源表的字段级需求
-    # ════════════════════════════════════════════════════════════
-    ws4 = wb.create_sheet("4需求字段")
-    headers4 = [
-        "*源表",
-        "*源表字段",
-        "*类型（直取字段/加工字段）",
-        "非直取字段加工逻辑",
-        "空值率分析",
-        "*资产设计参考_新增优化判断",
-        "*资产表名（schema.表名）",
-        "*资产中文名称",
-        "*资产字段",
-    ]
-    _style_header(ws4, headers4)
-
-    # 终态目标字段（全局去重，优先加工版本）— 口径在 viewmodel.final_fields
-    scenario_fields = ctx.final_fields(group_by_scenario=False)
-
-    for f in scenario_fields:
-        tt = f.get("transform_type", "expression")
-        type_label = "直取字段" if tt == "direct" else "加工字段"
-        target_field_name = f.get("target_field", "")
-
-        # 字段物理来源（physical_source 优先 + 递归 CTE 穿透回退）— viewmodel 统一
-        phys_sources = ctx.resolve_field_sources(f)
-
-        if not phys_sources:
-            # 无来源（常量/赋值）：源表/源字段留空
-            logic = f.get("lineage", [{}])[0].get("raw_sql", "") if f.get("lineage") else ""
-            logic = logic if tt != "direct" else ""
-            ws4.append([
-                "", "", type_label, logic, "",
-                "", target_table_full, target_cn, target_field_name,
-            ])
-        else:
-            for ps in phys_sources:
-                # 源表只取表名（不含 schema）
-                _, ps_table = _split_schema_table(ps.get("table", ""))
-                ps_field = ps.get("field", target_field_name)
-                ps_raw = ps.get("raw_sql", "")
-                logic = ps_raw if tt != "direct" else ""
-                ws4.append([
-                    ps_table, ps_field, type_label, logic, "",
-                    "", target_table_full, target_cn, target_field_name,
-                ])
-
-    _set_widths(ws4, [28, 20, 22, 40, 12, 22, 28, 18, 20])
-
-    # ════════════════════════════════════════════════════════════
-    # Sheet 5: 业务样例数据 — 空 Sheet
-    # ════════════════════════════════════════════════════════════
-    ws5 = wb.create_sheet("5业务样例数据")
-
-    # 写入
-    output_path = Path(output_dir) / "sdd.xlsx"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(output_path))
-    print(f"  [OK] SDD Excel: {output_path}")
-    return True
-
-
 # ── 视图生成: tech_design.md ────────────────────────────
 
 def generate_tech_design(knowledge, output_dir):
@@ -2228,7 +2031,7 @@ def main():
     parser.add_argument(
         "--views",
         default="all",
-        help="要生成的视图，逗号分隔: mapping,asset,techspec,sdd (默认: all)",
+        help="要生成的视图，逗号分隔: mapping,asset,techspec (默认: all)",
     )
 
     args = parser.parse_args()
@@ -2264,7 +2067,7 @@ def main():
     views_dir.mkdir(parents=True, exist_ok=True)
     views_str = args.views.strip().lower()
     if views_str == "all":
-        views = ["mapping", "asset", "techspec", "sdd"]
+        views = ["mapping", "asset", "techspec"]
     else:
         views = [v.strip() for v in views_str.split(",") if v.strip()]
 
@@ -2282,8 +2085,6 @@ def main():
             results["asset"] = generate_asset_report(knowledge, str(views_dir))
         elif view == "techspec":
             results["techspec"] = generate_tech_design(knowledge, str(views_dir))
-        elif view == "sdd":
-            results["sdd"] = generate_sdd(knowledge, str(views_dir))
         else:
             print(f"  警告: 未知视图类型 '{view}'，跳过", file=sys.stderr)
 
