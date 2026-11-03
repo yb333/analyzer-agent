@@ -26,7 +26,8 @@ from viewmodel import (build_context, resolve_on_condition_aliases, norm_name,
 from spec_extract import (build_sheet3_rows, decompose_field_logic,
                           predicate_conservation, _subquery_index,
                           _tmp_chain_index, prefix_root_fields,
-                          strip_alias_prefix)
+                          strip_alias_prefix, expand_value_chain,
+                          _sub_alias_map)
 
 # 打包基准（docs/需求SPEC.xlsx 的入库副本；列头指纹测试锁两者一致）
 DEFAULT_TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "需求SPEC模板.xlsx"
@@ -251,15 +252,34 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
     # ── Sheet3 表关联：行集语义段式重组 + E1 单表行（§三，口径在 spec_extract）──
     sheet3 = build_sheet3_rows(ctx)
 
-    # 别名注册表（表名→别名，来自 Sheet3 行；包裹形态引擎穿透 alias 为空时回填）
-    alias_registry: dict = {}
+    # 别名体系：Sheet3 行别名对（表短名, 别名）→ 物理别名集 / 表→别名（非锚
+    # 优先）/ 别名→表反查（代入升级用）；锚 = 逻辑从表别名（可被代入替换）
+    _sq_idx = _subquery_index(ctx)
+    anchor_names: set = set()
+    wrapped_fragments: list = []
+    for _sid, _by in _sq_idx.items():
+        for _a, _inf in _by.items():
+            anchor_names.add(_a)
+            if _inf.get("sql"):
+                wrapped_fragments.append(_inf["sql"])
+                anchor_names.update(_sub_alias_map(_inf["sql"]).keys())
+    alias_pairs: list = []
     for r in sheet3:
         for tbl_cell, alias_cell in ((r[1], r[2]), (r[3], r[4])):
             t = str(tbl_cell or "").strip()
             a = str(alias_cell or "").strip()
             if t and a and " " not in t and "（" not in t and "—" not in t \
                     and not t.startswith("虚拟"):
-                alias_registry.setdefault(split_schema_table(t)[1].lower(), a)
+                alias_pairs.append((split_schema_table(t)[1].lower(), a))
+    physical_alias_set = {a for _, a in alias_pairs if a not in anchor_names}
+    alias_registry: dict = {}
+    for t, a in alias_pairs:            # 先收非锚（物理），锚兜底
+        if a not in anchor_names:
+            alias_registry.setdefault(t, a)
+    for t, a in alias_pairs:
+        alias_registry.setdefault(t, a)
+    table_of_alias = {a: t for t, a in alias_registry.items()
+                      if a not in anchor_names}
 
     # ── Sheet4 需求字段：终态字段 × 物理源穿透（§四；逻辑列=拆解式）──
     sheet4 = []
@@ -353,6 +373,7 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
         ps_transforms = []
         best_raw = ""
         seen_tf = set()
+        field_exp = None            # ⑯ 多跳代入成功：(expr, notes, anchor, direct)
         for ps in phys:
             ps_table_full = ps.get("table", "") or ""
             remark = ""
@@ -370,9 +391,41 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
                 if re.search(rf"\)\s*{re.escape(ps_table_full)}\s+ON", raw):
                     is_sq_alias = True
             if not resolved and is_sq_alias:
-                # 包裹形态穿透缺口（docs/17 §十缺口6）：引擎穿透停在子查询别名
-                # （b.total_amt），底层物理源/加工只在子查询原文里 → 保守呈现：
-                # 源表标虚拟表+指路表3，类型保守判数据加工，不编造物理源
+                # ⑯ 多跳值链代入（docs/14 P3 跨聚合层级）：从虚拟表引用出发，
+                # 沿子查询定义逐跳代入到物理根（各跳原样仅代入，聚合函数内嵌）
+                ps_field0 = ps.get("field", fname) or ""
+                ref0 = f"{ps_table_full}.{ps_field0}"
+                exp_notes: list = []
+                exp_expr, exp_ok = "", False
+                cand_frags = wrapped_fragments + [
+                    ctx.df_step(ps.get("step_id", "")).get("raw_sql", "")]
+                for frag in cand_frags:
+                    if not frag or ps_table_full not in _sub_alias_map(frag):
+                        continue
+                    e, ok = expand_value_chain(ref0, frag, physical_alias_set,
+                                               notes=exp_notes)
+                    if e and e != ref0:
+                        exp_expr, exp_ok = e, ok
+                        break
+                if exp_expr and exp_ok:
+                    # 物理呈现升级：源表/别名/字段取自展开式的物理引用
+                    is_direct = re.fullmatch(r"[A-Za-z_]\w*\.\w+", exp_expr) is not None
+                    field_exp = {"expr": exp_expr, "notes": exp_notes,
+                                 "anchor": ps_table_full, "direct": is_direct}
+                    for al, fl in re.findall(r"\b([A-Za-z_]\w*)\.(\w+)\b",
+                                             exp_expr):
+                        t_low = table_of_alias.get(al)
+                        if t_low and (t_low, fl) not in seen_tf:
+                            seen_tf.add((t_low, fl))
+                            if t_low not in tables:
+                                tables.append(t_low)
+                            src_ref_parts.append((al, fl))
+                            if al not in aliases:
+                                aliases.append(al)
+                    ps_transforms.append("direct" if is_direct else "subquery")
+                    continue
+                # 代入失败 → 保守呈现（穿透缺口6）：源表标虚拟表+指路表3，
+                # 类型保守判数据加工，不编造物理源
                 marker = f"（虚拟表 {ps_table_full}）"
                 if marker not in tables:
                     tables.append(marker)
@@ -426,14 +479,26 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
             best_raw = f["lineage"][0].get("raw_sql", "")
 
         type_label = _spec_type_label(tt, ps_transforms)
-        # 展开态表达式（C1 拍板，2026-11-02）：裸表达式 + 物理根别名.字段前缀
-        # + （说明段：分组/保留/锚/场景）——引用位只允许物理根别名
-        expr_bare = (decompose_field_logic(best_raw, tt)
-                     if type_label != "直接复制" else "")
-        roots = [(a, fl) for a, fl in src_ref_parts if a and fl]
-        expr = prefix_root_fields(expr_bare, roots) if expr_bare else ""
+        # 展开态表达式（C1 拍板 + ⑯ 多跳代入）：field_exp 已是物理根限定形态
         _chain = chain_by_step.get(f.get("producing_step", ""))
         note_parts = []
+        if field_exp is not None and field_exp["direct"]:
+            type_label = "直接复制"
+        if field_exp is not None:
+            expr = field_exp["expr"]
+            if field_exp["direct"]:
+                # 直取说明段（doc-14 §五惯例）：只指锚，不带分组口径
+                note_parts.append(f"经逻辑从表 {field_exp['anchor']} 直取")
+            else:
+                for n in field_exp["notes"]:
+                    if n and n not in note_parts:
+                        note_parts.append(n)
+                note_parts.append(f"经逻辑从表 {field_exp['anchor']}")
+        else:
+            expr_bare = (decompose_field_logic(best_raw, tt)
+                         if type_label != "直接复制" else "")
+            roots = [(a, fl) for a, fl in src_ref_parts if a and fl]
+            expr = prefix_root_fields(expr_bare, roots) if expr_bare else ""
         if _chain:
             # 分组/保留口径只挂数据加工（聚合/表达式）——常量与分组行集无关
             if _chain["note"] and type_label == "数据加工":

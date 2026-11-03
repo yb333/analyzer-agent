@@ -554,13 +554,13 @@ class TestWrappedFromSubquery:
         assert s_row[5] in ("", None)
         assert "限定：NOT s.cust_id IS NULL" in s_row[6]
         assert "【s 内】关联见上" in s_row[6]
-        # Sheet4：主表直传字段正常（别名经 Sheet3 注册表回填）；经子查询加工
-        # 字段保守呈现（穿透缺口⑥，物理源在表3贴码，不编造）
+        # Sheet4：⑯ 多跳代入升级——经 b 加工字段穿透为物理呈现
         frows = _rows(out, "4需求字段")
         by = {r[10]: r for r in frows}
-        assert by["total_amt"][5] == "数据加工"
-        assert "虚拟表 b" in (by["total_amt"][2] or "")
-        assert "表3预处理" in (by["total_amt"][12] or "")
+        ta = by["total_amt"]
+        assert ta[5] == "数据加工"
+        assert ta[6] == "SUM(e.pay_amt)（按 cust_id 分组收敛；经逻辑从表 b）"
+        assert (ta[2], ta[3], ta[4]) == ("ods_order_pay", "e", "pay_amt")
         assert by["cust_id"][5] == "直接复制"
         assert by["cust_id"][2] == "dwd_cust_main"
         assert by["cust_id"][3] == "a"          # 别名注册表回填（实测问题2修复）
@@ -614,6 +614,36 @@ class TestWrappedNestedSubqueries:
         assert by["order_id"][3] == "m"
         assert by["grade_name"][3] == "g"
         assert by["order_id"][5] == "直接复制"
+        # ⑯ 代入升级：穿 b 直取字段 → 物理呈现 + 直取说明段
+        pc = by["pay_channel"]
+        assert pc[5] == "直接复制"
+        assert pc[6] == "ch.channel_name（经逻辑从表 b 直取）"
+        assert (pc[2], pc[3], pc[4]) == ("ods_channel", "ch", "channel_name")
+
+
+# ═══════════════════════════════════════════════════════════════
+# 跨聚合多跳值链（case_30：tt 层 CASE → b 层 SUM CASE 收敛，⑯ 代入）
+# ═══════════════════════════════════════════════════════════════
+
+class TestCrossAggValueChain:
+
+    def test_field1_expanded_semantic_expr(self, tmp_path):
+        """field1 两跳值链（tt CASE → b SUM CASE 收敛）→ 跨聚合语义表达式：
+        各跳原样代入、聚合函数内嵌、粒度与锚进说明段、物理根引用。"""
+        et = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / \
+            "case_30_cross_agg_chain" / "execution_tasks.xlsx"
+        bag = _bag(tmp_path, et)
+        out = tmp_path / "spec.xlsx"
+        _run_spec(["--dir", str(bag), "--output", str(out)])
+
+        frows = _rows(out, "4需求字段")
+        by = {r[10]: r for r in frows}
+        f1 = by["field1"]
+        assert f1[5] == "数据加工"
+        assert f1[6] == ("CASE WHEN SUM(CASE WHEN ch.channel_type = '01' "
+                         "THEN 'ZC' END) > 0 THEN 'Y' ELSE 'N' END"
+                         "（按 cust_id 分组收敛；经逻辑从表 b）")
+        assert (f1[2], f1[3], f1[4]) == ("ods_channel", "ch", "channel_type")
 
 
 class TestJoinKindNormalization:
