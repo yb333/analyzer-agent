@@ -1535,13 +1535,24 @@ def generate_asset_report(knowledge, output_dir):
 
 # ── 视图生成: mapping.xlsx ──────────────────────────────
 
-def generate_mapping(knowledge, output_dir):
+def generate_mapping(knowledge, output_dir, engine_ctx=None):
     """生成 Mapping Excel
 
     规则：
     - 实体级 mapping：只展示物理源表 → 目标表（CTE/中间表不显示）
     - 属性级 mapping：穿透 CTE 到物理源表字段
+
+    engine_ctx 提供时走 mapping_export（与 SPEC 同源装配：data_blocks 块
+    装配 + subquery_field_chains 展开态 + 四枚举 + 质量门）；
+    未提供时走旧逻辑（ViewContext 直消费，向后兼容）。
     """
+    if engine_ctx is not None:
+        try:
+            from mapping_export import export_mapping
+            export_mapping(knowledge, engine_ctx, output_dir)
+            return True
+        except Exception as e:
+            print(f"  [WARN] mapping_export 失败（{e}），回退旧逻辑", file=sys.stderr)
     try:
         from openpyxl import Workbook
     except ImportError:

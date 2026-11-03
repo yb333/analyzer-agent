@@ -1642,7 +1642,7 @@ def main_chain():
     try:
         from view_generator import (generate_mapping, generate_asset_report,
                                     generate_tech_design)
-        generate_mapping(knowledge, output_dir)
+        generate_mapping(knowledge, output_dir, engine_ctx=engine_ctx)
         generate_asset_report(knowledge, output_dir)
         generate_tech_design(knowledge, output_dir)
     except Exception as e:
