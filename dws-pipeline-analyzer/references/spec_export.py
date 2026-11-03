@@ -388,7 +388,7 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
                 # 包裹形态下嵌套子查询别名可能不在任何引擎结构里（只在 SQL 文本）
                 # → 按 ") 别名 ON" 形态从步骤原文识别
                 raw = ctx.df_step(ps["step_id"]).get("raw_sql", "")
-                if re.search(rf"\)\s*{re.escape(ps_table_full)}\s+ON", raw):
+                if re.search(rf"\)\s*(?:AS\s+)?{re.escape(ps_table_full)}\s+ON", raw):
                     is_sq_alias = True
             if not resolved and is_sq_alias:
                 # ⑯ 多跳值链代入（docs/14 P3 跨聚合层级）：从虚拟表引用出发，

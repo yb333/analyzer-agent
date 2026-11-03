@@ -159,7 +159,7 @@ def _inner_join_of(fragment: str, alias: str) -> tuple:
 
     Returns: (kind, on)；找不到 → ("", "")（行仍出，ON 由片段兜底）。
     """
-    pat = (rf"(LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\s+\S+\s+{re.escape(alias)}"
+    pat = (rf"(LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\s+\S+\s+(?:AS\s+)?{re.escape(alias)}"
            rf"\s+ON\s+(.+?)(?=\s+(?:LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\b"
            rf"|\bWHERE\b|\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\)|$)")
     m = re.search(pat, fragment or "", re.I | re.S)
@@ -214,12 +214,23 @@ def _parse_join_target(body: str, pos: int) -> tuple:
     m = _WS_RE.match(body, pos)
     if m:
         pos = m.end()
+    def _skip_as(p):
+        """跳过可选的 AS 关键字（真实 SQL 常见 `) AS b` / `tbl AS b` 风格）。"""
+        m2 = _WS_RE.match(body, p)
+        if not m2:
+            return p
+        am = _WORD_RE.match(body, m2.end())
+        if am and am.group(0).upper() == "AS":
+            m3 = _WS_RE.match(body, am.end())
+            return m3.end() if m3 else am.end()
+        return p
+
     if pos < len(body) and body[pos] == "(":
         close = _balanced(body, pos)
         if close == -1:
             return pos, {}
         sub_sql = body[pos:close + 1]
-        pos = close + 1
+        pos = _skip_as(close + 1)
         m2 = _WS_RE.match(body, pos)
         if m2:
             pos = m2.end()
@@ -232,7 +243,7 @@ def _parse_join_target(body: str, pos: int) -> tuple:
     if not tm:
         return pos, {}
     table = tm.group(0)
-    pos = tm.end()
+    pos = _skip_as(tm.end())
     m2 = _WS_RE.match(body, pos)
     if m2:
         pos2 = m2.end()
