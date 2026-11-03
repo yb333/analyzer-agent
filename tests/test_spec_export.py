@@ -701,7 +701,8 @@ class TestSysdateField:
         by = {r[10]: r for r in frows}
         dw = by["dw_last_update_date"]
         assert dw[5] == "赋值"
-        assert dw[6] == "sysdate()（经逻辑从表 s）"
+        # sqlglot oracle 方言归一：sysdate() → CURRENT_TIMESTAMP（结构保真）
+        assert dw[6] == "CURRENT_TIMESTAMP（经逻辑从表 s）"
         # 其他字段不受 s 层新增字段影响
         assert by["is_flag"][5] == "数据加工"
         assert "SUM(CASE WHEN t3.tag_id" in by["is_flag"][6]

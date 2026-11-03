@@ -43,7 +43,7 @@ class TestSubqueryFieldChains:
     def test_two_hop_case_chain(self):
         """跨聚合两跳链：b 层 SUM CASE → tt 层 CASE → 物理根 t3.tag_id。"""
         parsed = parse_single_sql(SQL_NESTED, "dws")
-        chains = extract_subquery_field_chains(parsed)
+        chains, sqls = extract_subquery_field_chains(parsed)
         chain = chains["is_flag"]
         assert [e["alias"] for e in chain] == ["b", "tt"]
         b_hop, tt_hop = chain
@@ -58,7 +58,7 @@ class TestSubqueryFieldChains:
         """单列直传已被 _penetrate_subquery_columns 穿透（s.id→t1.account_id），
         停在物理别名 → 不产链。"""
         parsed = parse_single_sql(SQL_NESTED, "dws")
-        chains = extract_subquery_field_chains(parsed)
+        chains, _sqls = extract_subquery_field_chains(parsed)
         assert "id" not in chains
 
     def test_sysdate_function_chain(self):
@@ -69,7 +69,7 @@ class TestSubqueryFieldChains:
             1).replace("SELECT s.id, s.is_flag",
                        "SELECT s.id, s.is_flag, s.dw_last_update_date", 1)
         parsed = parse_single_sql(sql, "dws")
-        chains = extract_subquery_field_chains(parsed)
+        chains, _sqls = extract_subquery_field_chains(parsed)
         dw = chains.get("dw_last_update_date")
         assert dw and dw[0]["alias"] == "s"
         # sqlglot oracle 方言对 sysdate() 归一渲染为 CURRENT_TIMESTAMP（结构保真）
@@ -81,7 +81,7 @@ class TestSubqueryFieldChains:
         """无子查询 → 空链。"""
         parsed = parse_single_sql(
             "SELECT a.x FROM ods.t a LEFT JOIN ods.u u ON a.id = u.id", "dws")
-        assert extract_subquery_field_chains(parsed) == {}
+        assert extract_subquery_field_chains(parsed) == ({}, {})
 
     def test_engine_ctx_wiring(self):
         """analyze_pipeline 全链路：chains 进 engine_ctx，knowledge 无新键。"""

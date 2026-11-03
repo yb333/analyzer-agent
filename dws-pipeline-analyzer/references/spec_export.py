@@ -26,8 +26,7 @@ from viewmodel import (build_context, resolve_on_condition_aliases, norm_name,
 from spec_extract import (build_sheet3_rows, decompose_field_logic,
                           predicate_conservation, _subquery_index,
                           _tmp_chain_index, prefix_root_fields,
-                          strip_alias_prefix, expand_value_chain,
-                          _sub_alias_map)
+                          strip_alias_prefix)
 
 # 打包基准（docs/需求SPEC.xlsx 的入库副本；列头指纹测试锁两者一致）
 DEFAULT_TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "需求SPEC模板.xlsx"
@@ -256,13 +255,14 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
     # 优先）/ 别名→表反查（代入升级用）；锚 = 逻辑从表别名（可被代入替换）
     _sq_idx = _subquery_index(ctx)
     anchor_names: set = set()
-    wrapped_fragments: list = []
     for _sid, _by in _sq_idx.items():
-        for _a, _inf in _by.items():
-            anchor_names.add(_a)
-            if _inf.get("sql"):
-                wrapped_fragments.append(_inf["sql"])
-                anchor_names.update(_sub_alias_map(_inf["sql"]).keys())
+        anchor_names.update(_by.keys())
+    # 引擎装配通道（波2a）：子查询别名全集/字段链/渲染 SQL 全部来自 engine_ctx
+    _chains_all = (engine_ctx or {}).get("subquery_field_chains") or {}
+    _sq_sqls_all = (engine_ctx or {}).get("subquery_sqls") or {}
+    for _sid, _sqls in _sq_sqls_all.items():
+        anchor_names.update(a.lower() for a in _sqls)
+    sq_chains = _chains_all
     alias_pairs: list = []
     for r in sheet3:
         for tbl_cell, alias_cell in ((r[1], r[2]), (r[3], r[4])):
@@ -391,32 +391,27 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
                 if re.search(rf"\)\s*(?:AS\s+)?{re.escape(ps_table_full)}\s+ON", raw):
                     is_sq_alias = True
             if not resolved and is_sq_alias:
-                # ⑯ 多跳值链代入（docs/14 P3 跨聚合层级）：从虚拟表引用出发，
-                # 沿子查询定义逐跳代入到物理根（各跳原样仅代入，聚合函数内嵌）
-                ps_field0 = ps.get("field", fname) or ""
-                ref0 = f"{ps_table_full}.{ps_field0}"
-                exp_notes: list = []
-                exp_expr, exp_ok = "", False
-                # 候选片段：包裹片段 + 步骤原文（兜底格式的穿透项无 step_id，
-                # 从字段 producing_step 取——sysdate() 类字段曾因此取空而保守化）
-                cand_frags = wrapped_fragments + [
-                    ctx.df_step(ps.get("step_id", "")).get("raw_sql", "")
-                    or ctx.df_step(f.get("producing_step", "")).get("raw_sql", "")]
-                for frag in cand_frags:
-                    if not frag or ps_table_full not in _sub_alias_map(frag):
-                        continue
-                    e, ok = expand_value_chain(ref0, frag, physical_alias_set,
-                                               notes=exp_notes)
-                    if e and e != ref0:
-                        exp_expr, exp_ok = e, ok
-                        break
-                if exp_expr and exp_ok:
-                    # 物理呈现升级：源表/别名/字段取自展开式的物理引用
-                    is_direct = re.fullmatch(r"[A-Za-z_]\w*\.\w+", exp_expr) is not None
+                # ⑯ 多跳值链代入（docs/14 P3 跨聚合层级，波2a 改引擎链）：
+                # engine_ctx.subquery_field_chains 给逐跳 {alias,field,expression,
+                # refs}（AST 提取）——代入=按 refs 精确 token 替换，无文本解析
+                chain = sq_chains.get(f.get("producing_step", ""), {}).get(
+                    fname.lower())
+                if chain:
+                    exp_expr = chain[0]["expression"]
+                    for _ent in chain[1:]:
+                        exp_expr = exp_expr.replace(
+                            f"{_ent['alias']}.{_ent['field']}", _ent["expression"])
+                    leaf_refs = chain[-1].get("refs") or []
+                    is_direct = re.fullmatch(
+                        r"[A-Za-z_]\w*\.\w+", exp_expr) is not None
+                    # 分组收敛口径：链上各跳对应 data_blocks 块的 group_by
+                    exp_notes = _group_notes_for_aliases(
+                        ctx, f.get("producing_step", ""),
+                        [e["alias"] for e in chain])
                     field_exp = {"expr": exp_expr, "notes": exp_notes,
-                                 "anchor": ps_table_full, "direct": is_direct}
-                    for al, fl in re.findall(r"\b([A-Za-z_]\w*)\.(\w+)\b",
-                                             exp_expr):
+                                 "anchor": chain[0]["alias"], "direct": is_direct}
+                    for r_ in leaf_refs:
+                        al, fl = r_.get("alias", ""), r_.get("field", "")
                         t_low = table_of_alias.get(al)
                         if t_low and (t_low, fl) not in seen_tf:
                             seen_tf.add((t_low, fl))
@@ -584,6 +579,26 @@ _SHEET_ORDER = [
     ("sheet4", "4需求字段"),
     ("sheet5", "5业务样例数据"),
 ]
+
+
+def _group_notes_for_aliases(ctx, step_id: str, aliases: list) -> list:
+    """链上各跳别名的分组粒度说明（data_blocks 引擎结构，外层在前按链序）。"""
+    notes, seen_alias = [], set(aliases)
+    blocks = []
+    def _walk(bs):
+        for b in bs:
+            blocks.append(b)
+            _walk(b.get("children") or [])
+    _walk(ctx.df_step(step_id).get("data_blocks") or [])
+    for a in aliases:
+        for b in blocks:
+            if b.get("alias") == a and b.get("group_by"):
+                note = ("按 " + strip_alias_prefix(", ".join(b["group_by"]))
+                        + " 分组收敛")
+                if note not in notes:
+                    notes.append(note)
+                break
+    return notes
 
 
 def _reference_closure(ctx, sheet2: list, sheet3: list, sheet4: list) -> list:
