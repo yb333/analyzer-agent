@@ -1838,6 +1838,105 @@ def _penetrate_subquery_columns(tree, columns: list, depth=0):
         _penetrate_subquery_columns(main_expr, columns, depth + 1)
 
 
+def extract_subquery_field_chains(parsed: ParsedSQL) -> dict:
+    """子查询字段表达式链（engine_ctx 结构化产出，2026-11-03 装配通道补全）。
+
+    背景：_penetrate_subquery_columns 对单列直传穿透到物理根；多列表达式
+    （CASE/coalesce）刻意停在子查询别名（通道只携带 别名.字段 对，硬穿会丢
+    加工语义，见其函数内注释）。本函数补**表达式载体**：对停在子查询别名上的
+    字段，产出逐跳链 [{alias, field, expression, refs}]（外层在前）——
+    expression = 该层投影表达式（sqlglot 渲染，结构保真）；refs = 表达式引用
+    的 别名.字段 对（AST 提取，供代入替换，不做文本猜测）。
+
+    只进 engine_ctx（不进 knowledge/lineage/physical_source）——存量产物
+    零变化（golden 零 diff 护住），SPEC 等投影层按需消费。
+
+    Returns: {target_field: [chain entries]}；无子查询引用 → {}
+    """
+    if parsed.parse_error or not parsed.clean_sql:
+        return {}
+    try:
+        tree = _parse_sqlglot_cached(parsed.clean_sql, "oracle")
+    except Exception:
+        return {}
+    if tree is None:
+        return {}
+
+    # 1. 全部派生表子查询 {alias_lower: [分支 select 节点]}（任意深度，FROM/JOIN；
+    #    UNION 取全分支，投影按首见字段）
+    sub_selects: dict = {}
+    for sq in tree.find_all(exp.Subquery):
+        alias = (sq.alias or "").lower()
+        if not alias:
+            continue
+        inner = sq.this
+        branches = []
+        if isinstance(inner, (exp.Union, exp.Intersect, exp.Except)):
+            _collect_set_branches(inner, branches)
+        elif isinstance(inner, exp.Select):
+            branches = [inner]
+        if not branches:
+            sel = sq.find(exp.Select)
+            branches = [sel] if sel else []
+        if branches:
+            sub_selects.setdefault(alias, branches)
+    if not sub_selects:
+        return {}
+
+    # 2. 各子查询投影表 {alias: {out_field: (expression, refs)}}
+    def _projections(branches):
+        proj = {}
+        for sel in branches:
+            if not isinstance(sel, exp.Select):
+                continue
+            for node in sel.expressions:
+                if isinstance(node, exp.Alias):
+                    out, target = node.alias.lower(), node.this
+                elif isinstance(node, exp.Column):
+                    out, target = node.name.lower(), node
+                else:
+                    continue
+                if out in proj:
+                    continue
+                refs = [((c.table or "").lower(), c.name.lower())
+                        for c in target.find_all(exp.Column)]
+                proj[out] = (target.sql(dialect="oracle"), refs)
+        return proj
+
+    sub_proj = {a: _projections(bs) for a, bs in sub_selects.items()}
+
+    # 3. 外层列停在子查询别名 → BFS 逐跳链（跨引用全收，去重）
+    out: dict = {}
+    for col in parsed.select_columns:
+        if not col.source_fields:
+            continue
+        chain, seen = [], set()
+        queue = []
+        for sf in col.source_fields:
+            a = (sf.get("alias") or "").lower()
+            f = (sf.get("field") or "").lower()
+            if a in sub_proj and f:
+                queue.append((a, f))
+        while queue:
+            a, f = queue.pop(0)
+            if (a, f) in seen:
+                continue
+            seen.add((a, f))
+            entry = sub_proj.get(a, {}).get(f)
+            if entry is None:
+                continue
+            expression, refs = entry
+            chain.append({"alias": a, "field": f, "expression": expression,
+                          "refs": [{"alias": ra, "field": rf}
+                                   for ra, rf in refs]})
+            for ra, rf in refs:
+                if ra in sub_proj:
+                    queue.append((ra, rf))
+        if chain:
+            out.setdefault(col.alias.lower(), []).extend(chain)
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════
 # 字段使用信息提取（JOIN ON / WHERE / GROUP BY）
 # ═══════════════════════════════════════════════════════════════
@@ -6939,6 +7038,18 @@ def analyze_pipeline(
             (r.rule_group_en for r in rules if getattr(r, "rule_group_en", "")), "")
         if ddl_dir:
             context_out["ddl_files"] = ddl_consumed_files(ddl_dir)
+        # 子查询字段表达式链（2026-11-03 装配通道补全）：停在子查询别名的字段
+        # （多列表达式边界 / JOIN 子查询）逐跳表达式链，供 SPEC 等投影层消费；
+        # 只进导出上下文，knowledge 存量零变化
+        _sq_chains = {}
+        for _s in topology.get("steps", []):
+            _p = parsed_map.get(_s.get("rule_code", ""))
+            if _p is not None:
+                _ch = extract_subquery_field_chains(_p)
+                if _ch:
+                    _sq_chains[_s.get("step_id", "")] = _ch
+        if _sq_chains:
+            context_out["subquery_field_chains"] = _sq_chains
 
     return knowledge, parsed_map
 
