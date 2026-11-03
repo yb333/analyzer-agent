@@ -516,9 +516,9 @@ class TestMultiSourceMerge:
 
 class TestWrappedFromSubquery:
 
-    def test_virtual_logical_table_row(self, tmp_path):
-        """FROM 包裹：右表写「虚拟逻辑表 s」不写物理表名；G 段列出全部来源表
-        + 贴整段原文（引擎此形态 joins 全是空条件展开行，ON 只在原文里）。"""
+    def test_wrapped_decomposed_rows(self, tmp_path):
+        """FROM 包裹（W4 分解模型）：直接 JOIN 行 + 锚行（含内部表行）+ 包裹
+        残余行（虚拟逻辑表，方式空）——引擎此形态零结构化，全部由片段分解。"""
         et = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / \
             "case_28_wrapped_from_subquery" / "execution_tasks.xlsx"
         bag = _bag(tmp_path, et)
@@ -529,25 +529,91 @@ class TestWrappedFromSubquery:
         assert {r[2] for r in srows} == {"dwd_cust_main", "ods_order_pay",
                                          "ods_pay_channel", "dim_cust_grade"}
         jrows = _rows(out, "3表关联")
-        assert len(jrows) == 1
-        r = jrows[0]
-        assert (r[1], r[2]) == ("dwd_cust_main", "a")
-        assert r[3] == "虚拟逻辑表 s" and r[4] == "s"
-        assert r[5] in ("", None)   # 包裹形态无关联方式
-        g = r[6]
-        assert "预处理（虚拟表 s 由 dwd_cust_main、ods_order_pay、ods_pay_channel、dim_cust_grade 关联加工而来）" in g
-        assert "JOIN ods.ods_pay_channel g ON e.channel_id = g.channel_id" in g
-        assert "GROUP BY e.cust_id" in g
-        assert "限制：NOT s.cust_id IS NULL" in g
-        # Sheet4：主表直传字段正常；经子查询加工字段保守呈现（穿透缺口⑥，
-        # 物理源在表3贴码，不编造）
+        assert len(jrows) == 4
+        by_right = {r[3]: r for r in jrows}
+        # 锚行：右表=子查询驱动表，右别名=锚 b，定义片段逐字
+        b_row = by_right["ods_order_pay"]
+        assert (b_row[1], b_row[2], b_row[4], b_row[5]) == (
+            "dwd_cust_main", "a", "b", "LEFT JOIN")
+        assert "a.cust_id = b.cust_id" in b_row[6]
+        assert "【逻辑从表 b · 定义】(" in b_row[6]
+        assert "GROUP BY e.cust_id" in b_row[6]
+        # 内部表行（每表一行，指回最外层锚）
+        g_row = by_right["ods_pay_channel"]
+        assert (g_row[1], g_row[2], g_row[4], g_row[5]) == (
+            "ods_order_pay", "e", "g", "INNER JOIN")
+        assert "【b 内】e.channel_id = g.channel_id" in g_row[6]
+        # 直接 JOIN 行
+        f_row = by_right["dim_cust_grade"]
+        assert (f_row[1], f_row[5]) == ("dwd_cust_main", "INNER JOIN")
+        assert "a.grade_id = f.grade_id" in f_row[6]
+        # 包裹残余行（D-b：虚拟逻辑表，方式空，装外层限定）
+        s_row = jrows[-1]
+        assert (s_row[1], s_row[3], s_row[4]) == (
+            "dwd_cust_main", "虚拟逻辑表 s", "s")
+        assert s_row[5] in ("", None)
+        assert "限定：NOT s.cust_id IS NULL" in s_row[6]
+        assert "【s 内】关联见上" in s_row[6]
+        # Sheet4：主表直传字段正常（别名经 Sheet3 注册表回填）；经子查询加工
+        # 字段保守呈现（穿透缺口⑥，物理源在表3贴码，不编造）
         frows = _rows(out, "4需求字段")
         by = {r[10]: r for r in frows}
-        assert by["total_amt"][5] == "数据加工"          # 经虚拟表保守判加工
+        assert by["total_amt"][5] == "数据加工"
         assert "虚拟表 b" in (by["total_amt"][2] or "")
         assert "表3预处理" in (by["total_amt"][12] or "")
         assert by["cust_id"][5] == "直接复制"
         assert by["cust_id"][2] == "dwd_cust_main"
+        assert by["cust_id"][3] == "a"          # 别名注册表回填（实测问题2修复）
+
+
+# ═══════════════════════════════════════════════════════════════
+# 嵌套包裹（case_29：FROM (t1 ⋈ ((t2⋈t3) tt GROUP BY) b ⋈ t4) s WHERE rn=1）
+# ═══════════════════════════════════════════════════════════════
+
+class TestWrappedNestedSubqueries:
+
+    def test_user_case_four_rows(self, tmp_path):
+        """用户实测案例（2026-11-03）：嵌套子查询包裹 → 四行（t1⋈t2-b /
+        t2⋈t3【b 内】/ t1⋈t4 / t1⋈虚拟s 开窗收敛），D-a 左表=驱动表。"""
+        et = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / \
+            "case_29_wrapped_nested_subqueries" / "execution_tasks.xlsx"
+        bag = _bag(tmp_path, et)
+        out = tmp_path / "spec.xlsx"
+        _run_spec(["--dir", str(bag), "--output", str(out)])
+
+        srows = _rows(out, "2数据源清单")
+        assert {r[2] for r in srows} == {"dwd_cust_main", "ods_cust_pay",
+                                         "ods_channel", "dim_cust_grade"}
+        jrows = _rows(out, "3表关联")
+        assert len(jrows) == 4
+        r1, r2, r3, r4 = jrows
+        # 行1：t1 ⋈ t2（b 的驱动表），右别名=锚 b，定义片段含嵌套 tt（整块逐字）
+        assert (r1[1], r1[2], r1[3], r1[4], r1[5]) == (
+            "dwd_cust_main", "m", "ods_cust_pay", "b", "LEFT JOIN")
+        assert "m.cust_id = b.cust_id" in r1[6]
+        assert "【逻辑从表 b · 定义】(" in r1[6]
+        assert "GROUP BY tt.cust_id" in r1[6]           # tt 层在 b 片段内逐字
+        # 行2：t2 ⋈ t3（D-a：左表=驱动表），指回最外层锚 b
+        assert (r2[1], r2[2], r2[3], r2[4], r2[5]) == (
+            "ods_cust_pay", "p", "ods_channel", "ch", "LEFT JOIN")
+        assert "【b 内】p.channel_id = ch.channel_id" in r2[6]
+        assert "参与逻辑从表 b，定义见 ods_cust_pay 行" in r2[6]
+        # 行3：直接 JOIN
+        assert (r3[3], r3[5]) == ("dim_cust_grade", "LEFT JOIN")
+        assert "m.grade_id = g.grade_id" in r3[6]
+        # 行4：包裹残余行（D-b：虚拟逻辑表，方式空，开窗收敛）
+        assert (r4[1], r4[3], r4[4]) == ("dwd_cust_main", "虚拟逻辑表 s", "s")
+        assert r4[5] in ("", None)
+        assert "限定：s.rn = 1（开窗收敛，窗口定义见原文）" in r4[6]
+        assert "【s 内】关联见上" in r4[6]
+        # Sheet4：别名经 Sheet3 注册表回填（实测问题2）
+        frows = _rows(out, "4需求字段")
+        by = {r[10]: r for r in frows}
+        assert {r[10] for r in frows} == {"order_id", "cust_name",
+                                          "pay_channel", "grade_name"}
+        assert by["order_id"][3] == "m"
+        assert by["grade_name"][3] == "g"
+        assert by["order_id"][5] == "直接复制"
 
 
 class TestJoinKindNormalization:

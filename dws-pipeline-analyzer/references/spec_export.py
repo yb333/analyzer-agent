@@ -251,6 +251,16 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
     # ── Sheet3 表关联：行集语义段式重组 + E1 单表行（§三，口径在 spec_extract）──
     sheet3 = build_sheet3_rows(ctx)
 
+    # 别名注册表（表名→别名，来自 Sheet3 行；包裹形态引擎穿透 alias 为空时回填）
+    alias_registry: dict = {}
+    for r in sheet3:
+        for tbl_cell, alias_cell in ((r[1], r[2]), (r[3], r[4])):
+            t = str(tbl_cell or "").strip()
+            a = str(alias_cell or "").strip()
+            if t and a and " " not in t and "（" not in t and "—" not in t \
+                    and not t.startswith("虚拟"):
+                alias_registry.setdefault(split_schema_table(t)[1].lower(), a)
+
     # ── Sheet4 需求字段：终态字段 × 物理源穿透（§四；逻辑列=拆解式）──
     sheet4 = []
     target_field_comments = knowledge.get("meta", {}).get("target_field_comments", {}) or {}
@@ -397,10 +407,12 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
                         if norm_name(_tbl) == norm_name(ps_table_full):
                             a = _al.lower()   # 步骤别名表键为大写，呈现贴原文小写
                             break
+                if not a:
+                    # 兜底②：Sheet3 行别名注册表反查（包裹形态穿透 alias 为空）
+                    a = alias_registry.get(ps_table.lower(), "")
                 src_ref_parts.append((a, ps_field))
-            a = ps.get("alias", "")
-            if a and a not in aliases:
-                aliases.append(a)
+                if a and a not in aliases:
+                    aliases.append(a)
             if remark and remark not in remarks:
                 remarks.append(remark)
             t_ps = ps.get("transform", "")
