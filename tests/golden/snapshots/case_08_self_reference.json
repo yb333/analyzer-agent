@@ -429,7 +429,7 @@
     "",
     "dwb_incremental_f",
     "主表",
-    "NOT EXISTS(SELECT 1 FROM dws.dwb_incremental_f t t.order_id = s.order_id)",
+    "NOT EXISTS(SELECT 1 FROM dws.dwb_incremental_f t WHERE t.order_id = s.order_id)",
     "",
     "",
     ""

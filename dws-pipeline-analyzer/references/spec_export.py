@@ -249,7 +249,8 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
         })
 
     # ── Sheet3 表关联：行集语义段式重组 + E1 单表行（§三，口径在 spec_extract）──
-    sheet3 = build_sheet3_rows(ctx)
+    sheet3 = build_sheet3_rows(
+        ctx, sq_sqls=(engine_ctx or {}).get("subquery_sqls") or {})
 
     # 别名体系：Sheet3 行别名对（表短名, 别名）→ 物理别名集 / 表→别名（非锚
     # 优先）/ 别名→表反查（代入升级用）；锚 = 逻辑从表别名（可被代入替换）

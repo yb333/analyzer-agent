@@ -358,8 +358,11 @@ class ViewContext:
         return amap
 
     def step_where(self, step_id: str) -> str:
-        """步骤 WHERE 子句（去掉 WHERE 前缀）。"""
-        return (self.df_step(step_id).get("where_clause", "") or "").replace("WHERE ", "")
+        """步骤 WHERE 子句（只剥行首 WHERE 前缀——全局 replace 会吞掉
+        子查询内部的 WHERE，是历史上 NOT EXISTS 丢形的根因）。"""
+        import re as _re
+        return _re.sub(r"^WHERE\s+", "",
+                       (self.df_step(step_id).get("where_clause", "") or ""))
 
     # ── 字段来源解析（统一优先级）─────────────────────────
 

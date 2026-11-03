@@ -675,7 +675,7 @@ class TestRealNestedChain:
         jrows = _rows(out, "3表关联")
         assert len(jrows) == 4
         s_row = jrows[-1]
-        assert "限制：b.is_flag IS NOT NULL" in s_row[6]      # 内层 WHERE 落位
+        assert "限制：NOT b.is_flag IS NULL" in s_row[6]  # 引擎渲染归一（结构保真）      # 内层 WHERE 落位
         assert "限定：s.rn = 1（开窗收敛，窗口定义见原文）" in s_row[6]
         b_row = next(r for r in jrows if r[4] == "b")
         assert "SUM(tt.is_flag) > 0" in b_row[6]
@@ -751,7 +751,7 @@ class TestNestedSubquery:
         g = sq[6]
         assert "a.cust_id = b.cust_id" in g                       # ON 原文（外层别名）
         assert "限制：a.stat_date = '20261031'" in g              # 外层 WHERE 落限制段
-        assert "预处理：(" in g
+        assert "【逻辑从表 b · 定义】(" in g   # 波2b 统一挂载标签
         for frag in ("JOIN ods.ods_pay_channel g ON e.channel_id = g.channel_id",
                      "WHERE e.del_flag = 'N'", "GROUP BY e.cust_id"):
             assert frag in g, f"子查询贴码缺: {frag}"

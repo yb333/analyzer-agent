@@ -52,60 +52,14 @@ def _join_kind(jt: str) -> str:
 # 子查询关联（main-subquery，2026-11-02 嵌套子查询方案）
 # ════════════════════════════════════════════════════════════
 
-def _locate_subquery(raw_sql: str, subquery_sql: str) -> int:
-    """引擎 subquery_sql 是归一化文本（空白可能不同）→ 用 token 序列空白不敏感
-    定位其开头在 raw_sql 中的位置；返回子查询首 "(" 的下标，失败 -1。"""
-    if not raw_sql or not subquery_sql:
-        return -1
-    head = re.sub(r"^\(", "", subquery_sql.strip())[:40].split()
-    if not head:
-        return -1
-    pattern = r"\s+".join(re.escape(t) for t in head)
-    m = re.search(pattern, raw_sql, re.S)
-    if not m:
-        return -1
-    open_idx = raw_sql.rfind("(", 0, m.start())
-    return open_idx if open_idx != -1 else -1
-
-
-def _subquery_verbatim(raw_sql: str, subquery_sql: str, alias: str) -> tuple:
-    """(外层 join 关键字, 贴码用子查询原文)。
-
-    原文优先从 raw_sql 括号配平提取（贴码纪律：逐字）；定位失败回退引擎
-    subquery_sql（归一化文本，信息等价）。join 关键字读不出时兜底 INNER JOIN。
-    """
-    idx = _locate_subquery(raw_sql, subquery_sql)
-    if idx >= 0:
-        depth, span_end = 0, -1
-        for i in range(idx, len(raw_sql)):
-            if raw_sql[i] == "(":
-                depth += 1
-            elif raw_sql[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    span_end = i
-                    break
-        sql_text = raw_sql[idx:span_end + 1] if span_end > idx else subquery_sql
-        m = re.search(r"(LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\s*$",
-                      raw_sql[:idx], re.I | re.S)
-        if m:
-            kw = (m.group(1) + " JOIN") if m.group(1) else "JOIN"
-            return _join_kind(kw), sql_text
-        return "INNER JOIN", sql_text
-    return "INNER JOIN", subquery_sql
 
 
 def _subquery_index(ctx) -> dict:
-    """join_paths 子查询索引：{step_id: {外层别名: {sql/main_table/tables/on/...}}}。
+    """join_paths 子查询索引（引擎结构，波2b 起纯检测用）。
 
-    数据源 = data_flow.join_paths[*].subquery_sql / subquery_tables / df joins
-    的 ON 条件（引擎结构化产出，零二次解析）。
-
-    两形态（2026-11-02 实测拆分）：
-    - JOIN 子查询（a JOIN (…) b）→ main-subquery 行（右表=主物理源）
-    - FROM 包裹（FROM (…) s，整个 FROM 是子查询）→ 虚拟逻辑表行（右表不写
-      物理表名——s 是多表加工出的虚拟表；引擎此形态 joins 全是空条件展开行，
-      ON 只存在于子查询原文里）
+    {step_id: {外层别名: {main_table, main_alias, tables, table_list, on,
+    is_from_wrap}}}——片段文本/关联方式/内部表 ON 全部由 data_blocks +
+    engine_ctx.subquery_sqls 装配（零文本解析）。
     """
     out: dict = {}
     for s in ctx.data_flow_steps:
@@ -117,7 +71,6 @@ def _subquery_index(ctx) -> dict:
             if not sql:
                 continue
             main_tbl, main_alias, tables, table_list = "", "", set(), []
-            inner_tables = []      # 子查询内的非驱动物理表 [(表全名, 别名)]
             for t in info.get("subquery_tables") or []:
                 if isinstance(t, (list, tuple)) and len(t) >= 2 and t[0]:
                     tables.add(t[0].lower())
@@ -125,8 +78,6 @@ def _subquery_index(ctx) -> dict:
                         table_list.append(t[0])
                     if not main_tbl and (len(t) < 3 or t[2] == "main"):
                         main_tbl, main_alias = t[0], t[1]
-                    else:
-                        inner_tables.append((t[0], t[1]))
             on = ""
             join_type = ""
             for j in s.get("joins", []):
@@ -134,296 +85,21 @@ def _subquery_index(ctx) -> dict:
                     on = j.get("join_condition", "")
                     join_type = j.get("join_type", "")
                     break
-            kind, sql_text = _subquery_verbatim(s.get("raw_sql", ""), sql, alias)
             out.setdefault(sid, {})[alias] = {
-                "sql": sql_text, "main_table": main_tbl,
-                "main_alias": main_alias, "tables": tables,
-                "table_list": table_list, "inner_tables": inner_tables,
-                "on": on, "kind": kind,
+                "main_table": main_tbl, "main_alias": main_alias,
+                "tables": tables, "table_list": table_list, "on": on,
                 "is_from_wrap": (join_type or "").upper().startswith("FROM"),
             }
     return out
 
 
-def _step_main_table(ctx, sid: str) -> tuple:
-    """步骤主表（FROM 驱动表）：df joins 首个非子查询物理表 (表名, 别名)。"""
-    for j in ctx.df_step(sid).get("joins", []):
-        st = j.get("source_table", "")
-        if st and not st.startswith("(subquery:"):
-            return st, j.get("alias", "")
-    return "", ""
-
-
-def _inner_join_of(fragment: str, alias: str) -> tuple:
-    """从子查询片段原文提内部表的 verbatim ON 与 join 关键字。
-
-    Returns: (kind, on)；找不到 → ("", "")（行仍出，ON 由片段兜底）。
-    """
-    pat = (rf"(LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\s+\S+\s+(?:AS\s+)?{re.escape(alias)}"
-           rf"\s+ON\s+(.+?)(?=\s+(?:LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\b"
-           rf"|\bWHERE\b|\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\)|$)")
-    m = re.search(pat, fragment or "", re.I | re.S)
-    if not m:
-        return "", ""
-    return _join_kind((m.group(1) or "JOIN") + " JOIN"), m.group(2).strip()
-
-
-# ════════════════════════════════════════════════════════════
-# 包裹片段分解器（W4，2026-11-03 用户案例：FROM (嵌套子查询包裹) s WHERE）
-# ════════════════════════════════════════════════════════════
-
-_JOIN_KW_RE = re.compile(r"\b(LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\b", re.I)
-_FROM_KW_RE = re.compile(r"\bFROM\b", re.I)
-_CLAUSE_KW_RE = re.compile(
-    r"\b(?:LEFT|RIGHT|INNER|FULL|CROSS)?\s*JOIN\b|\bWHERE\b|\bGROUP\s+BY\b"
-    r"|\bHAVING\b|\bORDER\s+BY\b", re.I)
-_WORD_RE = re.compile(r"[\w.]+")
-_WS_RE = re.compile(r"\s+")
-
-
-def _depth_map(s: str) -> list:
-    """每个字符位置前的括号深度（depth-0 = 顶层）。"""
-    d, depth = [0] * len(s), 0
-    for i, ch in enumerate(s):
-        d[i] = depth
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-    return d
-
-
-def _balanced(s: str, open_idx: int) -> int:
-    """配平右括号下标；不平衡 → -1。"""
-    depth = 0
-    for i in range(open_idx, len(s)):
-        if s[i] == "(":
-            depth += 1
-        elif s[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
-
-
-def _parse_join_target(body: str, pos: int) -> tuple:
-    """解析 JOIN/FROM 目标：表名或 (子查询)，及别名。
-
-    Returns: (end_pos, {"kind"?, "table", "alias", "sub_sql"?})
-    """
-    m = _WS_RE.match(body, pos)
-    if m:
-        pos = m.end()
-    def _skip_as(p):
-        """跳过可选的 AS 关键字（真实 SQL 常见 `) AS b` / `tbl AS b` 风格）。"""
-        m2 = _WS_RE.match(body, p)
-        if not m2:
-            return p
-        am = _WORD_RE.match(body, m2.end())
-        if am and am.group(0).upper() == "AS":
-            m3 = _WS_RE.match(body, am.end())
-            return m3.end() if m3 else am.end()
-        return p
-
-    if pos < len(body) and body[pos] == "(":
-        close = _balanced(body, pos)
-        if close == -1:
-            return pos, {}
-        sub_sql = body[pos:close + 1]
-        pos = _skip_as(close + 1)
-        m2 = _WS_RE.match(body, pos)
-        if m2:
-            pos = m2.end()
-        am = _WORD_RE.match(body, pos)
-        alias = am.group(0) if am else ""
-        if am:
-            pos = am.end()
-        return pos, {"alias": alias, "sub_sql": sub_sql}
-    tm = _WORD_RE.match(body, pos)
-    if not tm:
-        return pos, {}
-    table = tm.group(0)
-    pos = _skip_as(tm.end())
-    m2 = _WS_RE.match(body, pos)
-    if m2:
-        pos2 = m2.end()
-        am = _WORD_RE.match(body, pos2)
-        # 下一词是别名（不是 ON/WHERE 等关键字）
-        if am and am.group(0).upper() not in ("ON", "WHERE", "GROUP", "ORDER",
-                                              "HAVING", "LEFT", "RIGHT",
-                                              "INNER", "FULL", "CROSS", "JOIN"):
-            return am.end(), {"table": table, "alias": am.group(0)}
-    return pos, {"table": table, "alias": ""}
-
-
-def _decompose_wrapper(fragment: str) -> dict:
-    """包裹片段结构化分解（含 FROM 子查询链递归下探）。
-
-    fragment = "(SELECT … ) s" 逐字原文。Returns:
-      {"ok", "from": (表全名, 别名),
-       "joins": [{"is_sub", "kind", "alias"?, "table"?, "on"?, "sub_sql"?,
-                  "sub_from"?, "sub_inner"?} …按 SQL 出现顺序]}
-    """
-    body = fragment.strip()
-    if body.startswith("("):
-        close = _balanced(body, 0)
-        if close == -1:
-            return {"ok": False}
-        body = body[1:close]
-    dm = _depth_map(body)
-    # 片段内顶层 WHERE（s 层行集条件——分解后必须有落位，防信息丢失）
-    inner_where = ""
-    wm = next((m for m in re.finditer(r"\bWHERE\b", body, re.I)
-               if dm[m.start()] == 0), None)
-    if wm is not None:
-        nxt = re.search(r"\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|$",
-                        body[wm.end():], re.I)
-        inner_where = body[wm.end():wm.end() + (nxt.start() if nxt else 0)].strip()
-    # FROM 目标
-    fm = next((m for m in _FROM_KW_RE.finditer(body) if dm[m.start()] == 0), None)
-    if fm is None:
-        return {"ok": False}
-    pos, target = _parse_join_target(body, fm.end())
-    if not target:
-        return {"ok": False}
-    joins = []
-    # 顶层 JOIN 子句（按出现序）
-    tops = [m for m in _JOIN_KW_RE.finditer(body) if dm[m.start()] == 0]
-    clause_ends = [m.start() for m in _CLAUSE_KW_RE.finditer(body)
-                   if dm[m.start()] == 0] + [len(body)]
-    for tm_ in tops:
-        kind = _join_kind((tm_.group(1) or "JOIN") + " JOIN") if tm_.group(1) \
-            else "INNER JOIN"
-        p, tgt = _parse_join_target(body, tm_.end())
-        if not tgt:
-            continue
-        # ON 条件：到下一个顶层子句关键字
-        om = re.match(r"\s*ON\b", body[p:], re.I)
-        on = ""
-        if om:
-            on_start = p + om.end()
-            nxt = min(e for e in clause_ends if e > on_start)
-            on = body[on_start:nxt].strip()
-        entry = {"is_sub": "sub_sql" in tgt, "kind": kind, "on": on,
-                 "alias": tgt.get("alias", "")}
-        if entry["is_sub"]:
-            entry["sub_sql"] = tgt["sub_sql"]
-            sf, si = _slave_expand(tgt["sub_sql"])
-            entry["sub_from"], entry["sub_inner"] = sf, si
-        else:
-            entry["table"] = tgt.get("table", "")
-        joins.append(entry)
-    # FROM 目标本身是子查询 → 递归下探取驱动表（其内层 JOIN 归入本层 joins 头部）
-    if "sub_sql" in target:
-        sf, si = _slave_expand(target["sub_sql"])
-        from_ref = sf
-        for it in reversed(si):
-            joins.insert(0, {"is_sub": False, "kind": it["kind"],
-                             "table": it["table"], "alias": it["alias"],
-                             "on": it["on"]})
-    else:
-        from_ref = (target.get("table", ""), target.get("alias", ""))
-    if not from_ref[0]:
-        return {"ok": False}
-    return {"ok": True, "from": from_ref, "joins": joins,
-            "inner_where": inner_where}
-
-
-def _slave_expand(sub_sql: str, depth: int = 0) -> tuple:
-    """子查询（逻辑从表）定义 → (驱动表(表,别名), 内部物理 JOIN 清单)。
-
-    FROM 链上的嵌套子查询递归下探（tt→p/ch 形态）；驱动表 = 最深层 FROM 首表；
-    各层直接表 JOIN 全部收进 inner（行标签用最外层锚，docs/14 §四）。
-    更深的 JOIN 子查询不展开（整块留在原文）。
-    """
-    if depth > 5:
-        return ("", ""), []
-    body = sub_sql.strip()
-    if body.startswith("("):
-        close = _balanced(body, 0)
-        if close == -1:
-            return ("", ""), []
-        body = body[1:close]
-    dm = _depth_map(body)
-    fm = next((m for m in _FROM_KW_RE.finditer(body) if dm[m.start()] == 0), None)
-    if fm is None:
-        return ("", ""), []
-    pos, target = _parse_join_target(body, fm.end())
-    if not target:
-        return ("", ""), []
-    inner = []
-    tops = [m for m in _JOIN_KW_RE.finditer(body) if dm[m.start()] == 0]
-    clause_ends = [m.start() for m in _CLAUSE_KW_RE.finditer(body)
-                   if dm[m.start()] == 0] + [len(body)]
-    for tm_ in tops:
-        kind = _join_kind((tm_.group(1) or "JOIN") + " JOIN") if tm_.group(1) \
-            else "INNER JOIN"
-        p, tgt = _parse_join_target(body, tm_.end())
-        if not tgt or "sub_sql" in tgt:
-            continue    # 深层子查询 JOIN 不展开（原文兜底）
-        om = re.match(r"\s*ON\b", body[p:], re.I)
-        on = ""
-        if om:
-            on_start = p + om.end()
-            nxt = min(e for e in clause_ends if e > on_start)
-            on = body[on_start:nxt].strip()
-        inner.append({"table": tgt.get("table", ""), "alias": tgt.get("alias", ""),
-                      "on": on, "kind": kind})
-    if "sub_sql" in target:
-        sf, si = _slave_expand(target["sub_sql"], depth + 1)
-        inner.extend(si)
-        return sf, inner
-    return (target.get("table", ""), target.get("alias", "")), inner
-
-
-# ════════════════════════════════════════════════════════════
-# 多跳值链代入器（docs/14 P3 跨聚合层级，五轮修订⑯，2026-11-03）
-# ════════════════════════════════════════════════════════════
-
-
-
-
-
-
-
-def _squeeze(s: str) -> str:
-    return re.sub(r"\s+", "", s or "")
-
-
-def _maybe_verbatim(pred_text: str, raw_sqls: list) -> str:
-    """子查询谓词保真（贴原文原则）：引擎 where_clause 对子查询会丢形（如内部
-    WHERE 关键字被吞，"t WHERE x" → "t x"）。谓词含 EXISTS/IN(SELECT 时，从
-    步骤 raw_sql 的顶层 WHERE 原文找回（相似度≥0.6 校验同源）；找不到 → 原样。
-    """
-    if not pred_text or not raw_sqls:
-        return pred_text
-    up = pred_text.upper()
-    if "EXISTS(" not in up and "IN (SELECT" not in up and "IN(SELECT" not in up:
-        return pred_text
-    from difflib import SequenceMatcher
-    target = _squeeze(pred_text)
-    for raw in raw_sqls:
-        if not raw:
-            continue
-        m = re.search(r"\bWHERE\b(.*?)(?=\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b"
-                      r"|\bLIMIT\b|\Z)", raw, re.S | re.I)
-        if not m:
-            continue
-        body = m.group(1).strip().rstrip(";").strip()
-        if body and SequenceMatcher(None, _squeeze(body), target).ratio() >= 0.6:
-            return body
-    return pred_text
-
-
-# ════════════════════════════════════════════════════════════
-# Sheet4：拆解式字段逻辑（§四）
-# ════════════════════════════════════════════════════════════
 
 def _strip_as_alias(expr_sql: str) -> str:
     """表达式去尾部 "AS 别名"（纯文本切，逐字保真；非 AS 形态原样返回）。"""
     s = (expr_sql or "").strip().rstrip(";").strip()
     m = re.match(r"^(.+?)\s+[Aa][Ss]\s+[A-Za-z_][\w$]*$", s, re.S)
     return m.group(1).strip() if m else s
+
 
 
 def decompose_field_logic(raw_sql: str, transform_type: str = "") -> str:
@@ -435,6 +111,49 @@ def decompose_field_logic(raw_sql: str, transform_type: str = "") -> str:
     if not raw_sql:
         return ""
     return _strip_as_alias(raw_sql)
+
+
+def _iter_blocks(blocks):
+    """递归迭代全部块。"""
+    for b in blocks or []:
+        yield b
+        yield from _iter_blocks(b.get("children") or [])
+
+
+def _descend_main(block) -> tuple:
+    """子查询块的驱动表 (表全名, 别名)：子孙里第一个 inner_main。"""
+    for c in _iter_blocks((block or {}).get("children") or []):
+        if c.get("type") == "inner_main" and c.get("table"):
+            return c["table"], c.get("alias", "")
+    return "", ""
+
+
+def _slave_rows(anchor_block, left_tbl: str, left_alias: str,
+                frag: str, anchor: str) -> list:
+    """逻辑从表块 → 锚行 + 内部表每表一行（嵌套层全部收录，指回最外层锚，
+    docs/14 §四整块不拆层：嵌套子查询定义留在渲染 SQL 内）。"""
+    rows = []
+    drv_tbl, drv_alias = _descend_main(anchor_block)
+    if not drv_tbl:
+        return rows
+    _, l_short = split_schema_table(left_tbl)
+    _, d_short = split_schema_table(drv_tbl)
+    parts = ([anchor_block.get("on_condition", "")]
+             if anchor_block.get("on_condition") else [])
+    if frag:
+        parts.append(f"【逻辑从表 {anchor} · 定义】{frag}")
+    rows.append([None, l_short, left_alias, d_short, anchor,
+                 _join_kind(anchor_block.get("join_type", "")),
+                 "；".join(parts)])
+    for blk in _iter_blocks(anchor_block.get("children") or []):
+        if blk.get("type") == "inner_secondary" and blk.get("table"):
+            _, b_short = split_schema_table(blk["table"])
+            g = ((f"【{anchor} 内】{blk.get('on_condition', '')}；")
+                 if blk.get("on_condition") else "") +                 f"参与逻辑从表 {anchor}，定义见 {d_short} 行"
+            rows.append([None, d_short, drv_alias, b_short,
+                         blk.get("alias", ""),
+                         _join_kind(blk.get("join_type", "")), g])
+    return rows
 
 
 # ════════════════════════════════════════════════════════════
@@ -587,13 +306,14 @@ def _chain_group_segments(ctx, exclude=None) -> list:
     return segs
 
 
-def build_sheet3_rows(ctx) -> list:
+def build_sheet3_rows(ctx, sq_sqls: dict = None) -> list:
     """ViewContext → Sheet3 行（7 列模型）。
 
     段式 G 列（docs/17 §三）：{ON}；限制：…；写入前限制：…；预处理：贴码；
     主表链预处理：分组/保留。段按需出现，"；" 分隔。
     E1：无任何关联行时，每物理源表一行（右表=—（无关联）），行级限制落首行。
     """
+    sq_sqls = sq_sqls or {}
     base = ctx.logic_join_rows()
     sq_index = _subquery_index(ctx)
     tmp_chains = _tmp_chain_index(ctx)
@@ -635,9 +355,9 @@ def build_sheet3_rows(ctx) -> list:
         m = re.search(r"；WHERE (.+)$", cond, re.S)
         if m:
             raw_w = m.group(1).strip()
-            limit_seg = _maybe_verbatim(raw_w, raw_sqls)   # 渲染用保真文本
+            limit_seg = raw_w
             cond = cond[:m.start()].strip()
-            attached_wheres.append(raw_w)                   # 记账用原文（去重口径）
+            attached_wheres.append(raw_w)
         parts = [cond] if cond else []
         if limit_seg:
             parts.append(f"限制：{limit_seg}")
@@ -652,106 +372,6 @@ def build_sheet3_rows(ctx) -> list:
                      _join_kind(row.join_type), "；".join(parts)])
         last_pos_by_step[row.step_id] = len(rows) - 1
 
-    # ── 子查询关联行（嵌套子查询，docs/17 §三），两形态 ──
-    for sid, by_alias in sq_index.items():
-        for alias, info in by_alias.items():
-            if info["is_from_wrap"]:
-                # FROM 包裹（FROM (…) s，W4 分解模型）：片段结构化分解——
-                # 直接表 JOIN 行 + JOIN 子查询行（锚+定义+内部表行，指回最外层锚）
-                # + 包裹残余行（D-b：右表=虚拟逻辑表，方式空，装外层限定/开窗收敛）
-                sw = ctx.step_where(sid)
-                dec = _decompose_wrapper(info["sql"])
-                if dec.get("ok"):
-                    from_tbl, from_alias = dec["from"]
-                    _, f_short = split_schema_table(from_tbl)
-                    for jn in dec["joins"]:
-                        if jn.get("is_sub"):
-                            sf_tbl, sf_alias = jn.get("sub_from") or ("", "")
-                            if not sf_tbl:
-                                continue
-                            _, s_short = split_schema_table(sf_tbl)
-                            parts = ([jn["on"]] if jn["on"] else []) + [
-                                f"【逻辑从表 {jn['alias']} · 定义】{jn['sub_sql']}"]
-                            rows.append([None, f_short, from_alias, s_short,
-                                         jn["alias"], jn["kind"],
-                                         "；".join(parts)])
-                            for it in jn.get("sub_inner") or []:
-                                _, it_short = split_schema_table(it["table"])
-                                g2 = ((f"【{jn['alias']} 内】{it['on']}；")
-                                      if it["on"] else "") + \
-                                     f"参与逻辑从表 {jn['alias']}，定义见 {s_short} 行"
-                                rows.append([None, s_short, sf_alias, it_short,
-                                             it["alias"], it["kind"], g2])
-                        else:
-                            _, j_short = split_schema_table(jn["table"])
-                            rows.append([None, f_short, from_alias, j_short,
-                                         jn["alias"], jn["kind"], jn["on"]])
-                    resid = []
-                    if dec.get("inner_where"):
-                        resid.append(f"限制：{dec['inner_where']}")
-                    if sw and sw not in attached_wheres:
-                        note = ("（开窗收敛，窗口定义见原文）"
-                                if re.search(r"\brn\s*=", sw) else "")
-                        resid.append(f"限定：{sw}{note}")
-                        attached_wheres.append(sw)
-                    resid.append(f"【{alias} 内】关联见上")
-                    rows.append([None, f_short, from_alias,
-                                 f"虚拟逻辑表 {alias}", alias, "",
-                                 "；".join(resid)])
-                    last_pos_by_step[sid] = len(rows) - 1
-                    continue
-                # 分解失败 → 虚拟逻辑表兜底（拆不出就贴原文）
-                if not info["table_list"]:
-                    continue
-                short_tables = [split_schema_table(t)[1] for t in info["table_list"]]
-                parts = [
-                    f"预处理（虚拟表 {alias} 由 {'、'.join(short_tables)} "
-                    f"关联加工而来）：{info['sql']}"
-                ]
-                if sw and sw not in attached_wheres:
-                    parts.append(f"限制：{sw}")
-                    attached_wheres.append(sw)
-                _, l_tbl = split_schema_table(info["main_table"] or "")
-                rows.append([None, l_tbl, info["main_alias"],
-                             f"虚拟逻辑表 {alias}", alias, "",
-                             "；".join(parts)])
-                last_pos_by_step[sid] = len(rows) - 1
-                continue
-            # JOIN 子查询（a JOIN (…) b）：右表=子查询主物理源，
-            # 右别名=外层别名（ON 里真实引用的样子），预处理贴子查询原文——
-            # 子查询内部的关联/过滤/分组信息全部收进贴码，不单独成行
-            main_tbl, main_alias = _step_main_table(ctx, sid)
-            if not main_tbl:
-                continue
-            parts = [info["on"]] if info["on"] else []
-            sw = ctx.step_where(sid)
-            if sw and sw not in attached_wheres:
-                parts.append(f"限制：{sw}")      # 展开行被移除时 WHERE 随主承载行落位
-                attached_wheres.append(sw)
-            parts.append("预处理：" + info["sql"])
-            _, l_tbl = split_schema_table(main_tbl)
-            _, r_tbl = split_schema_table(info["main_table"] or "")
-            row = [None, l_tbl, main_alias, r_tbl, alias, info["kind"],
-                   "；".join(parts)]
-            pos = last_pos_by_step.get(sid)
-            if pos is None:
-                rows.append(row)
-            else:
-                rows.insert(pos + 1, row)
-                last_pos_by_step[sid] = pos + 1
-            # 子查询内其余物理表：每表一行（【锚 内】ON 原文 + 指回锚行）——
-            # 引擎对子查询内 JOIN 不带条件（JOIN_SUBQUERY_* 空条件展开），
-            # ON 从片段原文提 verbatim（贴原文原则；提不到由片段兜底）
-            for it_tbl, it_alias in info.get("inner_tables", []):
-                kind2, on2 = _inner_join_of(info["sql"], it_alias or "")
-                _, it_short = split_schema_table(it_tbl)
-                g2 = (f"【{alias} 内】{on2}；" if on2 else "") + \
-                     f"参与逻辑从表 {alias}，定义见 {r_tbl} 行"
-                rows.append([None, r_tbl, info.get("main_alias", ""),
-                             it_short, it_alias,
-                             kind2 or "INNER JOIN", g2])
-                last_pos_by_step[sid] = len(rows) - 1
-
     # ── tmp 链物化无关行（docs/14 P1，C2/C3 拍板）：主表行（驱动表+定义挂载）
     #    + 生产步内物理表每表一行（【锚 内】ON 原文 + 指回）──
     for sid, chain in tmp_chains.items():
@@ -762,7 +382,7 @@ def build_sheet3_rows(ctx) -> list:
         for pid in chain["producer_ids"]:
             w = ctx.step_where(pid)
             if w:
-                prod_wheres.append(_maybe_verbatim(w, raw_sqls))
+                prod_wheres.append(w)
                 attached_wheres.append(w)
         if prod_wheres:
             parts.append("限定：" + "；".join(prod_wheres))
@@ -773,7 +393,7 @@ def build_sheet3_rows(ctx) -> list:
         # 终端步骤的行级 WHERE → 写入前限制（锚前缀即合法引用）
         tw = ctx.step_where(sid)
         if tw:
-            parts.append("写入前限制：" + _maybe_verbatim(tw, raw_sqls))
+            parts.append("写入前限制：" + tw)
             attached_wheres.append(tw)
         _, d_short = split_schema_table(drive_tbl)
         rows.append([None, None, d_short, drive_alias, None, "主表",
@@ -799,12 +419,85 @@ def build_sheet3_rows(ctx) -> list:
                              j.get("join_condition", "")])
                 last_pos_by_step[sid] = len(rows) - 1
 
+
+    # ── 子查询关联行（嵌套子查询，docs/17 §三，波2b 块装配零文本解析）──
+    for sid, by_alias in sq_index.items():
+        blocks = ctx.df_step(sid).get("data_blocks") or []
+        sqls = sq_sqls.get(sid, {})
+        for alias, info in by_alias.items():
+            sb = next((b for b in _iter_blocks(blocks)
+                       if b.get("alias") == alias
+                       and b.get("type") == "subquery"), None)
+            if info["is_from_wrap"]:
+                # FROM 包裹：子块行（直接 JOIN + 逻辑从表）+ 包裹残余行
+                if sb is None:
+                    continue
+                main_blk = next((c for c in sb.get("children") or []
+                                 if c.get("type") == "inner_main"
+                                 and c.get("table")), None)
+                if main_blk is None:
+                    continue
+                main_tbl = main_blk["table"]
+                main_alias = main_blk.get("alias", "")
+                _, m_short = split_schema_table(main_tbl)
+                for child in sb.get("children") or []:
+                    if child is main_blk:
+                        continue
+                    if child.get("type") == "inner_secondary" and child.get("table"):
+                        _, c_short = split_schema_table(child["table"])
+                        rows.append([None, m_short, main_alias, c_short,
+                                     child.get("alias", ""),
+                                     _join_kind(child.get("join_type", "")),
+                                     child.get("on_condition", "")])
+                    elif child.get("type") == "subquery":
+                        rows.extend(_slave_rows(
+                            child, main_tbl, main_alias,
+                            sqls.get(child.get("alias", ""), ""),
+                            child.get("alias", "")))
+                # 残余行（D-b：虚拟逻辑表，方式空）——内层限制 + 外层限定/开窗收敛
+                _wu = []
+                for w in ctx.df_step(sid).get("where_usage") or []:
+                    c = (w.get("condition") or "").strip()
+                    if c:
+                        c2 = c[7:] if c[:7].upper() == "WHERE S" or c[:6].upper() == "WHERE " else c
+                        c2 = re.sub(r"^WHERE\s+", "", c, flags=re.I).strip()
+                        if c2 and c2 not in _wu:
+                            _wu.append(c2)
+                sw = ctx.step_where(sid)
+                inner_ws = [w for w in _wu if w != sw] if sw else _wu
+                resid = ([f"限制：{'；'.join(inner_ws)}"] if inner_ws else [])
+                if sw and sw not in attached_wheres:
+                    note = ("（开窗收敛，窗口定义见原文）"
+                            if re.search(r"\brn\s*=", sw) else "")
+                    resid.append(f"限定：{sw}{note}")
+                    attached_wheres.append(sw)
+                resid.append(f"【{alias} 内】关联见上")
+                rows.append([None, m_short, main_alias,
+                             f"虚拟逻辑表 {alias}", alias, "", "；".join(resid)])
+                last_pos_by_step[sid] = len(rows) - 1
+                continue
+            # JOIN 子查询（a JOIN (…) b）：主表 = 步骤 main 块
+            main_blk = next((b for b in blocks
+                             if b.get("type") == "main" and b.get("table")), None)
+            if main_blk is None or sb is None:
+                continue
+            first_idx = len(rows)
+            rows.extend(_slave_rows(sb, main_blk["table"],
+                                    main_blk.get("alias", ""),
+                                    sqls.get(alias, ""), alias))
+            sw = ctx.step_where(sid)
+            if sw and sw not in attached_wheres and rows[first_idx:]:
+                rows[first_idx][6] = "；".join(
+                    x for x in [rows[first_idx][6], f"限制：{sw}"] if x)
+                attached_wheres.append(sw)
+            last_pos_by_step[sid] = len(rows) - 1
+
     # 未被附着的步骤 WHERE（logic_join_rows 对无 JOIN 步骤不产出承载行）
     unattached = []
     for s in ctx.steps_list:
         w = ctx.step_where(s.get("step_id", ""))
         if w and w not in attached_wheres:
-            unattached.append(_maybe_verbatim(w, raw_sqls))
+            unattached.append(w)
 
     chain_group = _chain_group_segments(ctx, exclude=chain_step_ids)
 
@@ -847,6 +540,11 @@ def build_sheet3_rows(ctx) -> list:
 # 谓词守恒校验（docs/17 §七）
 # ════════════════════════════════════════════════════════════
 
+
+def _squeeze(s: str) -> str:
+    return re.sub(r"\s+", "", s or "")
+
+
 def predicate_conservation(ctx, sheet3_rows: list, sheet4_rows: list) -> list:
     """每个步骤主查询的 WHERE / HAVING 谓词，必须落在 Sheet3 某段
     （限制 / 写入前限制 / 主表链预处理）或 Sheet4 逻辑列之一。
@@ -868,8 +566,7 @@ def predicate_conservation(ctx, sheet3_rows: list, sheet4_rows: list) -> list:
         label = s.get("rule_code", "") or sid
         w = ctx.step_where(sid)
         if w:
-            # 事实侧与渲染侧同用 _maybe_verbatim（子查询丢形修复），文本口径一致
-            w_v = _maybe_verbatim(w, raw_sqls)
+            w_v = w
             if _squeeze(w_v).lower() not in g_blob:
                 warnings.append({
                     "type": "predicate_missing_where",
