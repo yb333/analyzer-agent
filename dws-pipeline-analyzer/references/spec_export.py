@@ -300,10 +300,13 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
             if a and n:
                 cte_alias_to_name[a.lower()] = n
 
-    # 子查询外层别名集合（包裹形态下穿透会停在子查询别名，如 b.total_amt）
+    # 子查询别名全集：join_paths（外层包裹 s）∪ engine_ctx.subquery_sqls
+    # （含 JOIN 子查询 b、嵌套层 tt——join_paths 只记外层，嵌套内部靠引擎链通道）
     subq_alias_set = set()
     for _sid, _by in _subquery_index(ctx).items():
         subq_alias_set.update(a.lower() for a in _by)
+    for _sid, _sqls in ((engine_ctx or {}).get("subquery_sqls") or {}).items():
+        subq_alias_set.update(a.lower() for a in _sqls)
 
     def _resolve_cte_physical(name_or_alias: str):
         """CTE 名/主查询 CTE 别名 → 主物理源表名（解析不出 → ""）。"""
