@@ -514,6 +514,7 @@ def do_sync(src_repo: Path, tmp: Path, team_repo: Path, src_branch: str, team_br
                     cwd=team_repo, capture=True)
         if r.returncode == 0:
             done = True
+            break  # 成功即出循环（参考工具此处漏 break：成功后多跑一轮"假重试"空转）
         else:
             err = ((r.stderr or "") + (r.stdout or "")).strip()
             competitive = any(k in err for k in ("fetch first", "non-fast-forward", "stale info"))
