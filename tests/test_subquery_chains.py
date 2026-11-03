@@ -72,7 +72,9 @@ class TestSubqueryFieldChains:
         chains = extract_subquery_field_chains(parsed)
         dw = chains.get("dw_last_update_date")
         assert dw and dw[0]["alias"] == "s"
-        assert dw[0]["expression"].upper().startswith("SYSDATE")
+        # sqlglot oracle 方言对 sysdate() 归一渲染为 CURRENT_TIMESTAMP（结构保真）
+        assert dw[0]["expression"].upper() in ("SYSDATE", "SYSDATE()",
+                                               "CURRENT_TIMESTAMP")
         assert dw[0]["refs"] == []
 
     def test_no_subquery_empty(self):
