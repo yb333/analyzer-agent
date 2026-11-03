@@ -23,6 +23,11 @@ ALIAS_MAP = {
 }
 
 
+# sqlglot 版本敏感常量（嵌套子查询 AST 结构跨版本有差异，
+# 2026-11-03 内网 Win 实测非此版本导致 tt 层代入链断裂）
+SQLGLOT_REQUIRED = "28.10.1"
+
+
 def check_dependencies():
     """启动时检查依赖，缺失则友好提示安装（不抛 ImportError 堆栈）。
 
@@ -40,6 +45,13 @@ def check_dependencies():
         print(f"  请安装: pip install {' '.join(missing)}", file=sys.stderr)
         print(f"  （当前 Python: {sys.executable}）", file=sys.stderr)
         sys.exit(1)
+    # sqlglot 版本检测（warn 不 fail——近版本可能兼容，但 28.10.1 已验证）
+    import sqlglot
+    if sqlglot.__version__ != SQLGLOT_REQUIRED:
+        print(f"[WARN] sqlglot {sqlglot.__version__} ≠ 已验证版本 "
+              f"{SQLGLOT_REQUIRED}——嵌套子查询代入链可能断裂",
+              file=sys.stderr)
+        print(f"  建议: pip install sqlglot=={SQLGLOT_REQUIRED}", file=sys.stderr)
 
 
 def main():

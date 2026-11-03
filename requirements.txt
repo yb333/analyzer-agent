@@ -1,4 +1,4 @@
-# 引擎解析底座——版本敏感（嵌套子查询 AST 结构跨版本有差异，
-# 内网 Win 实测因版本不同导致 tt 层代入链断裂，2026-11-03）
+# 引擎解析底座——sqlglot 版本敏感（嵌套子查询 AST 结构跨版本有差异）
+# 权威版本声明在 dws-pipeline-analyzer/requirements.txt（install.py 读那个）
 sqlglot==28.10.1
 openpyxl>=3.1.0
