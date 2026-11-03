@@ -1546,13 +1546,14 @@ def generate_mapping(knowledge, output_dir, engine_ctx=None):
     装配 + subquery_field_chains 展开态 + 四枚举 + 质量门）；
     未提供时走旧逻辑（ViewContext 直消费，向后兼容）。
     """
-    if engine_ctx is not None:
-        try:
-            from mapping_export import export_mapping
-            export_mapping(knowledge, engine_ctx, output_dir)
-            return True
-        except Exception as e:
-            print(f"  [WARN] mapping_export 失败（{e}），回退旧逻辑", file=sys.stderr)
+    # 统一走 mapping_export（engine_ctx 由内部 _ensure_subquery_chains
+    # 自足重建——view_generator 独立路径只读 knowledge_draft.json 也能用）
+    try:
+        from mapping_export import export_mapping
+        export_mapping(knowledge, engine_ctx or {}, output_dir)
+        return True
+    except Exception as e:
+        print(f"  [WARN] mapping_export 失败（{e}），回退旧逻辑", file=sys.stderr)
     try:
         from openpyxl import Workbook
     except ImportError:

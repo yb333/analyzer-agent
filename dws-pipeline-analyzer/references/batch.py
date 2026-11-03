@@ -364,9 +364,11 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
         group_variables = raw.get("group_variables", {}) or {}
         sqls = [r.query_sql for r in rules if r.query_sql]
         dialect = detect_dialect(sqls)
+        engine_ctx = {}
         knowledge, parsed_map = analyze_pipeline(
             rules, target_fields, group_variables, dialect,
             ddl_dir=ddl_dir, source_file="", rule_group_code=code,
+            context_out=engine_ctx,
         )
 
         # 生成 knowledge_draft.json
@@ -376,7 +378,7 @@ def _process_group(group, output_dir, raw, no_ai, ddl_dir):
             encoding="utf-8", newline="\n")
 
         # 生成交付件
-        generate_mapping(knowledge, str(out_dir))
+        generate_mapping(knowledge, str(out_dir), engine_ctx=engine_ctx)
         generate_asset_report(knowledge, str(out_dir))
         generate_tech_design(knowledge, str(out_dir))
 

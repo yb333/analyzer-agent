@@ -597,8 +597,8 @@
     "dws",
     "",
     "dwl_real_f",
-    "主表",
-    "t.del_flag = 'N'",
+    "限制：t.del_flag = 'N'",
+    "",
     "",
     "",
     ""
@@ -625,8 +625,8 @@
     "t",
     "product_id",
     "",
-    "直接映射",
-    "t.product_id",
+    "直接复制",
+    "",
     "product_id",
     "",
     ""
@@ -638,8 +638,8 @@
     "t",
     "product_name",
     "",
-    "直接映射",
-    "t.product_name",
+    "直接复制",
+    "",
     "product_name",
     "",
     ""
@@ -651,8 +651,8 @@
     "t",
     "price",
     "",
-    "直接映射",
-    "t.price",
+    "直接复制",
+    "",
     "price",
     "",
     ""

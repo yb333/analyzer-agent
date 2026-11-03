@@ -603,8 +603,8 @@
     "DWS",
     "",
     "DWB_FINAL_F",
+    "限定：t.DEL_FLAG = 'N'；【逻辑从表 t · 定义】SELECT\n    t.CONTRACT_NO,\n    t.AMOUNT\nFROM ODS.SOURCE_TABLE_A t\nWHERE t.DEL_FLAG = 'N'",
     "主表",
-    "t.DEL_FLAG = 'N'",
     "",
     "",
     ""
@@ -631,8 +631,8 @@
     "t",
     "CONTRACT_NO",
     "",
-    "直接映射",
-    "t.CONTRACT_NO",
+    "直接复制",
+    "",
     "CONTRACT_NO",
     "",
     ""
@@ -644,8 +644,8 @@
     "t",
     "AMOUNT",
     "",
-    "直接映射",
-    "t.AMOUNT",
+    "数据加工",
+    "SUM(t.AMOUNT)（经逻辑从表 t）",
     "TOTAL_AMOUNT",
     "",
     ""

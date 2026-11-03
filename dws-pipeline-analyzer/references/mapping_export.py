@@ -15,6 +15,42 @@ from pathlib import Path
 from viewmodel import build_context, split_schema_table
 
 
+def _ensure_subquery_chains(knowledge: dict, engine_ctx: dict) -> dict:
+    """engine_ctx 缺子查询链时从 knowledge data_flow 重建（独立路径自足）。
+
+    view_generator --input knowledge_draft.json 独立路径没有 engine_ctx
+    （subquery_field_chains / subquery_sqls 只在 pipeline_core 装配时产出）。
+    data_flow.steps[].raw_sql 在 knowledge 里，重新跑 extract_subquery_
+    field_chains 即可还原——与引擎同源，不是二次理解。
+    """
+    if engine_ctx.get("subquery_field_chains") is not None:
+        return engine_ctx  # 已有，不重建
+
+    from engine import parse_single_sql, extract_subquery_field_chains
+    chains, sqls = {}, {}
+    dialect = knowledge.get("meta", {}).get("dialect", "dws")
+    for step in knowledge.get("data_flow", {}).get("steps", []):
+        raw_sql = step.get("raw_sql", "")
+        if not raw_sql:
+            continue
+        try:
+            parsed = parse_single_sql(raw_sql, dialect)
+            ch, sq = extract_subquery_field_chains(parsed)
+            sid = step.get("step_id", "")
+            if ch:
+                chains[sid] = ch
+            if sq:
+                sqls[sid] = sq
+        except Exception:
+            continue
+    engine_ctx = dict(engine_ctx or {})
+    if chains:
+        engine_ctx["subquery_field_chains"] = chains
+    if sqls:
+        engine_ctx["subquery_sqls"] = sqls
+    return engine_ctx
+
+
 def build_mapping_model(knowledge: dict, engine_ctx: dict) -> dict:
     """knowledge + engine_ctx → mapping 行模型。
 
@@ -24,6 +60,7 @@ def build_mapping_model(knowledge: dict, engine_ctx: dict) -> dict:
     """
     from spec_export import build_spec_model, list_scenarios, select_scenario
 
+    engine_ctx = _ensure_subquery_chains(knowledge, engine_ctx or {})
     ctx = build_context(knowledge)
     scenarios = list_scenarios(knowledge)
 
@@ -95,11 +132,22 @@ def _to_entity_rows(sheet3: list, ctx) -> list:
     - 其余行：右表在 r[3]、右别名在 r[4]（标准左/右布局）
     - 虚拟逻辑表行：跳过
     """
+    # schema 查找表（从 entity_source_tables 建 {短表名→schema}）
+    schema_of = {}
+    for es in ctx.entity_source_tables():
+        if es.table:
+            schema_of[es.table.lower()] = es.schema
+
     seen = set()
     rows = []
     for r in sheet3:
         if r[5] == "主表":
+            # tmp 链主表行：r[2]=表名、r[3]=别名（SPEC 特有布局）
             table, alias = r[2] or "", r[3] or ""
+            left_table, left_alias = "", ""
+        elif (r[3] or "").startswith("—"):
+            # E1 单表行：r[1]=表名、r[2]=别名（右表是占位符）
+            table, alias = r[1] or "", r[2] or ""
             left_table, left_alias = "", ""
         else:
             table, alias = r[3] or "", r[4] or ""
@@ -113,6 +161,7 @@ def _to_entity_rows(sheet3: list, ctx) -> list:
         seen.add(key)
         rows.append({
             "table": table, "alias": alias,
+            "schema": schema_of.get(table.lower(), ""),
             "join_type": r[5] or "", "on_condition": r[6] or "",
             "left_table": left_table, "left_alias": left_alias,
             "target_schema": ctx.target_schema,
@@ -150,14 +199,14 @@ def render_mapping_xlsx(model: dict, output_path) -> Path:
     ws1.title = "实体级mapping"
     _style(ws1, ["源表schema", "源表物理表名", "源表别名", "源表中文名",
                  "目标表schema", "目标表中文名", "目标表物理表名",
-                 "关联&限定条件", "备注"])
+                 "关联&限定条件", "备注", "调度任务名称", "执行路径", "依赖参数"])
     for e in model["entity"]:
         ws1.append([
-            "", e["table"], e["alias"], "",
+            e.get("schema", ""), e["table"], e["alias"], "",
             e["target_schema"], e["target_cn"], e["target_table"],
-            e["on_condition"], e["join_type"],
+            e["on_condition"], e["join_type"], "", "", "",
         ])
-    for i, w in enumerate([10, 24, 10, 18, 10, 18, 24, 60, 10], 1):
+    for i, w in enumerate([10, 24, 10, 18, 10, 18, 24, 60, 10, 18, 18, 18], 1):
         ws1.column_dimensions[get_column_letter(i)].width = w
 
     # Sheet 2: 属性级
