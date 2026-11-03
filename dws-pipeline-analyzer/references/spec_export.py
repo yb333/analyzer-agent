@@ -403,8 +403,12 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
                 if chain:
                     exp_expr = chain[0]["expression"]
                     for _ent in chain[1:]:
-                        exp_expr = exp_expr.replace(
-                            f"{_ent['alias']}.{_ent['field']}", _ent["expression"])
+                        _key = f"{_ent['alias']}.{_ent['field']}"
+                        # 大小写不敏感替换（引擎已 normalize=lower，双保险：
+                        # 防 oracle 方言渲染大小写差异导致 str.replace 断链）
+                        exp_expr = re.sub(
+                            re.escape(_key), _ent["expression"].replace("\\", "\\\\"),
+                            exp_expr, flags=re.I)
                     leaf_refs = chain[-1].get("refs") or []
                     is_direct = re.fullmatch(
                         r"[A-Za-z_]\w*\.\w+", exp_expr) is not None

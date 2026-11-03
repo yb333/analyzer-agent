@@ -1900,11 +1900,16 @@ def extract_subquery_field_chains(parsed: ParsedSQL) -> tuple:
                     continue
                 refs = [((c.table or "").lower(), c.name.lower())
                         for c in target.find_all(exp.Column)]
-                proj[out] = (target.sql(dialect="oracle"), refs)
+                # 渲染统一小写标识符：oracle 方言会保留输入大小写（TT.XXX），
+                # 而链键 alias/field 已 .lower()——不归一则 SPEC 侧 str.replace
+                # 大小写不命中（2026-11-03 内网 Win 实测根因）
+                proj[out] = (target.sql(dialect="oracle",
+                                        normalize="lower"), refs)
         return proj
 
     sub_proj = {a: _projections(bs) for a, (_sq, bs) in sub_nodes.items()}
-    sub_sqls = {a: _sq.sql(dialect="oracle") for a, (_sq, _bs) in sub_nodes.items()}
+    sub_sqls = {a: _sq.sql(dialect="oracle", normalize="lower")
+                for a, (_sq, _bs) in sub_nodes.items()}
 
     # 3. 外层列停在子查询别名 → BFS 逐跳链（跨引用全收，去重）
     out: dict = {}
