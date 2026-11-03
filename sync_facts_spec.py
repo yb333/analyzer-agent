@@ -26,6 +26,15 @@ opt-in，不配置就只同步它自己的 skills/agents/commands，与我们的
 两边先后跑、各提各的 commit（mirror 删除只删 git 已跟踪且不在我们源里的文件，
 别人放的未跟踪文件绝不碰）。
 
+与仓内既有 sync_to_internal.*（GitHub→内网镜像仓通道）的边界——两个不同
+内网仓、两条并行通道，互不动对方（2026-11-03 用户确认）：
+  - sync_to_internal.*：整仓镜像到内网镜像仓【根目录】，服务直接使用整个
+    项目的人；由它自己的流程正常使用，本工具不改不碰它的文件与配置
+  - 本工具：facts/spec 裁剪集进团队仓【.opencode/】，服务仓内 agent 用户
+  - 被动共存：本仓新增文件（sync_facts_spec.*、SKILL.facts-spec.md）会被
+    sync_to_internal 从 GitHub 全量 rsync 带到镜像仓根目录，属预期共存，
+    无功能影响；不要为排除它们去改 sync_to_internal
+
 入口：sync_facts_spec.sh（开发环境测试）/ sync_facts_spec.bat（内网 Windows
 实际运行），两者都是透传参数的薄壳。
 
