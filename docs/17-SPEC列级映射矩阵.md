@@ -275,6 +275,18 @@ D2 右表物理真名+内部别名 / 场景=整体粒度、v1 单场景（方案
 
 ## 十二、实现落地记录（2026-11-02，波 0~C 全量落地）
 
+> **架构纠偏纪实（2026-11-03，波1+2a+2b）**：四轮实测中 SPEC 适配层曾长出
+> 一套正则文本解析器（AS/sysdate 两起翻车即其脆弱性）——违背「静核解析、
+> 投影只装配」分层。以 HTML 为蓝本倒查引擎产出后纠偏：**引擎早有完整结构**
+> （data_blocks 嵌套树含每表 ON/分组/过滤；子查询穿透 _penetrate_subquery_
+> columns 单列穿到底，多列表达式刻意停在边界——通道缺表达式载体而非缺能力）。
+> 补法：引擎增 extract_subquery_field_chains（纯 AST 逐跳表达式链 + 子查询
+> 渲染 SQL，落 engine_ctx 不进 knowledge，golden 零 diff 证实存量零变化）；
+> SPEC 两侧全切引擎结构——Sheet4 代入=按 refs 精确 token 替换，Sheet3=块
+> 装配。文本解析器全删（代入器 6 函数 + 分解器家族，spec_extract 净 -400 行，
+> 残留 re.* 仅 3 处且非 SQL 解析）。顺带修 viewmodel.step_where 全局 replace
+> 吞子查询 WHERE 老 bug（NOT EXISTS 丢形真正根因，mapping 同步修复）。
+
 | 构件 | 文件 | 状态 |
 |---|---|---|
 | 共享装配核 | `references/pipeline_core.py`（facts.py 机械重构，行为零变化） | ✅ |
