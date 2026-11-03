@@ -60,6 +60,8 @@ git pull
 | 字段使用检索 | `/field-search` | 搜索字段在多个表里的使用情况，输出 Excel |
 | 关联影响分析 | `/impact-analysis` | 源端变更 → 本资产受什么影响，输出影响清单 |
 | 跨资产影响分析 | `/impact-analysis --cross-asset` | 按表名自动定位代码仓目录，批量分析受影响资产 |
+| 需求 SPEC 导出 | `/export-spec` | 术加制品 → 需求SPEC.xlsx：数据源/表关联/需求字段自动填，业务背景人工位留给人补 |
+| 资产事实包导出 | `/export-facts` | 存量资产 → asset_facts.json 纯物理事实包（给 design-dev-agent 优化场景当输入） |
 
 ---
 
@@ -142,6 +144,29 @@ git pull
 
 变更清单模板在 `dws-pipeline-analyzer/templates/` 目录下。
 
+### 6. 需求 SPEC 导出（/export-spec）
+
+把资产制品逆向解析为 **需求SPEC.xlsx**——按需求文档模板五 sheet 重组的**面向人的交付件**，给需求/评审流程用。
+
+```
+/export-spec @execution_tasks.xlsx      # 单文件即可，同目录 LTS/DDL 自动识别
+/export-spec 制品目录
+```
+
+- **自动填**：数据源清单（源表/DDL 中文说明/主键分布键/LTS 调度匹配）、表关联（ON/限制/写入前/预处理五段式）、需求字段（穿透源表字段/直取或加工判型/资产表字段中文名）
+- **人工补**：Sheet1 业务背景等业务语义列——AI 不代填，留给需求流程的人
+- 多场景资产（如当前/历史分区）会先列出场景让你选，SPEC 按单场景出
+- 拿不到的列留空并写备注（缺 DDL/LTS 可放进制品目录补料重跑）
+
+### 7. 资产事实包导出（/export-facts）
+
+存量资产 → **asset_facts.json**（纯物理事实包，机器契约），给 design-dev-agent 优化场景作为存量现状输入。零 AI 介入，一条命令一次交卷。
+
+```
+/export-facts @execution_tasks.xlsx
+/export-facts 制品目录
+```
+
 ---
 
 ## 核心技术能力
@@ -181,6 +206,9 @@ git pull
 
 **Q: 一个资产由多个规则组加工怎么办？**
 用 `/analyze-chain`，自动在整个代码仓追溯关联规则组，合并成一条完整链路分析。
+
+**Q: 需求SPEC（/export-spec）和字段映射（/analyze）有什么区别？**
+mapping.xlsx 给开发/业务对字段用；需求SPEC.xlsx 给需求/评审流程用——按需求文档模板五 sheet 重组，技术侧内容自动填，业务背景等列留给人工补。
 
 **Q: 批量分析时某组失败了怎么办？**
 读 `batch_logs/batch_N.log` 查看错误。单组崩溃不影响其他组。
