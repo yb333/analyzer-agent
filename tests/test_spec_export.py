@@ -646,6 +646,43 @@ class TestCrossAggValueChain:
         assert (f1[2], f1[3], f1[4]) == ("ods_channel", "ch", "channel_type")
 
 
+# ═══════════════════════════════════════════════════════════════
+# 用户真实结构语料（case_31：tt CASE → b SUM CASE 收敛 → s 带出 + rn 开窗）
+# ═══════════════════════════════════════════════════════════════
+
+class TestRealNestedChain:
+
+    def test_full_chain_and_inner_where(self, tmp_path):
+        """用户实测结构（2026-11-03）：is_flag 三层链全展开到物理根；
+        s 层内部 WHERE（b.is_flag IS NOT NULL）落限制段不丢失。"""
+        et = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / \
+            "case_31_real_nested_chain" / "execution_tasks.xlsx"
+        bag = _bag(tmp_path, et)
+        out = tmp_path / "spec.xlsx"
+        _run_spec(["--dir", str(bag), "--output", str(out)])
+
+        frows = _rows(out, "4需求字段")
+        by = {r[10]: r for r in frows}
+        f1 = by["is_flag"]
+        assert f1[5] == "数据加工"
+        assert f1[6] == ("CASE WHEN SUM(CASE WHEN t3.tag_id = '1' "
+                         "THEN '1' ELSE '0' END) > 0 THEN 'Y' ELSE 'N' END"
+                         "（按 account_id 分组收敛；经逻辑从表 b）")
+        assert (f1[2], f1[3], f1[4]) == ("ods_acct_tag", "t3", "tag_id")
+        assert by["id"][5] == "直接复制"
+        assert (by["id"][2], by["id"][4]) == ("ods_acct_main", "account_id")
+
+        jrows = _rows(out, "3表关联")
+        assert len(jrows) == 4
+        s_row = jrows[-1]
+        assert "限制：b.is_flag IS NOT NULL" in s_row[6]      # 内层 WHERE 落位
+        assert "限定：s.rn = 1（开窗收敛，窗口定义见原文）" in s_row[6]
+        b_row = next(r for r in jrows if r[4] == "b")
+        assert "SUM(tt.is_flag) > 0" in b_row[6]
+        t3_row = next(r for r in jrows if r[4] == "t3")
+        assert "【b 内】t2.id = t3.id AND t3.tag_name = 'Y'" in t3_row[6]
+
+
 class TestJoinKindNormalization:
 
     def test_join_kind_enum(self):

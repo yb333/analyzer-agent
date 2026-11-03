@@ -271,6 +271,14 @@ def _decompose_wrapper(fragment: str) -> dict:
             return {"ok": False}
         body = body[1:close]
     dm = _depth_map(body)
+    # 片段内顶层 WHERE（s 层行集条件——分解后必须有落位，防信息丢失）
+    inner_where = ""
+    wm = next((m for m in re.finditer(r"\bWHERE\b", body, re.I)
+               if dm[m.start()] == 0), None)
+    if wm is not None:
+        nxt = re.search(r"\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|$",
+                        body[wm.end():], re.I)
+        inner_where = body[wm.end():wm.end() + (nxt.start() if nxt else 0)].strip()
     # FROM 目标
     fm = next((m for m in _FROM_KW_RE.finditer(body) if dm[m.start()] == 0), None)
     if fm is None:
@@ -317,7 +325,8 @@ def _decompose_wrapper(fragment: str) -> dict:
         from_ref = (target.get("table", ""), target.get("alias", ""))
     if not from_ref[0]:
         return {"ok": False}
-    return {"ok": True, "from": from_ref, "joins": joins}
+    return {"ok": True, "from": from_ref, "joins": joins,
+            "inner_where": inner_where}
 
 
 def _slave_expand(sub_sql: str, depth: int = 0) -> tuple:
@@ -806,6 +815,8 @@ def build_sheet3_rows(ctx) -> list:
                             rows.append([None, f_short, from_alias, j_short,
                                          jn["alias"], jn["kind"], jn["on"]])
                     resid = []
+                    if dec.get("inner_where"):
+                        resid.append(f"限制：{dec['inner_where']}")
                     if sw and sw not in attached_wheres:
                         note = ("（开窗收敛，窗口定义见原文）"
                                 if re.search(r"\brn\s*=", sw) else "")
