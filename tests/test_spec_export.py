@@ -709,6 +709,65 @@ class TestSysdateField:
         assert by["id"][5] == "直接复制"
 
 
+# ═══════════════════════════════════════════════════════════════
+# 用户真实 SQL（case_32：含 decode/nvl/sysdate/${p_cycle_id}/嵌套子查询）
+# ═══════════════════════════════════════════════════════════════
+
+class TestEmpRealSql:
+
+    def test_full_field_set(self, tmp_path):
+        """用户实测 SQL（docs/emp/案例.sql）全 8 字段端到端。"""
+        et = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / \
+            "case_32_emp_real_sql" / "execution_tasks.xlsx"
+        bag = _bag(tmp_path, et)
+        out = tmp_path / "spec.xlsx"
+        _run_spec(["--dir", str(bag), "--output", str(out)])
+
+        frows = _rows(out, "4需求字段")
+        by = {r[10]: r for r in frows}
+        assert {r[10] for r in frows} == {
+            "id", "account_number", "is_datacom_flag", "cust_account_key",
+            "create_by", "del_flag", "crt_cycle_id", "dw_last_update_date"}
+
+        # 核心字段：三层链全展开（tt CASE → b SUM CASE → s 带出）
+        f1 = by["is_datacom_flag"]
+        assert f1[5] == "数据加工"
+        assert f1[6] == ("CASE WHEN SUM(CASE WHEN t3.tag_id = '1122334455' "
+                         "THEN '1' ELSE '0' END) > 0 THEN 'Y' ELSE 'N' END"
+                         "（按 account_id 分组收敛；经逻辑从表 b）")
+        assert (f1[2], f1[3], f1[4]) == ("eb_account_common_tag_t", "t3", "tag_id")
+
+        # decode/nvl 多表多源
+        ck = by["cust_account_key"]
+        assert ck[5] == "数据加工"
+        assert "DECODE(t1.account_number" in ck[6]
+        assert "NVL(cust_d.cust_account_key" in ck[6]
+        assert set(ck[2].split("、")) == {"eb_account_t", "customer_d"}
+
+        # 同表双字段 CASE
+        df = by["del_flag"]
+        assert df[5] == "数据加工"
+        assert "t1.del_flag" in df[6] and "t1.delete_flag" in df[6]
+
+        # 平台变量 + 系统函数
+        assert by["crt_cycle_id"][5] == "赋值"
+        assert "'${p_cycle_id}'" in by["crt_cycle_id"][6]
+        assert by["dw_last_update_date"][5] == "赋值"
+        assert "CURRENT_TIMESTAMP" in by["dw_last_update_date"][6]
+
+        # 直取
+        for fn in ("id", "account_number", "create_by"):
+            assert by[fn][5] == "直接复制"
+            assert by[fn][2] == "eb_account_t"
+
+        # 表关联四行
+        jrows = _rows(out, "3表关联")
+        assert len(jrows) == 4
+        assert {r[3] for r in jrows} == {
+            "eb_account_tag_t", "eb_account_common_tag_t",
+            "customer_d", "虚拟逻辑表 s"}
+
+
 class TestJoinKindNormalization:
 
     def test_join_kind_enum(self):
