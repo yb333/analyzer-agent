@@ -683,6 +683,31 @@ class TestRealNestedChain:
         assert "【b 内】t2.id = t3.id AND t3.tag_name = 'Y'" in t3_row[6]
 
 
+# ═══════════════════════════════════════════════════════════════
+# sysdate 字段（case_31b：s 层 sysdate() AS dw_last_update_date，⑲）
+# ═══════════════════════════════════════════════════════════════
+
+class TestSysdateField:
+
+    def test_sysdate_assign_and_others_intact(self, tmp_path):
+        """sysdate() 字段：纯函数无物理引用 → 赋值 + 代入出表达式；
+        兜底格式穿透项（无 step_id）不阻断代入；其他字段不受影响。"""
+        et = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / \
+            "case_31b_sysdate_field" / "execution_tasks.xlsx"
+        bag = _bag(tmp_path, et)
+        out = tmp_path / "spec.xlsx"
+        _run_spec(["--dir", str(bag), "--output", str(out)])
+        frows = _rows(out, "4需求字段")
+        by = {r[10]: r for r in frows}
+        dw = by["dw_last_update_date"]
+        assert dw[5] == "赋值"
+        assert dw[6] == "sysdate()（经逻辑从表 s）"
+        # 其他字段不受 s 层新增字段影响
+        assert by["is_flag"][5] == "数据加工"
+        assert "SUM(CASE WHEN t3.tag_id" in by["is_flag"][6]
+        assert by["id"][5] == "直接复制"
+
+
 class TestJoinKindNormalization:
 
     def test_join_kind_enum(self):

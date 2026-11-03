@@ -397,8 +397,11 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
                 ref0 = f"{ps_table_full}.{ps_field0}"
                 exp_notes: list = []
                 exp_expr, exp_ok = "", False
+                # 候选片段：包裹片段 + 步骤原文（兜底格式的穿透项无 step_id，
+                # 从字段 producing_step 取——sysdate() 类字段曾因此取空而保守化）
                 cand_frags = wrapped_fragments + [
-                    ctx.df_step(ps.get("step_id", "")).get("raw_sql", "")]
+                    ctx.df_step(ps.get("step_id", "")).get("raw_sql", "")
+                    or ctx.df_step(f.get("producing_step", "")).get("raw_sql", "")]
                 for frag in cand_frags:
                     if not frag or ps_table_full not in _sub_alias_map(frag):
                         continue
@@ -484,6 +487,9 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
         note_parts = []
         if field_exp is not None and field_exp["direct"]:
             type_label = "直接复制"
+        elif field_exp is not None and not re.search(
+                r"\b[A-Za-z_]\w*\.\w+", field_exp["expr"]):
+            type_label = "赋值"    # 纯函数/常量（sysdate() 等），无物理字段引用
         if field_exp is not None:
             expr = field_exp["expr"]
             if field_exp["direct"]:
