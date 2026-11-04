@@ -71,7 +71,7 @@ EXCLUDE_SUFFIX = (".pyc",)
 # view_generator._describe_transform，模块级 import 图看不出来（2026-11-03
 # case_32 双树冒烟实测）。tests/test_sync_scope.py 用真实 fixture 锁此清单。
 SKILL_MODULES = [
-    "analyzer", "baseline_export", "crosscheck", "engine", "excel_utils",
+    "analyzer", "crosscheck", "engine", "excel_utils",
     "facts", "inputs", "pipeline_core", "schedule_match", "schedule_recovery",
     "spec", "spec_export", "spec_extract", "ts_export", "viewmodel",
     "view_generator", "usage",
@@ -80,7 +80,6 @@ SKILL_MODULES = [
 SKILL_ASSETS = [
     "run.py",
     "requirements.txt",                       # 依赖契约（sqlglot==28.10.1 版本锁声明）
-    "schemas/asset_facts.schema.json",        # facts 权威 schema
     "templates/需求SPEC模板.xlsx",             # spec 渲染模板（列头指纹校验基准）
     "vendor/ts_draft",                        # facts --format ts_draft 进门验 schema + 对齐靶
 ]

@@ -140,8 +140,6 @@ def _run_facts(argv):
 class TestDqChannelsE2E:
     def test_main_dq_flag(self, tmp_path):
         """/--dq 通道：xlsx 制品 + DQ excel → meta.dq_rules 注入 + 契约投影。"""
-        from baseline_export import export_baseline_v1
-        from inputs import build_baseline_export_ctx
         xlsx = tmp_path / "dq.xlsx"
         _write_dq_excel(xlsx, [
             ["R001", "1", "新增", "空值检查", "主键非空", "空值检查",
@@ -155,7 +153,7 @@ class TestDqChannelsE2E:
         assert draft["meta"]["dq_rules"][0]["target_schema"] == "dws"
 
     def test_facts_dir_dq_provided(self, tmp_path):
-        """facts 目录直入：DQ 制品分拣 → 契约 dq_rules 含 target_schema。"""
+        """facts 目录直入：DQ 制品分拣 → ts 草稿 dq_required=1 + provenance 采集。"""
         bag = tmp_path / "bag"
         bag.mkdir()
         shutil.copy(ET_XLSX, bag / "et.xlsx")
@@ -163,13 +161,11 @@ class TestDqChannelsE2E:
             ["R001", "1", "新增", "空值检查", "主键非空", "空值检查",
              "u", "dws", "dwb_cust_asset_d", "T1", "SELECT 1", "严重"],
         ])
-        out = tmp_path / "o" / "asset_facts.json"
+        out = tmp_path / "o" / "ts_draft.json"
         _run_facts(["--dir", str(bag), "--output", str(out)])
         d = json.loads(out.read_text(encoding="utf-8"))
-        assert d["dq_rules"][0]["rule_number"] == "R001"
-        assert d["dq_rules"][0]["target_schema"] == "dws"
-        # DQ provenance 自动采集（dq_file 同构红利）
-        dq_prov = [p for p in d["provenance"] if p["type"] == "dq"]
+        assert d["meta"]["dq_required"] == 1
+        dq_prov = [p for p in d["_baseline"]["provenance"] if p["type"] == "dq"]
         assert len(dq_prov) == 1 and dq_prov[0]["path"].endswith("dq.xlsx")
 
     def test_facts_dir_empty_dq_excel_fails_loud(self, tmp_path, capsys):

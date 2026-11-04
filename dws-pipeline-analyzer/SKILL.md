@@ -145,7 +145,7 @@ dws-reverser 等 agent 调用用 facts 入口（目录直入、一次调用一�
 0=交卷 / 1=制品问题 / 2=参数错误），调用合同与提示词模板见 docs/14-消费方对接指南.md：
 
 ```bash
-python {skill_dir}/run.py facts --dir {制品目录} --output {asset_facts.json 绝对路径}
+python {skill_dir}/run.py facts --dir {制品目录} --output {ts_draft.json 绝对路径}
 ```
 
 ## 命令参数
@@ -160,7 +160,7 @@ python {skill_dir}/run.py facts --dir {制品目录} --output {asset_facts.json 
 | `--ddl-dir` | 否 | DDL 目录（补充字段类型和注释） |
 | `--lts` | 否 | LTS 调度任务 excel（平台导出三 sheet：tasks/jobs/taskParams）；xlsx/yml 场景均可，优先于代码仓自动发现 |
 | `--dq` | 否 | DQ 质量规则 excel（平台导出，主 sheet「规则基本信息」）；xlsx/yml 场景均可，优先于代码仓自动发现 |
-| `--export` | 否 | 附加导出：`asset_facts`（存量资产事实包，见 docs/asset_facts-契约.md；agent 编排调用走 `run.py facts --dir X --output Y`） |
+| `--export`
 | `--platform-generation` | 否 | 平台代次（baseline_v1 用），默认 1.0 |
 
 ### view_generator

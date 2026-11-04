@@ -26,7 +26,7 @@ from crosscheck import run_crosscheck
 ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_D.xlsx"
 
 
-def _draft(final_table="dwb_cust_asset_d", rgc="GR_CUST_ASSET"):
+def _draft(final_table="dwb_cust_asset_f", rgc="GR_CUST_ASSET"):
     return {"meta": {"target_table": final_table, "rule_group_code": rgc}}
 
 
@@ -34,11 +34,12 @@ def _draft(final_table="dwb_cust_asset_d", rgc="GR_CUST_ASSET"):
 
 class TestCrosscheck:
     def test_dq_target_mismatch(self):
+        # R2 = 镜像视图（_i 剥后同基名互认）；R1 异基名照常报
         rules = [{"rule_number": "R1", "target_table": "other_table"},
-                 {"rule_number": "R2", "target_table": "DWB_CUST_ASSET_D"}]
+                 {"rule_number": "R2", "target_table": "DWB_CUST_ASSET_I"}]
         out = run_crosscheck(_draft(), {}, {}, dq_rules=rules)
         mism = [w for w in out if w["type"] == "dq_target_mismatch"]
-        assert len(mism) == 1  # 大小写不敏感：R2 匹配不算
+        assert len(mism) == 1
         assert mism[0]["severity"] == "structural"
         assert "R1" in mism[0]["title"] and "other_table" in mism[0]["title"]
 
@@ -49,8 +50,17 @@ class TestCrosscheck:
         out = run_crosscheck(_draft(), {}, {}, dq_rules=rules)
         assert not [w for w in out if w["type"] == "dq_target_mismatch"]
 
+    def test_dq_dim_table_not_implicitly_matched(self):
+        """_d 不在镜像家族（维表=来源表）：即使与资产同基名，照常报——剥 _d 会误互认。"""
+        rules = [{"rule_number": "R1", "target_table": "dws.dwb_cust_asset_d"}]
+        out = run_crosscheck(_draft(), {}, {}, dq_rules=rules)
+        mism = [w for w in out if w["type"] == "dq_target_mismatch"]
+        assert len(mism) == 1 and mism[0]["severity"] == "structural"
+
     def test_dq_clean_no_warning(self):
-        rules = [{"rule_number": "R1", "target_table": "DWB_CUST_ASSET_D"}]
+        rules = [{"rule_number": "R1", "target_table": "DWB_CUST_ASSET_F"},
+                 {"rule_number": "R2", "target_table": "dws.dwb_cust_asset_d_x"}] if False else [
+            {"rule_number": "R1", "target_table": "DWB_CUST_ASSET_F"}]
         out = run_crosscheck(_draft(), {}, {}, dq_rules=rules)
         assert not [w for w in out if w["type"] == "dq_target_mismatch"]
 
@@ -105,7 +115,7 @@ class TestCrosscheck:
 
 class TestSeverityAndVerdict:
     def test_severity_normalized_by_type(self):
-        from baseline_export import _project_warnings
+        from ts_export import _project_warnings
         draft = {"field_mappings": {"warnings": [{"type": "field_name_mismatch", "title": "x"}]},
                  "quality": {"issues": []}}
         out = _project_warnings(draft, [{"type": "write_plan_gap", "title": "y"}],
@@ -123,7 +133,7 @@ class TestSeverityAndVerdict:
             "unrecognized_artifact": "noise", "dq_not_detected": "structural"}
 
     def test_self_check_three_states(self):
-        from baseline_export import _derive_self_check
+        from ts_export import _derive_self_check
         assert _derive_self_check([]) == {"verdict": "pass",
                                           "structural_count": 0, "noise_count": 0}
         assert _derive_self_check([{"severity": "noise"}])["verdict"] == "pass_with_noise"
@@ -131,18 +141,19 @@ class TestSeverityAndVerdict:
         assert r["verdict"] == "review" and r == {"verdict": "review",
                                                   "structural_count": 1, "noise_count": 1}
 
-    def test_project_carries_self_check(self):
-        from baseline_export import project_baseline_v1
+    def test_render_carries_self_check(self):
+        from ts_export import render_ts_draft
         draft = {"meta": {"target_table": "t"}, "topology": {"steps": []},
-                 "data_flow": {"tables": [{"schema": "d", "name": "t"}]},
+                 "data_flow": {"tables": [{"schema": "d", "name": "t"}], "steps": []},
                  "field_mappings": {"fields": [], "warnings": []},
-                 "quality": {"issues": []}}
-        out = project_baseline_v1(draft, {"provenance": [{"type": "other", "path": "x"}],
-                                          "extra_warnings": [
-                                              {"type": "unrecognized_artifact", "title": "m"}]})
-        assert out["self_check"]["verdict"] == "pass_with_noise"
-        assert out["self_check"]["noise_count"] == 1
-        assert out["warnings"][0]["severity"] == "noise"
+                 "quality": {"issues": []}, "source": {}}
+        out = render_ts_draft(draft, {"final_target_schema": "dws",
+                                      "final_target_table": "t"},
+                              provenance=[{"type": "other", "path": "x"}],
+                              extra_warnings=[{"type": "unrecognized_artifact", "title": "m"}])
+        assert out["_reverse"]["self_check"]["verdict"] == "pass_with_noise"
+        assert out["_reverse"]["self_check"]["noise_count"] == 1
+        assert out["_reverse"]["warnings"][0]["severity"] == "noise"
 
 
 # ── 3. facts e2e：待审不是失败 ─────────────────────────────────
@@ -178,18 +189,18 @@ class TestFactsGateE2E:
         ws.append(["R999", "他资产规则", "desc", "空值检查",
                    "dws", "other_asset_table", "SELECT 1", "严重", "u"])
         wb.save(str(bag / "dq.xlsx"))
-        out = tmp_path / "o" / "asset_facts.json"
+        out = tmp_path / "o" / "ts_draft.json"
         stdout, _, code = _run_facts(["--dir", str(bag), "--output", str(out)])
         assert code == 0            # 待审不是失败
         assert out.exists()         # 产物总是落盘（§七.2）
         data = json.loads(out.read_text(encoding="utf-8"))
-        assert data["version"] == "1.4"
-        assert data["self_check"]["verdict"] == "review"
-        assert data["self_check"]["structural_count"] >= 1
-        mism = [w for w in data["warnings"] if w["type"] == "dq_target_mismatch"]
+        assert data["version"] == "2.1"
+        assert data["_reverse"]["self_check"]["verdict"] == "review"
+        assert data["_reverse"]["self_check"]["structural_count"] >= 1
+        mism = [w for w in data["_reverse"]["warnings"] if w["type"] == "dq_target_mismatch"]
         assert len(mism) == 1 and mism[0]["severity"] == "structural"
         lines = stdout.splitlines()
-        assert any(l.startswith("asset_facts: ") for l in lines)
+        assert any(l.startswith("ts_draft: ") for l in lines)
         assert any(l.startswith("self_check: review") for l in lines)
 
     def test_cleanish_dir_yields_pass_with_noise(self, tmp_path):
@@ -202,6 +213,6 @@ class TestFactsGateE2E:
         assert code == 0
         data = json.loads(out.read_text(encoding="utf-8"))
         # 未检出 DQ/LTS = structural 披露 → review（人放行"全量资产无 DQ/LTS"即过）
-        assert data["self_check"]["verdict"] == "review"
-        types = {w["type"] for w in data["warnings"]}
+        assert data["_reverse"]["self_check"]["verdict"] == "review"
+        types = {w["type"] for w in data["_reverse"]["warnings"]}
         assert {"dq_not_detected", "lts_not_detected"} <= types

@@ -63,8 +63,8 @@ class TestTrimmedTree:
         skill_md = (trimmed / "SKILL.md").read_text(encoding="utf-8")
         assert "facts/spec 双通道版" in skill_md
         assert "影响分析" not in skill_md
-        # 随行资产
-        for asset in ("run.py", "requirements.txt", "schemas/asset_facts.schema.json",
+        # 随行资产（v1 schema 已随 asset_facts 投影退役删除；vendor schema = ts 契约进门验）
+        for asset in ("run.py", "requirements.txt",
                       "templates/需求SPEC模板.xlsx", "vendor/ts_draft/ts_draft_v2.schema.json"):
             assert (trimmed / asset).exists(), asset
 
@@ -80,10 +80,10 @@ class TestEndToEndSmoke:
 
     def test_facts(self, tmp_path):
         trimmed = build_trimmed_skill(PROJECT_ROOT, tmp_path / SKILL_DIR)
-        out = tmp_path / "asset_facts.json"
+        out = tmp_path / "ts_draft.json"
         r = self._run(trimmed, "facts", "--dir", str(FIXTURE), "--output", str(out))
         assert r.returncode == 0, r.stderr
-        assert "asset_facts: " in r.stdout
+        assert "ts_draft: " in r.stdout
         assert "self_check: " in r.stdout
         assert out.exists()
 

@@ -459,7 +459,7 @@ def read_yml(yml_dir: str, consumed_files: list = None) -> dict:
         {rules, target_fields, group_variables, variables, rule_group_code, rule_group_en}
 
     consumed_files: 可选出参列表，传入后把实际读取的 yml 绝对路径追加进去
-        （asset_facts provenance 用）；不传时行为不变。
+        （ts_draft provenance 用）；不传时行为不变。
 
     yml 格式（详见 sample_rule.yml）：
         顶层 = RULE sheet 字段（中文 key）
@@ -805,11 +805,6 @@ def main():
     parser.add_argument("--dq", default="",
                         help="DQ 质量规则 excel 路径（平台导出，主 sheet「规则基础信息」；"
                              "xlsx/yml 场景均可，优先于代码仓自动发现）")
-    parser.add_argument("--export", default="",
-                        help="附加导出：asset_facts（存量资产事实包，投影自 knowledge_draft，"
-                             "见 docs/asset_facts-契约.md）。校验不过 fail loud 不落盘")
-    parser.add_argument("--platform-generation", dest="platform_generation", default="1.0",
-                        help="平台代次（asset_facts asset.platform_generation / write_plan 映射版本），默认 1.0")
     args = parser.parse_args()
 
     if not args.input:
@@ -852,7 +847,7 @@ def main():
     # ── Step 1: 读取输入 ──
     # 输入分流：.xlsx 文件 → read_excel；目录 → read_yml（代码仓 yml，legacy）
     is_yml_mode = (mode == "yml_dir")
-    consumed_yml_files = []  # 实际读取的 yml 清单（asset_facts provenance 用）
+    consumed_yml_files = []  # 实际读取的 yml 清单（ts_draft provenance 用）
     input_sheets = None      # xlsx 实际读到的 sheet 清单（v1.2 provenance[].sheets 用）
     if is_yml_mode:
         print("Step 1: 读取代码仓 yml...")
@@ -1007,7 +1002,7 @@ def main():
     # ── Step 3~7: 核心解析（与批量路径共用 analyze_pipeline，避免两套逻辑漂移）──
     print("Step 3-7: 解析 + 组装 knowledge...")
     # 引擎导出上下文（table_catalog 等，不落盘）。引擎接口不知道消费场景，
-    # context_out 始终导出、由装配层持有，投影（asset_facts 等）按需消费。
+    # context_out 始终导出、由装配层持有，投影（ts_draft 等）按需消费。
     engine_ctx = {}
     knowledge, parsed_map = analyze_pipeline(
         rules, raw["target_fields"], raw["group_variables"], dialect,
@@ -1168,41 +1163,11 @@ def _finish_analysis(args, bundle: dict, base_output_dir: Path,
         print(f"  [WARN] 视图生成失败: {e}", file=sys.stderr)
     _t_view = round(_t.time() - _t_view0, 2)
 
-    # ── asset_facts 契约导出（--export asset_facts；校验不过 fail loud 不落盘）──
-    baseline_path = None
-    if args.export == "asset_facts":
-        from baseline_export import export_baseline_v1, BaselineExportError
-        export_ctx = build_baseline_export_ctx(
-            knowledge, engine_ctx,
-            is_yml_mode=is_yml_mode,
-            consumed_yml_files=bundle["consumed_yml_files"],
-            input_path=input_path,
-            platform_generation=args.platform_generation,
-            rule_group_en=raw.get("rule_group_en") or "",
-            group_en_fallback=group_en,
-            input_sheets=bundle["input_sheets"],
-        )
-        try:
-            baseline_path = export_baseline_v1(knowledge, export_ctx, output_dir)
-        except BaselineExportError as e:
-            print("[baseline_v1] 导出失败，产物未落盘：", file=sys.stderr)
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
 
     print(f"\n=== 完成 ===")
     print(f"输出: {output_dir}")
     print(f"  交付物: mapping.xlsx / asset_report.html / tech_design.md")
     print(f"  过程件: _internal/knowledge_draft.json, _internal/knowledge_summary.md")
-    if baseline_path is not None:
-        # 消费方按 "asset_facts: {绝对路径}" 行定位契约产物（约定见 docs/asset_facts-契约.md）
-        print(f"asset_facts: {baseline_path.resolve()}")
-        # 自检结论行（v1.4 交付门，机器按行前缀判读）
-        try:
-            verdict = (json.loads(baseline_path.read_text(encoding="utf-8"))
-                       .get("self_check", {}).get("verdict", ""))
-            print(f"self_check: {verdict}")
-        except Exception:
-            pass
     print(f"目标表: {target_name}")
     print(f"步骤数: {len(rules)}")
     print(f"字段数: {stats['total_in_sql']}")

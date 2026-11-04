@@ -7,7 +7,7 @@
 - 〔修正2〕.sql 自动归 DDL，不算无法识别
 - 〔修正3〕DQ 目录通道两态：未检出 → dq=None（facts 层落 dq_rules=[] + warning）
 - 多义（同型多个）fail loud 不静默取一
-- facts 入口 e2e：目录直入 → asset_facts.json（version 1.3 + asset_facts: 定位行）
+- facts 入口 e2e：目录直入 → ts_draft.json（version 2.1 + ts_draft: 定位行）
 
 运行:
     pytest tests/test_artifact_sorting.py -v
@@ -177,18 +177,20 @@ class TestFactsE2E:
         (d / "t.sql").write_text(
             "CREATE TABLE dwb_cust_asset_d (cust_id INT)\nDISTRIBUTE BY HASH (cust_id);",
             encoding="utf-8")
-        out = tmp_path / "deep" / "asset_facts.json"
+        out = tmp_path / "deep" / "ts_draft.json"
         stdout, stderr, code = _run_facts(["--dir", str(d), "--output", str(out)])
         assert code == 0
-        assert any(line.startswith("asset_facts: ") for line in stdout.splitlines())
+        assert any(line.startswith("ts_draft: ") for line in stdout.splitlines())
         data = json.loads(out.read_text(encoding="utf-8"))
-        assert data["version"] == "1.4"
-        assert data["dq_rules"] == []  # 修正3：未检出 = 空数组（非 null）
-        assert data["schedule"] is not None
-        types = {w["type"] for w in data["warnings"]}
+        assert data["version"] == "2.1"
+        assert data["meta"]["dq_required"] == 0  # 修正3：未检出（两态，随 ts 草稿）
+        # LTS 模板任务无 V_GROUP_CODE/无 _F 后缀 → tasks 空（other 通道），cron 空——
+        # 调度恢复依赖真实 F 任务；此处断言 LTS 分拣进 provenance 即可
+        assert any(p["type"] == "lts" for p in data["_baseline"]["provenance"])
+        types = {w["type"] for w in data["_reverse"]["warnings"]}
         assert "dq_not_detected" in types  # 两态披露进 warnings
-        t = [x for x in data["tables"] if x["name"].lower() == "dwb_cust_asset_d"][0]
-        assert t["table_props"]["distribute_by"] == "HASH (cust_id)"
+        t = data["tables"]["dwb_cust_asset_d"]
+        assert t["distribution_key"] == ["cust_id"] and t["distribute_type"] == "HASH"
 
     def test_unrecognized_files_in_warnings(self, tmp_path):
         """修正1 e2e：mapping 等干扰文件不阻断，进产物 warnings。"""
@@ -198,7 +200,7 @@ class TestFactsE2E:
         _, _, code = _run_facts(["--dir", str(d), "--output", str(out)])
         assert code == 0
         data = json.loads(out.read_text(encoding="utf-8"))
-        unrecog = [w for w in data["warnings"] if w["type"] == "unrecognized_artifact"]
+        unrecog = [w for w in data["_reverse"]["warnings"] if w["type"] == "unrecognized_artifact"]
         assert any("mapping.xlsx" in w["title"] for w in unrecog)
 
     def test_et_missing_fails_no_product(self, tmp_path):

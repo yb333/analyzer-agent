@@ -22,6 +22,7 @@ sys.path.insert(0, str(ANALYZER_REF))
 import analyzer
 import impact_analyzer
 import inputs
+from inputs import build_baseline_export_ctx
 import excel_utils
 
 
@@ -178,3 +179,34 @@ def test_build_export_ctx_rule_group_en_fallback_chain():
         rule_group_en="", group_en_fallback="FROM_CLI",
     )
     assert ctx["rule_group_en"] == "FROM_CLI"
+
+
+class TestBaselineExportCtxSheets:
+    """provenance[].sheets 采集（原 test_baseline_export 的 V12 ctx 用例——ctx 组装在
+    inputs 存活，测试跟随；v1 投影 2026-11-04 退役）。"""
+
+    def test_xlsx_entry_carries_sheets(self):
+        ctx = build_baseline_export_ctx(
+            {"meta": {}}, {},
+            is_yml_mode=False, consumed_yml_files=[],
+            input_path=Path("/tmp/execution_tasks.xlsx"),
+            input_sheets=["RULE", "TargetFields", "GroupVariables"],
+        )
+        entry = ctx["provenance"][0]
+        assert entry["type"] == "execution_tasks"
+        assert entry["sheets"] == ["RULE", "TargetFields", "GroupVariables"]
+
+    def test_lts_entry_carries_sheets_from_source_meta(self):
+        knowledge = {"meta": {"schedule": {
+            "_source_sheets": ["tasks", "jobs", "taskParams"],
+            "f_tasks": [{"lts_file": "/r/LTS/T_F.yml"}],
+        }}}
+        ctx = build_baseline_export_ctx(
+            knowledge, {}, is_yml_mode=True, consumed_yml_files=["/r/a.yml"],
+            input_path=Path("/r"),
+        )
+        lts_entries = [p for p in ctx["provenance"] if p["type"] == "lts"]
+        assert len(lts_entries) == 1
+        assert lts_entries[0]["sheets"] == ["tasks", "jobs", "taskParams"]
+        yml_entries = [p for p in ctx["provenance"] if p["type"] == "rule_yml"]
+        assert all("sheets" not in e for e in yml_entries)

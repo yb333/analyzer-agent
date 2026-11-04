@@ -21,15 +21,243 @@ Author: 院博
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from viewmodel import build_context
-from baseline_export import (build_write_plan, _project_warnings, _derive_self_check)
 
 TS_VERSION = "2.1"  # v2.1：rules[].query_sql 逐字必填（契约波次随 vendor 同步）
 GENERATED_BY = "dws-pipeline-analyzer"
 VENDOR_SCHEMA_PATH = (Path(__file__).resolve().parent.parent
                       / "vendor" / "ts_draft" / "ts_draft_v2.schema.json")
+
+# ═══════════════════════════════════════════════════════════════
+# 共享组件（原 baseline_export——v1 投影 2026-11-04 退役后唯一存活消费者在此；
+# write_plan 构建 / warnings 四源分级 / self_check 派生，权威口径不变）
+# ═══════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────
+# 写入类型映射（platform_generation = "1.0" 权威表，随 analyzer 维护）
+# 平台迁移（2.0）时此表换版，契约事实字段（delete_mode/delete_condition 原文）不变。
+# ─────────────────────────────────────────────────────────────────
+WRITE_KIND_BY_MODE = {
+    # delete_mode → (kind, condition_role)
+    "1": ("full_truncate", "none"),            # TRUNCATE TABLE
+    "2": ("append", "none"),                   # 追加
+    "3": ("subpartition_truncate", "subpartition_expr"),  # TRUNCATE SUBPARTITION
+    "4": ("delete_by_condition", "where_predicate"),      # DELETE
+    "5": ("partition_truncate", "partition_expr"),        # TRUNCATE PARTITION
+    "6": ("merge_upsert", "on_predicate"),     # MERGE INTO
+    "7": ("rpt_item", "unclear"),              # RPT_ITEM（平台语义未定）
+    "8": ("update_by_condition", "where_predicate"),      # UPDATE
+    "9": ("exchange_partition", "exchange_table"),        # EXCHANGE PARTITION
+}
+
+
+# ─────────────────────────────────────────────────────────────────
+# warnings 严重度分级（v1.4，docs/specs/opt/12 v3.1 §九）——唯一权威定义。
+# structural=指向"料可能给错/资产级对不上"（驱动待审：人审换料或显式放行）；
+# noise=平台常态差异（登记滞后等，披露即可）。分级错误的代价消费方已评估：
+# 误升→流程停一次人放行（低成本）；误降→审核对账与闸口两道眼兜底。
+# 新增 warning 类型必须在此定级（缺省 noise）。
+_SEVERITY_BY_TYPE = {
+    # 登记滞后 / 映射差异（TargetFields vs SQL 交叉的既有通道）→ 噪音
+    "field_name_mismatch": "noise",
+    "field_mapping": "noise",
+    "data_lineage": "noise",
+    "scheduling": "noise",
+    "data_quality": "noise",
+    "quality": "noise",
+    # write_plan 缺口（dm=5 无分区条件 / 未知 dm / 条件形态不符）→ 待审
+    "write_plan_gap": "structural",
+    # 分拣披露：无法识别文件=人扫噪音；未检出 DQ/LTS=待审（换料或显式放行）
+    "unrecognized_artifact": "noise",
+    "dq_not_detected": "structural",
+    "lts_not_detected": "structural",
+    # 一致性交叉（crosscheck 模块产出）
+    "dq_target_mismatch": "structural",
+    "ddl_target_missing": "structural",
+    "ddl_duplicate_table": "structural",
+    "lts_group_mismatch": "structural",
+    "crosscheck_internal": "noise",
+    # ts 草稿调度还原（schedule_recovery/ts_export）
+    "lts_upstream_unresolved": "noise",   # 依赖 job 未匹配到上游任务——原文随行，人确认
+}
+_DEFAULT_SEVERITY = "noise"
+
+# 谓词角色：condition_columns 才有意义
+
+_PREDICATE_ROLES = {"on_predicate", "where_predicate"}
+
+# 限定列引用（alias.col / table.col），用于 condition_columns 提取
+_QUALIFIED_REF_RE = re.compile(r"\b([A-Za-z_][\w$]*)\.([A-Za-z_][\w$]*)\b")
+
+_MERGE_RE = re.compile(r"\bmerge\s+into\b", re.IGNORECASE)
+
+
+# write_plan 构建
+# ═════════════════════════════════════════════════════════════════
+
+def _extract_columns(expr: str) -> list:
+    """从谓词文本提取限定列引用（原样文本，按出现顺序去重）。确定性提取，不做语义推断。"""
+    seen = []
+    for m in _QUALIFIED_REF_RE.finditer(expr or ""):
+        ref = f"{m.group(1)}.{m.group(2)}"
+        if ref not in seen:
+            seen.append(ref)
+    return seen
+
+
+def _extract_merge_on_from_sql(sql_text: str):
+    """query_sql 是 MERGE 语句时提取 ON 条件（等价重排版，非逐字）。
+
+    返回条件文本；非 MERGE 语句 / 解析失败返回 None。
+    """
+    if not sql_text or not _MERGE_RE.search(sql_text):
+        return None
+    try:
+        import sqlglot
+        from sqlglot import exp
+        tree = sqlglot.parse_one(sql_text)
+    except Exception:
+        return None
+    try:
+        if isinstance(tree, exp.Merge):
+            # MERGE 的 ON 条件在 Merge.args["on"]（exp.On 是 JOIN 的）
+            on_cond = tree.args.get("on")
+        else:
+            on_node = tree.find(exp.On)
+            on_cond = on_node.this if on_node is not None else None
+        if on_cond is None:
+            return None
+        text = on_cond.sql(dialect=None)
+        return text or None
+    except Exception:
+        return None
+
+
+def build_write_plan(step: dict, query_sql: str = ""):
+    """由 topology step 构建 write_plan（+ dm=6 的 merge_on）。
+
+    Returns: (write_plan, merge_on or None, warnings[list[dict]])
+    """
+    dm = str(step.get("delete_mode") or "")
+    cond = str(step.get("delete_condition") or "")
+    exchange_table = str(step.get("exchange_temp_table") or "")
+    rule_code = str(step.get("rule_code") or "?")
+    warnings = []
+
+    if step.get("is_view_step"):
+        kind, role = "view", "none"
+    else:
+        kind, role = WRITE_KIND_BY_MODE.get(dm, ("unknown", "unclear"))
+
+    expr = None
+    source = "none"
+
+    if role == "on_predicate":
+        # dm=6：优先平台删除条件列（逐字），否则从 MERGE SQL 抽 ON
+        if cond.strip():
+            expr, source = cond, "delete_condition"
+        else:
+            extracted = _extract_merge_on_from_sql(query_sql)
+            if extracted:
+                expr, source = extracted, "query_sql"
+        # 仍取不到 → 校验层 fail loud（此处不伪造）
+    elif role == "where_predicate":
+        if cond.strip():
+            expr, source = cond, "delete_condition"
+        else:
+            warnings.append({
+                "type": "write_plan_gap",
+                "severity": "medium",
+                "rule_code": rule_code,
+                "title": f"规则 {rule_code} delete_mode={dm}（{kind}）但删除条件为空——影响范围不可从条件界定",
+            })
+    elif role in ("partition_expr", "subpartition_expr"):
+        if cond.strip():
+            expr, source = cond, "delete_condition"
+        else:
+            warnings.append({
+                "type": "write_plan_gap",
+                "severity": "info",
+                "rule_code": rule_code,
+                "title": f"规则 {rule_code} delete_mode={dm}（{kind}）未携带分区条件（可能为整表分区级操作）",
+            })
+    elif role == "exchange_table":
+        if exchange_table:
+            expr, source = exchange_table, "exchange_config"
+    elif role == "none":
+        if cond.strip():
+            # truncate/append 却带条件：如实携带 + 告警，不解释平台行为
+            role = "unclear"
+            expr, source = cond, "delete_condition"
+            warnings.append({
+                "type": "write_plan_gap",
+                "severity": "info",
+                "rule_code": rule_code,
+                "title": f"规则 {rule_code} delete_mode={dm}（{kind}）携带了非预期删除条件，平台语义未定",
+            })
+    elif role == "unclear":
+        if cond.strip():
+            expr, source = cond, "delete_condition"
+
+    if dm and not step.get("is_view_step") and dm not in WRITE_KIND_BY_MODE:
+        warnings.append({
+            "type": "write_plan_gap",
+            "severity": "medium",
+            "rule_code": rule_code,
+            "title": f"规则 {rule_code} delete_mode={dm!r} 不在平台代次映射表内，write_plan.kind=unknown",
+        })
+
+    columns = _extract_columns(expr) if (expr and role in _PREDICATE_ROLES) else []
+
+    write_plan = {
+        "kind": kind,
+        "condition_role": role,
+        "condition_expr": expr,
+        "condition_columns": columns,
+        "condition_source": source,
+    }
+    merge_on = expr if (dm == "6" and expr) else None
+    return write_plan, merge_on, warnings
+
+
+
+def _project_warnings(draft: dict, write_plan_warnings: list, extra: list = None) -> list:
+    """差异事实合流（四源）：field_mappings.warnings（原样）+ quality.issues（category→type）
+    + write_plan_gap（本模块交叉验证）+ extra（装配层分拣披露与一致性交叉，v1.3/v1.4
+    ——unrecognized_artifact / dq_not_detected / lts_not_detected / *_mismatch 等）。
+    合流后按 _SEVERITY_BY_TYPE 统一归一化 severity（structural|noise，唯一权威）。"""
+    out = [dict(w) for w in (draft.get("field_mappings", {}).get("warnings") or [])]
+    for iss in (draft.get("quality", {}).get("issues") or []):
+        out.append({
+            "type": str(iss.get("category") or "quality"),
+            "severity": str(iss.get("severity") or "info"),
+            "title": str(iss.get("title") or ""),
+            "rule_code": str(iss.get("rule_code") or ""),
+            "id": str(iss.get("id") or ""),
+        })
+    out.extend(write_plan_warnings)
+    out.extend(dict(w) for w in (extra or []))
+    # 严重度归一化（v1.4）：按 type 定级覆盖，未登记类型缺省 noise
+    for w in out:
+        w["severity"] = _SEVERITY_BY_TYPE.get(str(w.get("type") or ""), _DEFAULT_SEVERITY)
+    return out
+
+
+def _derive_self_check(warnings: list) -> dict:
+    """自检结论三态（v1.4，消费方交付门）：由 warnings 严重度纯派生。
+
+    pass（干净）/ pass_with_noise（仅噪音级差异）/ review（存在结构级矛盾——
+    人审换料或显式放行；"待审"不是失败，exit 0 + 产物照常落盘）。
+    """
+    structural = sum(1 for w in warnings if w.get("severity") == "structural")
+    noise = len(warnings) - structural
+    verdict = "review" if structural else ("pass_with_noise" if noise else "pass")
+    return {"verdict": verdict, "structural_count": structural, "noise_count": noise}
+
+
 
 # write_plan.kind → ts load_mode（ts 域词汇，形态随 vendor 同步；词表外禁硬映射）
 LOAD_MODE_BY_KIND = {

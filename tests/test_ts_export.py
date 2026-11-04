@@ -216,8 +216,7 @@ class TestFactsFormatE2E:
             "CREATE OR REPLACE VIEW dws.dwb_cust_asset_i AS SELECT * FROM dws.dwb_cust_asset_d;",
             encoding="utf-8")
         out = tmp_path / "o" / "ts_draft.json"
-        stdout, _, code = self._run(["--dir", str(bag), "--output", str(out),
-                                     "--format", "ts_draft"])
+        stdout, _, code = self._run(["--dir", str(bag), "--output", str(out)])
         assert code == 0
         assert any(l.startswith("ts_draft: ") for l in stdout.splitlines())
         assert any(l.startswith("self_check: ") for l in stdout.splitlines())
@@ -229,7 +228,4 @@ class TestFactsFormatE2E:
         assert t["distribution_key"] == ["cust_id"] and t["logical_group"] == "LC_DW1"
         assert len(d["rules"]) == 4                                          # 真实资产四规则
         assert validate_ts_draft(d) == []                                    # 进门验复验
-        # 同目录双格式：asset_facts 产物同样可产出（双支持期）
-        out2 = tmp_path / "o" / "asset_facts.json"
-        _, _, code2 = self._run(["--dir", str(bag), "--output", str(out2)])
-        assert code2 == 0 and out2.exists()
+        assert any(l.startswith("self_check: ") for l in stdout.splitlines())

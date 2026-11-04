@@ -67,12 +67,17 @@ def _final_target(draft: dict, engine_ctx: dict) -> tuple[str, str]:
 
 
 def _norm_mirror(name: str) -> str:
-    """物理/视图镜像归一（消费方 12 章口径）：小写 + 剥 schema 前缀 + 剥尾部物理/视图
-    尾缀（_f/_d=物理侧——dwb 层以 _d 命名；_i=视图侧）。DQ 制品常对 _i 视图写、
-    术加对物理表写——同资产基名比较；异资产（不同基名）照常 mismatch 拦截。"""
+    """物理/视图镜像归一（平台命名约定，本仓口径 2026-11-04 修正）：小写 + 剥 schema
+    前缀 + 剥尾部镜像尾缀。镜像家族只有 **_f（物理表）/ _i（视图）**——同资产的
+    镜像两形态互认；**_d 不在家族内**（_d 一般是维表/dim，作为来源表存在，剥它会
+    让维表 DQ 与同基名资产误互认）。DQ 制品常对 _i 视图写、术加对 _f 物理表写——
+    同资产基名比较；异资产（不同基名）照常 mismatch 拦截。
+
+    注：与消费方 12 章 §十文本（剥 _f/_d/_i）存在口径差异——以平台知识为准（_d=
+    维表=来源表），消费方侧 _norm_mirror 需同步修正。"""
     s = str(name or "").strip().lower()
     base = s.rsplit(".", 1)[-1]
-    return base[:-2] if base.endswith(("_f", "_i", "_d")) and len(base) > 2 else base
+    return base[:-2] if base.endswith(("_f", "_i")) and len(base) > 2 else base
 
 
 def _check_dq_target(draft: dict, dq_rules: list | None) -> list:
