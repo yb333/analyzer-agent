@@ -42,6 +42,13 @@ class TestCrosscheck:
         assert mism[0]["severity"] == "structural"
         assert "R1" in mism[0]["title"] and "other_table" in mism[0]["title"]
 
+    def test_dq_target_if_mirror_no_warning(self):
+        """DQ 对 I 视图写、制品目标 F 表——同资产镜像，不误报（消费方实报 2026-11-04）。"""
+        rules = [{"rule_number": "R1", "target_table": "dws.dwb_cust_asset_i"},
+                 {"rule_number": "R2", "target_table": "DWB_CUST_ASSET_I"}]
+        out = run_crosscheck(_draft(), {}, {}, dq_rules=rules)
+        assert not [w for w in out if w["type"] == "dq_target_mismatch"]
+
     def test_dq_clean_no_warning(self):
         rules = [{"rule_number": "R1", "target_table": "DWB_CUST_ASSET_D"}]
         out = run_crosscheck(_draft(), {}, {}, dq_rules=rules)

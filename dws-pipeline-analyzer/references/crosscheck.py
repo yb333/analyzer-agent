@@ -66,6 +66,15 @@ def _final_target(draft: dict, engine_ctx: dict) -> tuple[str, str]:
     return schema.lower(), table.lower()
 
 
+def _norm_mirror(name: str) -> str:
+    """物理/视图镜像归一（消费方 12 章口径）：小写 + 剥 schema 前缀 + 剥尾部物理/视图
+    尾缀（_f/_d=物理侧——dwb 层以 _d 命名；_i=视图侧）。DQ 制品常对 _i 视图写、
+    术加对物理表写——同资产基名比较；异资产（不同基名）照常 mismatch 拦截。"""
+    s = str(name or "").strip().lower()
+    base = s.rsplit(".", 1)[-1]
+    return base[:-2] if base.endswith(("_f", "_i", "_d")) and len(base) > 2 else base
+
+
 def _check_dq_target(draft: dict, dq_rules: list | None) -> list:
     """术加 vs DQ：DQ 规则的目标表应与制品目标表一致——不符=料可能属其他资产。"""
     if not dq_rules:
@@ -76,7 +85,7 @@ def _check_dq_target(draft: dict, dq_rules: list | None) -> list:
     out = []
     for r in dq_rules:
         target = str(r.get("target_table") or "").strip().lower()
-        if target and target != final_table:
+        if target and _norm_mirror(target) != _norm_mirror(final_table):
             out.append({
                 "type": "dq_target_mismatch",
                 "severity": STRUCTURAL,
@@ -101,7 +110,7 @@ def _check_ddl_target(draft: dict, engine_ctx: dict, asm: dict) -> list:
         catalog = engine_ctx.get("table_catalog") or {}
         if final_table and f"{final_schema}.{final_table}" not in catalog:
             # 大小写容错：catalog key 归一小写后兜底再找一次
-            if not any(k.split(".")[-1] == final_table for k in catalog):
+            if not any(_norm_mirror(k) == _norm_mirror(final_table) for k in catalog):
                 out.append({
                     "type": "ddl_target_missing",
                     "severity": STRUCTURAL,
