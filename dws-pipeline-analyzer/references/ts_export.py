@@ -383,7 +383,8 @@ def _bucket_fields(ctx, step_id: str) -> tuple[dict, list]:
             assign.append({"target": target, "value": raw_expr})
         else:
             processed.append({"target": target, "logic": raw_expr, "refs": refs})
-    return {"processed": processed, "assign": assign, "direct": direct}, sorted(set(targets))
+    # 保序去重：首现序 = query_sql 的 SELECT 列序（同源同序——排序会破坏与逐字 SQL 的一致性）
+    return {"processed": processed, "assign": assign, "direct": direct}, list(dict.fromkeys(targets))
 
 
 # ═══════════════════════════════════════════════════════════════

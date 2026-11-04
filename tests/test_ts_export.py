@@ -100,6 +100,13 @@ class TestTopologyAndBuckets:
         assert r["field_count"] == n
         assert set(r["field_targets"]) >= {"order_id"}
 
+    def test_field_targets_follow_select_order(self):
+        """field_targets 与 query_sql 的 SELECT 列序同源同序（不排序——2026-11-04 实证：
+        sorted 后字母序与逐字 SQL 字段顺序矛盾，同一源两种说法）。"""
+        ts = _render("case_05_window")  # 4 列跨 direct/processed 两桶，字母序≠SELECT 序
+        r = ts["rules"]["UR005"]
+        assert r["field_targets"] == ["user_id", "login_date", "rn", "prev_login"]
+
 
 # ── 3. 物理属性 ───────────────────────────────────────────────
 
