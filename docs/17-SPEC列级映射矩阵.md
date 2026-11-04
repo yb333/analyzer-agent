@@ -321,8 +321,11 @@ mapping.xlsx 与 SPEC 同源装配不变（§九），模板换版为消费方�
 模板 v2 落地要点：
 - 模板入库 `templates/mapping模板.xlsx` + `MAPPING_TEMPLATE_HEADERS` 指纹基准 +
   `check_mapping_fingerprint`（机制同 §八；渲染前清模板示例行）；
-- 属性级 15 列：分组=场景（单场景 `default`）；直接复制表达式=`-`；DDL 填充
-  源表/字段中文名、字段类型、主键备注（`table_catalog` 含源表）；数据标准留空；
+- 属性级 15 列：分组=场景（单场景 `default`）；映射表达式没有就留空（不写 `-`，
+  2026-11-04 修订）；DDL 填充源表/字段中文名、源字段类型；目标字段类型 =
+  `meta.target_field_types` + `table_catalog` 双源大小写容错（同日修订：有 DDL
+  必填）；备注 = 主键/分布键（DDL pk / DISTRIBUTE BY，并存顿号合并，同日修订）；
+  数据标准留空；
 - 实体级**表级合并**：同物理表多处参与（子查询内外两别名 b、t2 / UNION 分支 /
   大小写混写）合并一行，别名顿号合并、条件段全保留；驱动表补注册主表行
   （包装形态下驱动表只作 JOIN 行左表出现）；虚拟逻辑表行不注册但其限制/窗口

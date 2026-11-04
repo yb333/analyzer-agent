@@ -127,14 +127,14 @@ class TestSemantics:
         cond = str(row[10] or "")
         assert "【b 内】" in cond, "块内参与段应保留在条件列"
 
-    def test_direct_copy_expr_dash(self, case32):
-        """直接复制行映射表达式 = '-'（模板约定）。"""
+    def test_direct_copy_expr_empty(self, case32):
+        """直接复制行映射表达式留空（2026-11-04 修订：不写 '-'）。"""
         ws = case32["属性级mapping"]
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         direct = [r for r in rows if r[8] == "直接复制"]
         assert direct, "应存在直接复制行"
-        assert all(r[9] == "-" for r in direct), \
-            f"直接复制表达式应为 '-'，实际 {[r[9] for r in direct]}"
+        assert all(r[9] in (None, "") for r in direct), \
+            f"直接复制表达式应留空，实际 {[r[9] for r in direct]}"
 
     def test_transform_expr_present(self, case32):
         """数据加工行映射表达式 = 展开态（含聚合/分组说明段）。"""
@@ -144,6 +144,59 @@ class TestSemantics:
         assert rows, "case_32 应有数据加工行"
         assert any("SUM" in str(r[9]) for r in rows), \
             f"展开态应含 SUM 聚合，实际 {[str(r[9])[:40] for r in rows]}"
+
+
+class TestDdlMetadata:
+    """DDL 元数据填充（2026-11-04 三点修订）：目标字段类型 + 主键/分布键备注。"""
+
+    def test_target_type_and_distribute_key(self, tmp_path):
+        """有目标表 DDL 时：目标字段类型逐行填充；DISTRIBUTE BY 字段备注='分布键'。"""
+        import shutil
+        case_dir = tmp_path / "case"
+        shutil.copytree(FIXTURES / "case_32_emp_real_sql", case_dir)
+        (case_dir / "target_ddl.sql").write_text(
+            "CREATE TABLE dws.dwb_eb_account_d (\n"
+            "    id numeric(20) NOT NULL,\n"
+            "    account_number nvarchar(50),\n"
+            "    is_datacom_flag nvarchar(1),\n"
+            "    crt_cycle_id bigint\n"
+            ")\n"
+            "DISTRIBUTE BY (id);\n"
+            "COMMENT ON COLUMN dws.dwb_eb_account_d.id IS '账户ID';\n",
+            encoding="utf-8")
+        from pipeline_core import run_from_dir
+        core = run_from_dir(str(case_dir), include_dq=False,
+                            channel="test", entry_title="")
+        out = tmp_path / "out"
+        export_mapping(core["knowledge"], core["engine_ctx"], str(out))
+        import openpyxl
+        wb = openpyxl.load_workbook(out / "mapping.xlsx")
+        try:
+            ws = wb["属性级mapping"]
+            rows = {str(r[10]): r for r in ws.iter_rows(min_row=2, values_only=True)
+                    if r[10]}
+            assert rows["id"][12] == "numeric(20)", \
+                f"id 目标类型应填充，实际 {rows['id'][12]}"
+            assert rows["account_number"][12] == "nvarchar(50)"
+            assert rows["id"][13] == "分布键", \
+                f"DISTRIBUTE BY 字段应标'分布键'，实际 {rows['id'][13]}"
+            assert rows["account_number"][13] in (None, ""), \
+                "非分布键字段备注应留空"
+            # 直接复制表达式留空
+            assert rows["id"][9] in (None, "")
+        finally:
+            wb.close()
+
+    def test_pk_and_distribute_both_marked(self, tmp_path):
+        """pk + 分布键并存 → 备注顿号合并。"""
+        meta = {"fields": {
+            "a": {"is_pk": True, "is_distribute_key": True},
+            "b": {"is_pk": True, "is_distribute_key": False},
+            "c": {"is_pk": False, "is_distribute_key": True},
+        }}
+        from mapping_export import _field_marks
+        marks = _field_marks(meta)
+        assert marks == {"a": "主键、分布键", "b": "主键", "c": "分布键"}
 
 
 class TestFingerprintGate:

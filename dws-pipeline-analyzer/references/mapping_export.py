@@ -6,11 +6,12 @@ Sheet4 字段行），保证 mapping 与 需求SPEC 逐格一致——不是第�
 mapping 特有：多场景分组（分组列）+ mapping模板.xlsx 列型 + DDL 元数据填充
 （源表/字段中文名、字段类型、主键备注）。
 
-模板 v2 口径（docs/17 同源，2026-11-04 拍板）：
+模板 v2 口径（docs/17 同源，2026-11-04 拍板 + 三点修订）：
 - 实体级 13 列：取数规则留空；关联方式并入「关联&限定条件」前缀（LEFT JOIN: …）；
   调度三列（调度任务名称/执行路径/依赖参数）不再承载——SPEC Sheet2 独占。
-- 属性级 15 列：分组=场景（单场景 default）；映射规则=四枚举；直接复制表达式='-'；
-  备注=主键（DDL distribute key/pk）；数据标准留空（平台侧补）。
+- 属性级 15 列：分组=场景（单场景 default）；映射规则=四枚举；映射表达式没有就
+  留空；目标字段类型 = meta.target_field_types + table_catalog 双源（大小写容错）；
+  备注 = 主键/分布键（DDL pk / DISTRIBUTE BY，并存顿号合并）；数据标准留空（平台侧补）。
 
 Author: 院博
 """
@@ -155,12 +156,23 @@ def _field_meta(table_meta: dict | None, field: str) -> dict:
     return table_meta.get("fields", {}).get(fld, {})
 
 
-def _pk_fields(meta: dict | None) -> set:
-    """表的主键字段集（DDL pk / distribute key，user 口径二者皆主键）。"""
+def _field_marks(meta: dict | None) -> dict:
+    """字段备注标记（属性级备注列）：主键（pk）/ 分布键（distribute key）。
+
+    Returns: {field(小写): "主键" / "分布键" / "主键、分布键"}
+    """
     if not meta:
-        return set()
-    return {f for f, v in meta.get("fields", {}).items()
-            if v.get("is_pk") or v.get("is_distribute_key")}
+        return {}
+    out = {}
+    for f, v in meta.get("fields", {}).items():
+        marks = []
+        if v.get("is_pk"):
+            marks.append("主键")
+        if v.get("is_distribute_key"):
+            marks.append("分布键")
+        if marks:
+            out[f] = "、".join(marks)
+    return out
 
 
 # ════════════════════════════════════════════════════════════
@@ -181,9 +193,8 @@ def build_mapping_model(knowledge: dict, engine_ctx: dict) -> dict:
     scenarios = list_scenarios(knowledge)
     catalog_idx = _catalog_index(engine_ctx)
 
-    # 目标表主键集（属性级 备注='主键' 的数据源）
+    # 目标表 DDL 元数据（目标字段类型/主键·分布键备注的数据源）
     tgt_meta = _table_meta(catalog_idx, ctx.target_schema, ctx.target_table)
-    target_pk = _pk_fields(tgt_meta)
 
     all_fields = []
     entity_rows = None
@@ -191,7 +202,7 @@ def build_mapping_model(knowledge: dict, engine_ctx: dict) -> dict:
         model = build_spec_model(knowledge, engine_ctx)
         entity_rows = model["sheet3"]
         for r in model["sheet4"]:
-            all_fields.append(_to_attr_row(r, "default", ctx, catalog_idx, target_pk))
+            all_fields.append(_to_attr_row(r, "default", ctx, catalog_idx, tgt_meta))
     else:
         for sc in scenarios:
             k_sc = select_scenario(knowledge, sc)
@@ -200,7 +211,7 @@ def build_mapping_model(knowledge: dict, engine_ctx: dict) -> dict:
                 entity_rows = model["sheet3"]
             sc_label = sc.get("partition") or sc.get("name") or ""
             for r in model["sheet4"]:
-                all_fields.append(_to_attr_row(r, sc_label, ctx, catalog_idx, target_pk))
+                all_fields.append(_to_attr_row(r, sc_label, ctx, catalog_idx, tgt_meta))
 
     return {
         "entity": _to_entity_rows(entity_rows or [], ctx, catalog_idx),
@@ -209,7 +220,7 @@ def build_mapping_model(knowledge: dict, engine_ctx: dict) -> dict:
     }
 
 
-def _to_attr_row(r, group: str, ctx, catalog_idx: dict, target_pk: set) -> dict:
+def _to_attr_row(r, group: str, ctx, catalog_idx: dict, tgt_meta: dict | None) -> dict:
     """SPEC Sheet4 行 → mapping 属性级行（模板 v2 15 列）。"""
     target_types = ctx.meta.get("target_field_types", {}) or {}
     target_comments = ctx.meta.get("target_field_comments", {}) or {}
@@ -221,6 +232,13 @@ def _to_attr_row(r, group: str, ctx, catalog_idx: dict, target_pk: set) -> dict:
             if k in target_comments:
                 return target_comments[k]
         return ""
+
+    # 目标字段类型：meta（引擎 DDL 下注）优先，catalog 兜底；大小写容错
+    def _tt(n):
+        for k in (n, n.lower(), n.upper()):
+            if k in target_types:
+                return target_types[k]
+        return _field_meta(tgt_meta, n).get("type", "")
 
     # 源表可能是多表合并（a、b 顿号分隔）——取第一张的 schema + DDL 元数据
     src_tables = (r[2] or "").split("、")
@@ -240,11 +258,11 @@ def _to_attr_row(r, group: str, ctx, catalog_idx: dict, target_pk: set) -> dict:
         src_field_cn = fm.get("comment", "")
         src_field_type = fm.get("type", "")
 
-    # 映射表达式：直接复制 = '-'（模板约定）；赋值/数据加工 = 展开态表达式
-    expr = "-" if type_label == "直接复制" else (r[6] or "-")
+    # 映射表达式：没有就留空（直接复制无表达式；展开态仅数据加工/赋值有）
+    expr = r[6] or ""
 
-    # 备注：目标字段命中 DDL 主键 → '主键'；其余留空（审计字段等人工补）
-    remark = "主键" if fname.lower() in target_pk else ""
+    # 备注：DDL 命中 → 主键/分布键（并存顿号合并）；其余留空（审计字段等人工补）
+    remark = _field_marks(tgt_meta).get(fname.lower(), "")
 
     return {
         "group": group,
@@ -258,7 +276,7 @@ def _to_attr_row(r, group: str, ctx, catalog_idx: dict, target_pk: set) -> dict:
         "expr": expr,                   # 展开态表达式（含说明段）
         "target_field": fname,
         "target_cn": r[11] or _tc(fname),
-        "target_type": target_types.get(fname, ""),
+        "target_type": _tt(fname),
         "remark": remark,
     }
 
