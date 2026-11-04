@@ -114,18 +114,31 @@ class TestSemantics:
         cond = main_rows[0][10] or ""
         assert "限制" in cond, "驱动表行应携带行级限制段（信息不丢）"
 
-    def test_same_physical_table_merged(self, case32):
-        """同物理表两处参与（b 包装层 + t2 块内层）合并一行：别名顿号合并。"""
+    def test_same_table_multi_alias_separate_rows(self, case32):
+        """同物理表两处参与（b 包装层 + t2 块内层）= 两行各带各的语义（2026-11-04
+        口径：按表×别名分行，嵌套维持 SPEC 既有逻辑）。"""
         ws = case32["实体级mapping"]
-        tables = [str(r[4]) for r in ws.iter_rows(min_row=2, values_only=True)]
-        assert tables.count("eb_account_tag_t") == 1, \
-            f"同物理表应合并为一行，实际出现 {tables.count('eb_account_tag_t')} 次"
-        row = next(r for r in ws.iter_rows(min_row=2, values_only=True)
-                   if r[4] == "eb_account_tag_t")
-        assert "b" in str(row[5]) and "t2" in str(row[5]), \
-            f"别名应合并 b、t2，实际 {row[5]}"
-        cond = str(row[10] or "")
-        assert "【b 内】" in cond, "块内参与段应保留在条件列"
+        rows = [r for r in ws.iter_rows(min_row=2, values_only=True)
+                if str(r[4]) == "eb_account_tag_t"]
+        assert len(rows) == 2, f"b、t2 应各一行，实际 {len(rows)} 行"
+        aliases = {str(r[5]) for r in rows}
+        assert aliases == {"b", "t2"}, f"别名应为 b/t2 各一行，实际 {aliases}"
+        b_row = next(r for r in rows if r[5] == "b")
+        assert "LEFT JOIN" in str(b_row[10] or ""), "b 行应带包装层 JOIN 条件"
+        t2_row = next(r for r in rows if r[5] == "t2")
+        assert "【b 内】" in str(t2_row[10] or ""), "t2 行应带块内标记"
+
+    def test_attribute_alias_closed_with_entity(self, case32):
+        """闭合校验：属性级（源表, 别名）⊆ 实体级注册行——别名不得凭空出现。"""
+        ws1, ws2 = case32["实体级mapping"], case32["属性级mapping"]
+        ent = {(str(r[4]).lower(), str(r[5] or "").lower())
+               for r in ws1.iter_rows(min_row=2, values_only=True) if r[4]}
+        for r in ws2.iter_rows(min_row=2, values_only=True):
+            if not r[3] or not r[4]:
+                continue  # 赋值/常量行无源表
+            key = (str(r[3]).split("、")[0].strip().lower(),
+                   str(r[4]).split("、")[0].strip().lower())
+            assert key in ent, f"属性级别名断链: {key} 不在实体级 {sorted(ent)}"
 
     def test_direct_copy_expr_empty(self, case32):
         """直接复制行映射表达式留空（2026-11-04 修订：不写 '-'）。"""
@@ -144,6 +157,49 @@ class TestSemantics:
         assert rows, "case_32 应有数据加工行"
         assert any("SUM" in str(r[9]) for r in rows), \
             f"展开态应含 SUM 聚合，实际 {[str(r[9])[:40] for r in rows]}"
+
+
+class TestMultiAliasJoin:
+    """同表多别名关联（2026-11-04 结构优化）：实体级按别名分行 + 字段别名闭合。"""
+
+    def test_triple_join_per_alias_rows(self, tmp_path):
+        """a 以三个条件关联 b（t1/t2/t3）：实体级 4 行、属性级别名各归各。"""
+        from engine import RawRule, analyze_pipeline, detect_dialect
+        sql = """
+SELECT a.id, a.name,
+       t1.flag AS flag1, t2.flag AS flag2, t3.amt AS amt3
+FROM ods.a_table a
+LEFT JOIN dim.b_table t1 ON a.id = t1.id AND t1.tp = '1'
+LEFT JOIN dim.b_table t2 ON a.id = t2.id AND t2.tp = '2'
+LEFT JOIN dim.b_table t3 ON a.pid = t3.pid
+"""
+        rules = [RawRule(rule_code="R1", rule_name="s1", rule_type=1, exec_sequence=1,
+                         target_schema="dws", target_table="dwb_x_d", delete_mode="1",
+                         query_sql=sql)]
+        engine_ctx = {}
+        knowledge, _ = analyze_pipeline(rules, {}, {}, detect_dialect([sql]),
+                                        source_file="x.xlsx", context_out=engine_ctx)
+        # SPEC Sheet4：字段别名 = 实际引用（引擎链节点 alias 带出）
+        from spec_export import build_spec_model
+        model = build_spec_model(knowledge, engine_ctx)
+        alias_by_field = {r[10]: r[3] for r in model["sheet4"]}  # r[10]=目标字段
+        assert alias_by_field["flag1"] == "t1", alias_by_field
+        assert alias_by_field["flag2"] == "t2", alias_by_field
+        assert alias_by_field["amt3"] == "t3", alias_by_field
+
+        # mapping：实体级 t1/t2/t3 三行 + 属性级闭合
+        from mapping_export import build_mapping_model
+        m = build_mapping_model(knowledge, engine_ctx)
+        b_rows = [e for e in m["entity"] if e["table"] == "b_table"]
+        assert [e["alias"] for e in b_rows] == ["t1", "t2", "t3"]
+        assert all("LEFT JOIN" in e["on_condition"] for e in b_rows)
+        attr = {a["target_field"]: a["alias"] for a in m["attribute"]}
+        assert attr["flag2"] == "t2" and attr["amt3"] == "t3"
+        ent = {(e["table"].lower(), (e["alias"] or "").lower()) for e in m["entity"]}
+        for a in m["attribute"]:
+            key = ((a["table"] or "").split("、")[0].lower(),
+                   (a["alias"] or "").split("、")[0].lower())
+            assert key in ent, f"属性级别名断链: {key}"
 
 
 class TestDdlMetadata:

@@ -265,7 +265,7 @@
        "table": "ods.products",
        "field": "product_id",
        "step_id": "step_1",
-       "alias": "",
+       "alias": "t",
        "transform": "direct",
        "raw_sql": ""
       }
@@ -299,7 +299,7 @@
        "table": "ods.products",
        "field": "product_name",
        "step_id": "step_1",
-       "alias": "",
+       "alias": "t",
        "transform": "direct",
        "raw_sql": ""
       }
@@ -333,7 +333,7 @@
        "table": "ods.products",
        "field": "price",
        "step_id": "step_1",
-       "alias": "",
+       "alias": "t",
        "transform": "direct",
        "raw_sql": ""
       }

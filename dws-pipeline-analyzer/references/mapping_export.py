@@ -282,10 +282,13 @@ def _to_attr_row(r, group: str, ctx, catalog_idx: dict, tgt_meta: dict | None) -
 
 
 def _to_entity_rows(sheet3: list, ctx, catalog_idx: dict) -> list:
-    """SPEC Sheet3 行 → mapping 实体级行（模板 v2 13 列，每物理表一行·表级合并）。
+    """SPEC Sheet3 行 → mapping 实体级行（模板 v2 13 列，按「表×别名」一行）。
 
-    同物理表多处参与（子查询内外两层别名、UNION 分支、大小写混写）合并为
-    一行：别名顿号合并、关联/限定段全保留——表不重复，信息不丢。
+    同表不同别名 = 多次独立参与 = 多行（2026-11-04 口径：a 通过不同关联条件
+    关联 b 三次，t1/t2/t3 三行各带各的条件；属性级字段别名与实体级行闭合）。
+    去重键 = (表名小写, 别名小写)——同表同别名大小写混写只出一行。
+    嵌套子查询维持 SPEC 既有逻辑：b（包装层）与 t2（块内驱动）各一行，
+    `【b 内】` = 块内行，备注不占主表位；UNION 分支按引擎场景判断归组。
 
     Sheet3 行格式 [id, left_tbl, left_alias, right_tbl, right_alias, join_type, g]：
     - 主表行（join_type=主表）：表名在 r[2]、别名在 r[3]（tmp 链模型特有布局）
@@ -312,36 +315,31 @@ def _to_entity_rows(sheet3: list, ctx, catalog_idx: dict) -> list:
         if (r[3] or "").startswith("虚拟逻辑表"):
             virtual_segs.setdefault((r[1] or "", r[2] or ""), []).append(r[6] or "")
 
-    # 表级 upsert：key = 表名小写（同物理表多处参与——别名 b、t2 / UNION 分支
-    # a、b / 大小写混写——合并为一行：别名顿号合并，条件段全保留，信息不丢）
-    by_table = {}
+    by_key = {}
     order = []
 
-    def _upsert(table, alias, on_cell, main=False):
+    def _register(table, alias, on_cell, main=False):
+        """按（表小写, 别名小写）注册一行；重复注册时虚拟段并入（信息不丢）。"""
         if not table or table.startswith("虚拟逻辑表"):
             return
-        key = table.lower()
-        row = by_table.get(key)
+        key = (table.lower(), (alias or "").lower())
+        row = by_key.get(key)
         if row is not None:
-            if alias and alias not in row["_aliases"]:
-                row["_aliases"].append(alias)
-            if on_cell:
-                row["_on"].append(on_cell)
-            if main:
-                row["remark"] = "主表"
+            if on_cell:  # 虚拟段/补挂限制并入该别名行
+                row["on_condition"] = (row["on_condition"] + "；" + on_cell
+                                       if row["on_condition"] else on_cell)
             return
-        schema = schema_of.get(key, "")
+        schema = schema_of.get(table.lower(), "")
         meta = _table_meta(catalog_idx, schema, table)
-        by_table[key] = {
+        by_key[key] = {
             "schema": schema,
             "table_cn": (meta or {}).get("comment", ""),
-            "table": table,
-            "_aliases": [alias] if alias else [],
+            "table": table, "alias": alias,
             "target_schema": ctx.target_schema,
             "target_cn": ctx.target_cn,
             "target_table": ctx.target_table,
             "rule": "",                    # 取数规则（模板留空，2026-11-04 口径）
-            "_on": [on_cell] if on_cell else [],
+            "on_condition": on_cell,
             "remark": "主表" if main else "",
             "db_type": "DWS",
         }
@@ -350,38 +348,34 @@ def _to_entity_rows(sheet3: list, ctx, catalog_idx: dict) -> list:
     for r in sheet3:
         if r[5] == "主表":
             # tmp 链主表行：r[2]=表名、r[3]=别名（SPEC 特有布局）
-            _upsert(r[2] or "", r[3] or "", r[6] or "", main=True)
+            _register(r[2] or "", r[3] or "", r[6] or "", main=True)
         elif (r[3] or "").startswith("—"):
             # E1 单表行：r[1]=表名、r[2]=别名（右表是占位符）
-            _upsert(r[1] or "", r[2] or "", r[6] or "", main=True)
+            _register(r[1] or "", r[2] or "", r[6] or "", main=True)
         elif (r[3] or "").startswith("虚拟逻辑表"):
             continue  # 预扫已归集，段随后并入驱动表主表行
         else:
-            # 标准关联行：左表首引用 → 先注册（每物理表一行）。
+            # 标准关联行：左表首引用 → 先注册主表行（按表×别名）。
             # 【b 内】标记 = 子查询块内行：其左表是块内驱动表，不是目标表主表
             # ——main=False（块内语义在该块首行 ON 上，备注不占主表位）。
             left_tbl = (r[1] or "").split(".")[-1]
             m_block = re.match(r"【(\w+)\s+内】", r[6] or "")
             if m_block:
-                _upsert(left_tbl, r[2] or "", f"【{m_block.group(1)} 内】")
+                _register(left_tbl, r[2] or "", f"【{m_block.group(1)} 内】")
             else:
-                _upsert(left_tbl, r[2] or "", "", main=True)
+                _register(left_tbl, r[2] or "", "", main=True)
             kind = r[5] or ""
-            on_cell = f"{kind}: {r[6] or ''}" if r[6] else kind
-            _upsert(r[3] or "", r[4] or "", on_cell)
+            _register(r[3] or "", r[4] or "",
+                      f"{kind}: {r[6] or ''}" if r[6] else kind)
 
     # 虚拟逻辑表段并入驱动表行（驱动表未注册过则此时补注册为主表）；
     # 纯交叉引用段（"【x 内】关联见上"，SPEC 行间导航语）不进 mapping
     for (tbl, alias), segs in virtual_segs.items():
         for seg in segs:
             if seg and not re.fullmatch(r"【\w+\s+内】关联见上", seg.strip()):
-                _upsert(tbl, alias, seg, main=True)
+                _register(tbl, alias, seg, main=True)
 
-    for key in order:
-        row = by_table[key]
-        row["alias"] = "、".join(row.pop("_aliases"))
-        row["on_condition"] = "；".join(row.pop("_on"))
-    return [by_table[k] for k in order]
+    return [by_key[k] for k in order]
 
 
 # ════════════════════════════════════════════════════════════

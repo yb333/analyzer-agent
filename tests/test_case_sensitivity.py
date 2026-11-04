@@ -232,19 +232,20 @@ SELECT b.x FROM ods.tab1 b"""},
         import openpyxl
         wb = openpyxl.load_workbook(Path(out) / "mapping.xlsx", read_only=True)
         ws = wb["实体级mapping"]
-        # 收集源表物理表名 + 分支归属（UNION 场景同表在不同分支各显示一次是正确的）
+        # 收集（表, 别名）对 + 分组归属——2026-11-04 口径：同表不同别名 = 多次
+        # 独立参与，多行合法；大小写混写的同一（表,别名）对不应重复
         rows_data = []
         for row in ws.iter_rows(min_row=2, values_only=True):
             if row and row[4]:  # 源表物理表名列（模板 v2 col[4]）
                 tbl = str(row[4]).strip().lower()
-                branch = str(row[1] or "").strip() if len(row) > 1 else ""  # 分组列=分支归属
-                rows_data.append((branch, tbl))
+                alias = str(row[5] or "").strip().lower()
+                branch = str(row[1] or "").strip() if len(row) > 1 else ""  # 分组列
+                rows_data.append((branch, tbl, alias))
         wb.close()
-        # 同一分支内归一化后不应有重复（跨分支允许同表重复，因为分支是不同场景）
         from collections import defaultdict
         by_branch = defaultdict(list)
-        for br, tbl in rows_data:
-            by_branch[br].append(tbl)
-        for br, tables in by_branch.items():
-            assert len(tables) == len(set(tables)), \
-                f"分支'{br}'内物理源表有大小写重复: {tables}"
+        for br, tbl, alias in rows_data:
+            by_branch[br].append((tbl, alias))
+        for br, pairs in by_branch.items():
+            assert len(pairs) == len(set(pairs)), \
+                f"分组'{br}'内（表,别名）对有大小写重复: {pairs}"

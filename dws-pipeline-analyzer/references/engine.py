@@ -4950,6 +4950,9 @@ def build_join_key_lineage(
                 "step_id": step_id,
                 "field": field_name,
                 "table": resolved_table,
+                # 入口别名随节点带出（2026-11-04 结构优化：同表多别名 t1/t2/t3
+                # 各自的字段引用要能区分——physical_source.alias 的数据源）
+                "alias": (table_alias or "").lower(),
                 "transform": "direct",
                 "raw_sql": "",
                 "is_physical": False,
@@ -4966,6 +4969,8 @@ def build_join_key_lineage(
         "step_id": step_id,
         "field": field_name,
         "table": resolved_table,
+        # 入口别名随节点带出（同上：呈现贴原文小写口径，与兜底反查一致）
+        "alias": (table_alias or "").lower(),
         "transform": "direct",
         "raw_sql": "",
         "is_physical": is_physical,

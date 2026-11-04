@@ -301,7 +301,7 @@
        "table": "dim.dim_product",
        "field": "product_id",
        "step_id": "step_1",
-       "alias": "",
+       "alias": "p",
        "transform": "direct",
        "raw_sql": ""
       }
@@ -335,7 +335,7 @@
        "table": "dim.dim_product",
        "field": "product_name",
        "step_id": "step_1",
-       "alias": "",
+       "alias": "p",
        "transform": "direct",
        "raw_sql": ""
       }
@@ -369,7 +369,7 @@
        "table": "dim.dim_product",
        "field": "price",
        "step_id": "step_1",
-       "alias": "",
+       "alias": "p",
        "transform": "direct",
        "raw_sql": ""
       }
