@@ -235,9 +235,9 @@ SELECT b.x FROM ods.tab1 b"""},
         # 收集源表物理表名 + 分支归属（UNION 场景同表在不同分支各显示一次是正确的）
         rows_data = []
         for row in ws.iter_rows(min_row=2, values_only=True):
-            if row and row[1]:  # 源表物理表名列
-                tbl = str(row[1]).strip().lower()
-                branch = str(row[10] or "").strip() if len(row) > 10 else ""  # 执行路径列=分支
+            if row and row[4]:  # 源表物理表名列（模板 v2 col[4]）
+                tbl = str(row[4]).strip().lower()
+                branch = str(row[1] or "").strip() if len(row) > 1 else ""  # 分组列=分支归属
                 rows_data.append((branch, tbl))
         wb.close()
         # 同一分支内归一化后不应有重复（跨分支允许同表重复，因为分支是不同场景）

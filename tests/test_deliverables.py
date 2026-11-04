@@ -241,10 +241,10 @@ class TestMappingExcel:
         # 找 amount 字段的行
         found_amount = False
         for row in ws2.iter_rows(min_row=2, values_only=True):
-            if row and row[8] and "amount" in str(row[8]).lower():
+            if row and row[10] and "amount" in str(row[10]).lower():
                 found_amount = True
-                # 最初来源（源表物理表名 col[2]）应含 tbl_a（穿透中间表 tmp1）
-                source_table = str(row[2] or "")
+                # 最初来源（源表物理表名 col[3]）应含 tbl_a（穿透中间表 tmp1）
+                source_table = str(row[3] or "")
                 assert "tbl_a" in source_table, f"amount 来源表应穿透到 tbl_a，实际 {source_table}"
                 break
         wb.close()
@@ -284,8 +284,8 @@ class TestMappingExcel:
         wb = openpyxl.load_workbook(Path(out) / "mapping.xlsx", read_only=True)
         ws1 = wb["实体级mapping"]
         for row in ws1.iter_rows(min_row=2, values_only=True):
-            if row and row[1]:
-                tbl = str(row[1]).lower()
+            if row and row[4]:
+                tbl = str(row[4]).lower()
                 assert "tmp1" not in tbl, f"实体级不应出现中间表 tmp1，实际 {tbl}"
         wb.close()
 
@@ -412,9 +412,9 @@ SELECT t.region, t.total FROM (
         ws2 = wb["属性级mapping"]
         found_total = False
         for row in ws2.iter_rows(min_row=2, values_only=True):
-            if row and row[8] and "total" in str(row[8]).lower():
+            if row and row[10] and "total" in str(row[10]).lower():
                 found_total = True
-                source_table = str(row[2] or "")
+                source_table = str(row[3] or "")
                 assert "tbl_a" in source_table, f"total 来源表应穿透到 tbl_a，实际 {source_table}"
                 break
         wb.close()
