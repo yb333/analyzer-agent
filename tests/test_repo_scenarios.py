@@ -306,9 +306,9 @@ class TestEndToEndRepoAnalysis:
 
         # 验证输出
         output_dir = output_base / "DWB_TRADE_ORDER_D"
-        assert (output_dir / "knowledge_draft.json").exists(), "knowledge_draft.json 应生成"
+        assert (output_dir / "_internal" / "knowledge_draft.json").exists(), "knowledge_draft.json 应生成"
         # 读 knowledge 验证
-        kj = json.loads((output_dir / "knowledge_draft.json").read_text(encoding="utf-8"))
+        kj = json.loads((output_dir / "_internal" / "knowledge_draft.json").read_text(encoding="utf-8"))
         assert kj["meta"]["target_table"] == "dwb_trade_order_d"
         # DDL 应被自动发现并利用（CLI 场景）
         assert kj["meta"]["target_field_types"], "CLI 场景 DDL 应被自动发现"
@@ -332,4 +332,4 @@ class TestEndToEndRepoAnalysis:
             _sys.argv = old_argv
 
         output_dir = output_base / "DWB_TRADE_ORDER_D"
-        assert (output_dir / "knowledge_draft.json").exists()
+        assert (output_dir / "_internal" / "knowledge_draft.json").exists()

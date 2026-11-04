@@ -829,14 +829,29 @@ def main():
         print(f"错误: 文件不存在: {input_path}", file=sys.stderr)
         sys.exit(1)
 
+
+    # ── 输入形态自识别（三形态一个入口，2026-11-04）──
+    #   制品目录（无 yml）→ 分拣装配（pipeline_core，facts/spec 同核）
+    #   代码仓规则组目录（含 yml）→ read_yml（legacy，代码仓结构后续会变、届时下线）
+    #   xlsx 文件 → read_excel
+    mode = _detect_input_mode(input_path)
+    if mode == "artifact_dir":
+        # 制品目录直入：LTS/DQ/DDL/I 视图全自动识别，用户无需任何附加参数
+        print(f"=== dws-pipeline-analyzer（制品目录直入）===")
+        print(f"输入: {input_path}")
+        print(f"输出基础目录: {base_output_dir}")
+        print()
+        _finish_analysis(args, _assemble_artifact_dir(input_path), base_output_dir,
+                         _t0_usage, _trace_id)
+        return
     print(f"=== dws-pipeline-analyzer ===")
-    print(f"输入: {input_path}")
+    print(f"输入: {input_path}（{'代码仓 yml' if mode == 'yml_dir' else 'xlsx'}）")
     print(f"输出基础目录: {base_output_dir}")
     print()
 
     # ── Step 1: 读取输入 ──
-    # 输入分流：.xlsx 文件 → read_excel；目录 → read_yml（代码仓 yml 场景）
-    is_yml_mode = input_path.is_dir()
+    # 输入分流：.xlsx 文件 → read_excel；目录 → read_yml（代码仓 yml，legacy）
+    is_yml_mode = (mode == "yml_dir")
     consumed_yml_files = []  # 实际读取的 yml 清单（asset_facts provenance 用）
     input_sheets = None      # xlsx 实际读到的 sheet 清单（v1.2 provenance[].sheets 用）
     if is_yml_mode:
@@ -1033,15 +1048,98 @@ def main():
           f"问题数: {len(quality['issues'])}")
     print()
 
-    # 性能诊断：读各阶段耗时（在写 JSON 前读，因为 _timings 不写进 JSON）
-    timings = knowledge.get("meta", {}).get("_timings", {})
-    # 解析阶段总耗时（_timings 里所有阶段之和）
-    _t_parse = round(sum(timings.values()), 2) if timings else 0
+    _finish_analysis(
+        args,
+        {"raw": raw, "rules": rules, "knowledge": knowledge,
+         "parsed_map": parsed_map, "engine_ctx": engine_ctx,
+         "input_sheets": input_sheets, "consumed_yml_files": consumed_yml_files,
+         "is_yml_mode": is_yml_mode,
+         "input_type": "yml_dir" if is_yml_mode else "xlsx",
+         "input_path": input_path},
+        base_output_dir, _t0_usage, _trace_id,
+        t_ddl=_t_ddl, t_lts=_t_lts)
 
-    # 写入文件（_timings 是性能诊断用，不写进 JSON）
+
+def _detect_input_mode(input_path: Path) -> str:
+    """输入形态自识别：artifact_dir（制品目录）/ yml_dir（代码仓，legacy）/ xlsx。
+
+    识别职责在脚本侧（用户只管把资产制品放一个目录，参考 facts 自识别）：
+    - 目录含 *.yml/*.yaml → 代码仓规则组（read_yml；代码仓结构后续会变，届时下线）
+    - 目录无 yml → 制品目录（assemble_artifact_dir 分拣，facts/spec 同核）
+    - 文件 → xlsx 制品包（read_excel）
+    """
+    if input_path.is_dir():
+        has_yml = any(input_path.glob("*.yml")) or any(input_path.glob("*.yaml"))
+        return "yml_dir" if has_yml else "artifact_dir"
+    return "xlsx"
+
+
+def _assemble_artifact_dir(input_path: Path) -> dict:
+    """制品目录直入：分拣→读取→引擎→增强一条链（pipeline_core 唯一定义）。
+
+    与 facts/spec 同核：术加必需（硬闸），LTS/DQ/DDL/I 视图全自动识别。
+    """
+    from pipeline_core import run_from_dir, AssemblyError
+    try:
+        core = run_from_dir(str(input_path), include_dq=True, channel="analyze",
+                            entry_title="")
+    except AssemblyError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    return {
+        "raw": core["raw"], "rules": core["rules"],
+        "knowledge": core["knowledge"], "parsed_map": core["parsed_map"],
+        "engine_ctx": core["engine_ctx"], "input_sheets": core["input_sheets"],
+        "consumed_yml_files": [], "is_yml_mode": False,
+        "input_type": "artifact_dir",
+        "input_path": core["input_path"],   # 术加制品包路径（provenance 用）
+    }
+
+
+def _finish_analysis(args, bundle: dict, base_output_dir: Path,
+                     t0: float, trace_id: str,
+                     t_ddl: float = 0.0, t_lts: float = 0.0):
+    """共尾：输出目录 + 过程件落 _internal + 视图一条命令跑到底 + 埋点。
+
+    产物分层（2026-11-04 目录规整）：交付物（mapping.xlsx / asset_report.html /
+    tech_design.md）在输出根目录；knowledge 过程件（knowledge_draft.json /
+    knowledge_summary.md / knowledge_ai.md）进 _internal/——AI 增强从必做中间步
+    降级为可选精修（写 knowledge_ai.md 后重跑 view_generator 覆盖）。
+    """
+    import time as _t
+
+    knowledge = bundle["knowledge"]
+    raw = bundle["raw"]
+    rules = bundle["rules"]
+    parsed_map = bundle["parsed_map"]
+    engine_ctx = bundle["engine_ctx"]
+    input_path = bundle["input_path"]
+    is_yml_mode = bundle["is_yml_mode"]
+
+    topology = knowledge["topology"]
+    data_flow = knowledge["data_flow"]
+    field_mappings = knowledge["field_mappings"]
+    quality = knowledge["quality"]
+    target_name = knowledge["meta"]["target_table"]
+    stats = field_mappings["statistics"]
+
+    # 性能诊断：读各阶段耗时（在写 JSON 前读，_timings 不写进 JSON）
+    timings = knowledge.get("meta", {}).get("_timings", {})
+    _t_parse = round(sum(timings.values()), 2) if timings else 0
     knowledge["meta"].pop("_timings", None)
-    _t_json0 = _t_usage.time()
-    output_file = output_dir / "knowledge_draft.json"
+
+    # 输出目录：基础目录/规则组英文名；过程件进 _internal/
+    group_en = (raw.get("rule_group_en") or "").strip()
+    if not group_en:
+        group_en = (raw.get("rule_group_code") or "").strip() or "output"
+    safe_group_en = re.sub(r'[<>:"/\\|?*\s]', "_", group_en)
+    output_dir = base_output_dir / safe_group_en
+    internal_dir = output_dir / "_internal"
+    internal_dir.mkdir(parents=True, exist_ok=True)
+    print(f"输出目录: {output_dir}")
+
+    _t_json0 = _t.time()
+    output_file = internal_dir / "knowledge_draft.json"
     output_file.write_text(
         json.dumps(knowledge, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1049,27 +1147,40 @@ def main():
     )
 
     # ── 生成 AI 增强用摘要 ──
-    summary_file = output_dir / "knowledge_summary.md"
-    summary_text = _generate_ai_summary(knowledge, rules, parsed_map, topology, field_mappings, quality, data_flow)
+    summary_file = internal_dir / "knowledge_summary.md"
+    summary_text = _generate_ai_summary(knowledge, rules, parsed_map, topology,
+                                        field_mappings, quality, data_flow)
     summary_file.write_text(summary_text, encoding="utf-8", newline="\n")
-    _t_json_summary = round(_t_usage.time() - _t_json0, 2)
+    _t_json_summary = round(_t.time() - _t_json0, 2)
+
+    # ── 视图一条命令跑到底（2026-11-04：analyze 不再依赖后续 AI 中间步）──
+    print("Step 8: 生成视图...")
+    _t_view0 = _t.time()
+    _view_exc = None
+    try:
+        from view_generator import (generate_mapping, generate_asset_report,
+                                    generate_tech_design)
+        generate_mapping(knowledge, str(output_dir), engine_ctx=engine_ctx)
+        generate_asset_report(knowledge, str(output_dir))
+        generate_tech_design(knowledge, str(output_dir))
+    except Exception as e:
+        _view_exc = e
+        print(f"  [WARN] 视图生成失败: {e}", file=sys.stderr)
+    _t_view = round(_t.time() - _t_view0, 2)
 
     # ── asset_facts 契约导出（--export asset_facts；校验不过 fail loud 不落盘）──
-    # 纯机器投影：AI 不参与（契约是纯物理事实包，任何 AI 补写都是假信息风险）。
-    # provenance 采集与 ctx 组装在 inputs.build_baseline_export_ctx（装配层），
-    # 契约校验/投影在 baseline_export（投影层）——本处只做 CLI 分发。
     baseline_path = None
     if args.export == "asset_facts":
         from baseline_export import export_baseline_v1, BaselineExportError
         export_ctx = build_baseline_export_ctx(
             knowledge, engine_ctx,
             is_yml_mode=is_yml_mode,
-            consumed_yml_files=consumed_yml_files,
+            consumed_yml_files=bundle["consumed_yml_files"],
             input_path=input_path,
             platform_generation=args.platform_generation,
             rule_group_en=raw.get("rule_group_en") or "",
             group_en_fallback=group_en,
-            input_sheets=input_sheets,
+            input_sheets=bundle["input_sheets"],
         )
         try:
             baseline_path = export_baseline_v1(knowledge, export_ctx, output_dir)
@@ -1078,10 +1189,10 @@ def main():
             print(str(e), file=sys.stderr)
             sys.exit(1)
 
-
     print(f"\n=== 完成 ===")
-    print(f"输出: {output_file}")
-    print(f"摘要: {summary_file}")
+    print(f"输出: {output_dir}")
+    print(f"  交付物: mapping.xlsx / asset_report.html / tech_design.md")
+    print(f"  过程件: _internal/knowledge_draft.json, _internal/knowledge_summary.md")
     if baseline_path is not None:
         # 消费方按 "asset_facts: {绝对路径}" 行定位契约产物（约定见 docs/asset_facts-契约.md）
         print(f"asset_facts: {baseline_path.resolve()}")
@@ -1100,51 +1211,55 @@ def main():
     # 性能诊断：输出慢阶段（>0.5s 的才显示，避免正常情况刷屏）
     slow = sorted(timings.items(), key=lambda x: -x[1])
     slow_filtered = [(n, t) for n, t in slow if t > 0.5]
-    # 把 DDL 发现和 LTS 发现也纳入慢阶段
-    if _t_ddl > 0.5:
-        slow_filtered.append(("ddl_discovery", _t_ddl))
-    if _t_lts > 0.5:
-        slow_filtered.append(("lts_discovery", _t_lts))
+    if t_ddl > 0.5:
+        slow_filtered.append(("ddl_discovery", t_ddl))
+    if t_lts > 0.5:
+        slow_filtered.append(("lts_discovery", t_lts))
+    if _t_view > 0.5:
+        slow_filtered.append(("view_generation", _t_view))
     slow_filtered.sort(key=lambda x: -x[1])
     total_t = sum(timings.values()) if timings else 0
     if slow_filtered:
-        all_t = total_t + _t_ddl + _t_lts
+        all_t = total_t + t_ddl + t_lts + _t_view
         print(f"\n分析耗时: {all_t:.1f}s（慢阶段:）")
         for name, t in slow_filtered:
             print(f"  {name}: {t:.1f}s")
-    elif _t_ddl > 0 or _t_lts > 0:
-        all_t = total_t + _t_ddl + _t_lts
+    elif t_ddl > 0 or t_lts > 0:
+        all_t = total_t + t_ddl + t_lts
         print(f"\n分析耗时: {all_t:.1f}s")
 
-    print(f"\n下一步: AI 读 knowledge_summary.md，输出自然语言补充，保存为 knowledge_ai.md")
-    print(f"        然后: python run.py view_generator --input knowledge_draft.json --ai-input knowledge_ai.md ...")
+    print(f"\n可选精修: AI 读 _internal/knowledge_summary.md 补业务理解，"
+          f"写 _internal/knowledge_ai.md 后重跑 view_generator 覆盖视图：")
+    print(f"  python run.py view_generator --input {output_file} "
+          f"--ai-input {internal_dir / 'knowledge_ai.md'} "
+          f"--output {output_dir} --views all")
 
     # ── 运营埋点：记录本次命令执行（在所有产出落盘之后） ──
     try:
-        from usage import record as _record_usage, _classify_error as _cls_err, _error_message as _msg_err
+        from usage import record as _record_usage
         _record_usage({
             "command": "analyze",
-            "input_type": "yml_dir" if is_yml_mode else "xlsx",
+            "input_type": bundle["input_type"],
             "asset": safe_group_en,
-            "trace_id": _trace_id,
+            "trace_id": trace_id,
             "target_table": target_name,
             "rule_count": len(rules),
             "field_count": stats.get("total_in_sql", 0) if isinstance(stats, dict) else 0,
-            "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
+            "elapsed_sec": round(_t.time() - t0, 2),
             "elapsed_detail": {
                 "parse": _t_parse,
-                "ddl_discovery": _t_ddl,
-                "lts_discovery": _t_lts,
+                "ddl_discovery": t_ddl,
+                "lts_discovery": t_lts,
                 "write_json_and_summary": _t_json_summary,
+                "view_generation": _t_view,
             },
-            "status": "error" if _usage_exc is not None else "ok",
-            "error_type": _cls_err(_usage_exc),
-            "error_message": _msg_err(_usage_exc),
+            "status": "partial" if _view_exc else "ok",
+            "error_type": "view_generation_error" if _view_exc else "",
+            "error_message": str(_view_exc) if _view_exc else "",
             "quality_issues": len(quality["issues"]) if isinstance(quality, dict) and "issues" in quality else 0,
         })
     except Exception:
         pass
-
 
 # ═══════════════════════════════════════════════════════════════
 # 多规则组链路分析（/analyze-chain）
@@ -1612,7 +1727,8 @@ def main_chain():
     # 输出
     safe_name = "chain_" + final_group_dir.name
     output_dir = Path(args.output) / safe_name
-    output_dir.mkdir(parents=True, exist_ok=True)
+    internal_dir = output_dir / "_internal"
+    internal_dir.mkdir(parents=True, exist_ok=True)
 
     # 在 pop 前读 _timings（运营埋点用）
     _chain_timings = knowledge.get("meta", {}).get("_timings", {})
@@ -1620,7 +1736,7 @@ def main_chain():
     knowledge["meta"].pop("_timings", None)
 
     _t_json0 = _t_usage.time()
-    output_file = output_dir / "knowledge_draft.json"
+    output_file = internal_dir / "knowledge_draft.json"
     output_file.write_text(
         json.dumps(knowledge, ensure_ascii=False, indent=2),
         encoding="utf-8", newline="\n",
@@ -1632,7 +1748,7 @@ def main_chain():
         knowledge["topology"], knowledge["field_mappings"],
         knowledge["quality"], knowledge["data_flow"],
     )
-    (output_dir / "knowledge_summary.md").write_text(summary_text, encoding="utf-8", newline="\n")
+    (internal_dir / "knowledge_summary.md").write_text(summary_text, encoding="utf-8", newline="\n")
     _t_json_summary = round(_t_usage.time() - _t_json0, 2)
 
     # 生成三件套（mapping + asset_report + tech_design）
@@ -1642,7 +1758,7 @@ def main_chain():
     try:
         from view_generator import (generate_mapping, generate_asset_report,
                                     generate_tech_design)
-        generate_mapping(knowledge, output_dir, engine_ctx=engine_ctx)
+        generate_mapping(knowledge, output_dir)
         generate_asset_report(knowledge, output_dir)
         generate_tech_design(knowledge, output_dir)
     except Exception as e:
@@ -1659,10 +1775,8 @@ def main_chain():
     print(f"字段数: {stats['total_in_sql']}")
     print(f"目标表: {target_table}")
     print(f"\n已生成:")
-    print(f"  - knowledge_draft.json")
-    print(f"  - mapping.xlsx")
-    print(f"  - asset_report.html")
-    print(f"  - tech_design.md")
+    print(f"  - mapping.xlsx / asset_report.html / tech_design.md")
+    print(f"  - _internal/knowledge_draft.json, _internal/knowledge_summary.md")
 
     # ── 运营埋点：记录本次链路分析 ──
     try:

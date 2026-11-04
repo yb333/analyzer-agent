@@ -149,7 +149,7 @@ class TestDqChannelsE2E:
         ])
         _run_main(["--input", str(ET_XLSX), "--output", str(tmp_path / "out"),
                    "--dq", str(xlsx)])
-        draft = json.loads((tmp_path / "out" / "DWB_CUST_ASSET_D" / "knowledge_draft.json")
+        draft = json.loads((tmp_path / "out" / "DWB_CUST_ASSET_D" / "_internal" / "knowledge_draft.json")
                            .read_text(encoding="utf-8"))
         assert len(draft["meta"]["dq_rules"]) == 1
         assert draft["meta"]["dq_rules"][0]["target_schema"] == "dws"

@@ -304,3 +304,37 @@ D2 右表物理真名+内部别名 / 场景=整体粒度、v1 单场景（方案
 - 子查询谓词保真：引擎 where_clause 吞子查询 WHERE 时，从 raw_sql 回贴原文（贴码原则）；
 - CTE 内加工字段源表回填：经 cte_joins 别名映射解析主物理源，备注指向表3贴码（缺口 3 部分闭合）；
 - 谓词守恒（§七）：漏放任一 WHERE/HAVING → structural → self_check=review。
+
+## 十一、mapping 模板 v2 与 analyze 入口规整（2026-11-04）
+
+mapping.xlsx 与 SPEC 同源装配不变（§九），模板换版为消费方新 13/15 列。六项口径拍板：
+
+| # | 问题 | 拍板 |
+|---|------|------|
+| 1 | 取数规则列 | 留空（消费方暂无定义） |
+| 2 | 关联方式落点 | 并入「关联&限定条件」前缀：`LEFT JOIN: {ON}；限制：…` |
+| 3 | 调度三列（调度任务名称/执行路径/依赖参数） | 不再承载——SPEC Sheet2 独占 |
+| 4 | 数据加工行映射表达式 | 沿用机器展开态（模板样例的人工中文描述是正向写法，逆向产展开态） |
+| 5 | tech_design.md | 暂留顶层交付物（后续可能优化） |
+| 6 | analyze 默认产出 | html + mapping + tech_design；spec 走独立通道 |
+
+模板 v2 落地要点：
+- 模板入库 `templates/mapping模板.xlsx` + `MAPPING_TEMPLATE_HEADERS` 指纹基准 +
+  `check_mapping_fingerprint`（机制同 §八；渲染前清模板示例行）；
+- 属性级 15 列：分组=场景（单场景 `default`）；直接复制表达式=`-`；DDL 填充
+  源表/字段中文名、字段类型、主键备注（`table_catalog` 含源表）；数据标准留空；
+- 实体级**表级合并**：同物理表多处参与（子查询内外两别名 b、t2 / UNION 分支 /
+  大小写混写）合并一行，别名顿号合并、条件段全保留；驱动表补注册主表行
+  （包装形态下驱动表只作 JOIN 行左表出现）；虚拟逻辑表行不注册但其限制/窗口
+  收敛段并入驱动表行——物化无关铁律：表不出现，信息不丢；
+  `【b 内】`标记行 = 子查询块内行：块内驱动表备注不占主表位；
+- view_generator 旧 12 列回退逻辑删除——指纹漂移必须显式红（不静默降级）。
+
+analyze 入口规整（同日）：
+- `--input` 三形态自识别：制品目录（无 yml，`pipeline_core.run_from_dir` 同核
+  装配，LTS/DQ/DDL/I 视图全自动）/ xlsx 文件 / 代码仓 yml 目录（legacy，结构
+  变更后下线——隔离在 `_detect_input_mode` 单分支）；
+- 一条命令跑到底：analyze 内联接视图（mapping/asset/techspec），AI 增强从
+  必做中间步降级为可选精修（写 `knowledge_ai.md` 后重跑 view_generator 覆盖）；
+- 产物分层：交付物在 `{output_dir}/` 根，knowledge 过程件（draft/summary/ai）
+  进 `_internal/；chain 路径同口径。

@@ -53,6 +53,7 @@ def run_from_dir(dir_path, *, include_dq: bool = True, channel: str = "facts",
         schedule_info   read_lts_excel 结果（无 LTS 制品时 None）
         dq_rules        read_dq_excel 结果（include_dq=False 或无 DQ 时 None）
         knowledge       引擎组装的 knowledge dict
+        parsed_map      {rule_code: ParsedSQL}（AI summary 等消费方用）
         engine_ctx      analyze_pipeline 的 context_out（table_catalog/final_target_*/ddl_files）
     """
     # ── 分拣（识别职责全在本侧：术加硬闸 / 多义 fail / 其余不阻断）──
@@ -116,7 +117,7 @@ def run_from_dir(dir_path, *, include_dq: bool = True, channel: str = "facts",
     print(f"Step 2: 方言 = {dialect}")
     print("Step 3-7: 解析 + 组装 knowledge...")
     engine_ctx = {}
-    knowledge, _parsed = analyze_pipeline(
+    knowledge, parsed_map = analyze_pipeline(
         rules, raw["target_fields"], raw["group_variables"], dialect,
         ddl_dir=ddl_dir, source_file=input_path.name,
         rule_group_code=raw.get("rule_group_code") or "",
@@ -148,4 +149,5 @@ def run_from_dir(dir_path, *, include_dq: bool = True, channel: str = "facts",
         "asm": asm, "input_path": input_path, "input_sheets": input_sheets,
         "raw": raw, "rules": rules, "schedule_info": schedule_info,
         "dq_rules": dq_rules, "knowledge": knowledge, "engine_ctx": engine_ctx,
+        "parsed_map": parsed_map,
     }

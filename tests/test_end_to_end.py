@@ -387,9 +387,13 @@ class TestEndToEnd:
         # 产物应在 base_out/DWL_TEST_PIPELINE/ 下
         expected_dir = Path(base_out) / "DWL_TEST_PIPELINE"
         assert expected_dir.exists(), f"应按规则组英文名建子目录 {expected_dir}"
-        assert (expected_dir / "knowledge_draft.json").exists(), \
-            "knowledge_draft.json 应在规则组英文名子目录下"
-        assert (expected_dir / "knowledge_summary.md").exists()
+        # 产物分层（2026-11-04）：交付物在根，knowledge 过程件在 _internal/
+        assert (expected_dir / "mapping.xlsx").exists(), "mapping.xlsx 应在子目录下"
+        assert (expected_dir / "asset_report.html").exists()
+        assert (expected_dir / "tech_design.md").exists()
+        assert (expected_dir / "_internal" / "knowledge_draft.json").exists(), \
+            "knowledge_draft.json 应在 _internal/ 下"
+        assert (expected_dir / "_internal" / "knowledge_summary.md").exists()
 
     def test_main_flow_falls_back_when_no_rule_group_en(self, tmp_output):
         """规则组英文名缺失时，应回退到规则组编码，再回退到 output"""

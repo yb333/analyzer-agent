@@ -5,6 +5,7 @@ Usage:
     python run.py <script_name> [script_args...]
 
 Examples:
+    python run.py analyze --input {制品目录} --output output/    # 三形态自识别（推荐）
     python run.py analyzer --input execution_tasks.xlsx --output output/
     python run.py view_generator --input knowledge_draft.json --output output/
     python run.py facts --dir {制品目录} --output {asset_facts.json 绝对路径}

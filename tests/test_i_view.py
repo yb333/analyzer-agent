@@ -182,7 +182,7 @@ class TestIViewInAnalysisPipeline:
             _sys.argv = old_argv
 
         out_dir = output_base / "DWB_TRADE_SUM_F"
-        kj = json.loads((out_dir / "knowledge_draft.json").read_text(encoding="utf-8"))
+        kj = json.loads((out_dir / "_internal" / "knowledge_draft.json").read_text(encoding="utf-8"))
 
         # target_table 应是 I 视图（不是 F 表）
         assert kj["meta"]["target_table"] == "dwb_trade_sum_i", \
@@ -221,7 +221,7 @@ class TestIViewInAnalysisPipeline:
             _sys.argv = old_argv
 
         out_dir = output_base / "DWB_NOVIEW_F"
-        kj = json.loads((out_dir / "knowledge_draft.json").read_text(encoding="utf-8"))
+        kj = json.loads((out_dir / "_internal" / "knowledge_draft.json").read_text(encoding="utf-8"))
         # 没有视图，target_table 仍是 F 表
         assert kj["meta"]["target_table"] == "dwb_noview_f"
 
@@ -241,7 +241,7 @@ class TestIViewInAnalysisPipeline:
             _sys.argv = old_argv
 
         out_dir = output_base / "DWB_TRADE_SUM_F"
-        kj = json.loads((out_dir / "knowledge_draft.json").read_text(encoding="utf-8"))
+        kj = json.loads((out_dir / "_internal" / "knowledge_draft.json").read_text(encoding="utf-8"))
 
         # I 视图步骤（step_2）应有字段
         step2_fields = [f for f in kj["field_mappings"]["fields"]
@@ -307,7 +307,7 @@ class TestExchangePartitionWithIView:
             _sys.argv = old_argv
 
         kj = json.loads((tmp_path / "out" / "DWB_TEST_F" /
-                         "knowledge_draft.json").read_text(encoding="utf-8"))
+                         "_internal" / "knowledge_draft.json").read_text(encoding="utf-8"))
         ls = kj["meta"]["load_strategy"]
         assert ls["strategy"] != "unknown", \
             f"加工方式不应是未知（I视图步骤不该干扰判断），实际 {ls}"
@@ -326,7 +326,7 @@ class TestExchangePartitionWithIView:
             _sys.argv = old_argv
 
         kj = json.loads((tmp_path / "out" / "DWB_TEST_F" /
-                         "knowledge_draft.json").read_text(encoding="utf-8"))
+                         "_internal" / "knowledge_draft.json").read_text(encoding="utf-8"))
         ai = kj["meta"].get("asset_info", {})
         assert ai.get("view_step"), "应有 view_step"
 
@@ -359,7 +359,7 @@ class TestExchangePartitionWithIView:
             _sys.argv = old_argv
 
         kj = json.loads((tmp_path / "out" / "DWB_TEST_F" /
-                         "knowledge_draft.json").read_text(encoding="utf-8"))
+                         "_internal" / "knowledge_draft.json").read_text(encoding="utf-8"))
         # 交换分区步骤的字段应有类型（从 F 表 DDL 注入）
         fields = kj["field_mappings"]["fields"]
         exchange_fields = [f for f in fields
@@ -392,7 +392,7 @@ class TestIViewFieldPenetration:
             _sys.argv = old_argv
 
         kj = json.loads((tmp_path / "out" / "DWB_TRADE_SUM_F" /
-                         "knowledge_draft.json").read_text(encoding="utf-8"))
+                         "_internal" / "knowledge_draft.json").read_text(encoding="utf-8"))
         report = build_report_data(kj)
 
         # total 字段：F 表是 aggregate（SUM），I 视图是 direct，穿透后应为 aggregate
@@ -422,7 +422,7 @@ class TestIViewFieldPenetration:
             _sys.argv = old_argv
 
         kj = json.loads((tmp_path / "out" / "DWB_TRADE_SUM_F" /
-                         "knowledge_draft.json").read_text(encoding="utf-8"))
+                         "_internal" / "knowledge_draft.json").read_text(encoding="utf-8"))
         report = build_report_data(kj)
 
         for f in report["fields"]:
@@ -446,7 +446,7 @@ class TestIViewFieldPenetration:
             _sys.argv = old_argv
 
         kj = json.loads((tmp_path / "out" / "DWB_TRADE_ORDER_D" /
-                         "knowledge_draft.json").read_text(encoding="utf-8"))
+                         "_internal" / "knowledge_draft.json").read_text(encoding="utf-8"))
         report = build_report_data(kj)
 
         # 无 I 视图 → 无穿透标注

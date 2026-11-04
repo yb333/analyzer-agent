@@ -50,21 +50,34 @@ python -c "import openpyxl, sqlglot; print('OK')"
 > **规则组英文名称**（取自 Excel/yml「规则组英文名称」，缺失则回退规则组编码）建子目录。
 > 下文 `{output_dir}` 代指该自动创建的子目录，从 Step 1 输出日志读取真实路径。
 
-### Step 1: 执行分析脚本
+> **输入形态自识别（2026-11-04）**：`--input` 三形态一个入口，脚本自动分流——
+> - **制品目录**（推荐）：该资产全部制品放一个目录（术加制品包 xlsx 必需，
+>   LTS/DQ/DDL 可选，类型自动识别）→ 一条命令全部交付物，无需任何附加参数
+> - **xlsx 文件**：单独给术加制品包（无 LTS/DQ/DDL，需 `--lts/--dq/--ddl-dir` 显式补）
+> - **代码仓规则组目录**（legacy）：含 `*.yml` 的目录；代码仓结构后续会变，届时下线
+
+> **产物分层**：交付物在 `{output_dir}/` 根；knowledge 过程件在 `{output_dir}/_internal/`。
+
+### Step 1: 执行分析脚本（一条命令跑到底）
 
 ```bash
-python {skill_dir}/run.py analyzer --input {input_xlsx} --output ./output/ [--ddl-dir {ddl_dir}]
+# 制品目录直入（推荐——LTS/DQ/DDL 全自动识别）
+python {skill_dir}/run.py analyze --input {制品目录} --output ./output/
+
+# xlsx 文件（可选补 --ddl-dir/--lts/--dq）
+python {skill_dir}/run.py analyze --input {input_xlsx} --output ./output/ [--ddl-dir {ddl_dir}]
 ```
 
-DDL 目录：xlsx 场景用 `--ddl-dir` 指定（可选）；yml/代码仓场景自动发现。
+产出（一次全出）：
+- 交付物：`{output_dir}/mapping.xlsx`（模板 v2：13/15 列、分组、DDL 元数据）+
+  `asset_report.html` + `tech_design.md`
+- 过程件：`{output_dir}/_internal/knowledge_draft.json` + `_internal/knowledge_summary.md`
 
-产出：`{output_dir}/knowledge_draft.json` + `{output_dir}/knowledge_summary.md`
+### Step 2（可选精修）: AI 补充业务理解后覆盖视图
 
-### Step 2: AI 补充业务理解
+**AI 只读 `_internal/knowledge_summary.md`（2-4KB 摘要），不读 34KB 的 JSON。**
 
-**AI 只读 `knowledge_summary.md`（2-4KB 摘要），不读 34KB 的 JSON。**
-
-AI 基于摘要，按模板格式输出自然语言，保存为 `knowledge_ai.md`：
+AI 基于摘要，按模板格式输出自然语言，保存为 `_internal/knowledge_ai.md`：
 
 ```markdown
 # 整体描述
@@ -80,19 +93,17 @@ AI 基于摘要，按模板格式输出自然语言，保存为 `knowledge_ai.md
 - 字段名: 业务含义
 ```
 
-### Step 3: 生成全部视图
+然后重跑 view_generator 覆盖视图（AI 内容注入 html/tech_design）：
 
 ```bash
 python {skill_dir}/run.py view_generator \
-    --input {output_dir}/knowledge_draft.json \
-    --ai-input {output_dir}/knowledge_ai.md \
+    --input {output_dir}/_internal/knowledge_draft.json \
+    --ai-input {output_dir}/_internal/knowledge_ai.md \
     --output {output_dir} \
     --views all
 ```
 
-`--ai-input` 是可选的（没有 AI 增强时跳过，用脚本兜底描述）。
-
-### Step 4: 报告结果
+### Step 3: 报告结果
 
 ```
 分析完成！
@@ -102,7 +113,7 @@ python {skill_dir}/run.py view_generator \
 加工模式：{patterns}
 
 已生成：
-- mapping.xlsx       — 字段映射
+- mapping.xlsx       — 字段映射（模板 v2）
 - asset_report.html  — 资产说明书
 - tech_design.md     — 技术设计文档
 
@@ -139,12 +150,12 @@ python {skill_dir}/run.py facts --dir {制品目录} --output {asset_facts.json 
 
 ## 命令参数
 
-### analyzer
+### analyzer（别名 analyze）
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `--input` | 是 | execution_tasks.xlsx 路径或代码仓规则组目录（agent 编排调用请用 `run.py facts`） |
-| `--output` | 是 | 输出目录 |
+| `--input` | 是 | 三形态自识别：制品目录（推荐，LTS/DQ/DDL 全自动）/ execution_tasks.xlsx / 代码仓规则组目录（legacy）（agent 编排调用请用 `run.py facts`） |
+| `--output` | 是 | 输出基础目录（其下按规则组英文名建子目录；交付物在根，knowledge 过程件在 `_internal/`） |
 | `--dialect` | 否 | oracle/dws/auto，默认自动检测 |
 | `--ddl-dir` | 否 | DDL 目录（补充字段类型和注释） |
 | `--lts` | 否 | LTS 调度任务 excel（平台导出三 sheet：tasks/jobs/taskParams）；xlsx/yml 场景均可，优先于代码仓自动发现 |

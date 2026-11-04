@@ -4,95 +4,92 @@ description: DWS 制品包分析（分析制品包→生成知识文档+三视�
 
 # /analyze — 制品包分析命令
 
-用户提供执行平台制品包（execution_tasks.xlsx），自动分析并生成全部交付物。
+用户给资产制品，自动分析并生成全部交付物。**一条命令跑到底**：分析 + 三视图一次产出。
 
 ## 触发方式
 
-支持三种输入形态，同一个 `/analyze` 命令：
+支持多种输入形态，同一个 `/analyze` 命令，脚本自动分流（三形态一个入口）：
 
-### 形态 1：xlsx 文件（执行平台导出的制品包）
+### 形态 1：制品目录（推荐）
+
+```
+/analyze @制品目录/
+/analyze path/to/artifacts/
+```
+
+把该资产**全部制品放一个目录**：术加制品包（execution_tasks.xlsx）必需，
+LTS 调度 excel / DQ 质量规则 excel / DDL（.sql/.ddl）可选——类型自动识别
+（excel 按 sheet 指纹、DDL 按后缀），**用户无需任何附加参数**。
+
+### 形态 2：xlsx 文件（执行平台导出的制品包）
 
 ```
 /analyze @execution_tasks.xlsx
 /analyze path/to/execution_tasks.xlsx
 ```
 
-### 形态 2：代码仓 yml 规则组目录
+单独给术加制品包；LTS/DQ/DDL 需 `--lts/--dq/--ddl-dir` 显式补（可选）。
+
+### 形态 3：代码仓 yml 规则组目录（legacy）
 
 ```
 /analyze @BFT/BftWideTable/P_TRADE/SUB_TRADE/DWB_TRADE_ORDER_D/
-/analyze path/to/DWB_TRADE_ORDER_D/
-```
-
-指向规则组目录即可，工具自动读取目录下所有 `*.yml`（一个 yml = 一条规则）。
-
-### 形态 3：只说表名，AI 自动定位代码仓目录
-
-```
 /analyze DWB_TRADE_ORDER_D
-"分析 DWB_TRADE_ORDER_D 这个表"
 ```
 
-AI 在代码仓 `BFT/BftWideTable/` 下搜索匹配的规则组目录，找到后走形态 2；
-找到多个同名则让用户选；找不到则提示用户提供目录路径。
+指向规则组目录即可（表名先让 AI 在代码仓 `BFT/BftWideTable/` 下定位目录）。
+工具自动读取目录下所有 `*.yml`（一个 yml = 一条规则）。
+> 代码仓结构后续会变、此形态会下线——新能力不依赖它。
 
-### AI 判断规则
+## AI 判断规则
 
 | 输入 | AI 判断 | 脚本处理 |
 |------|---------|---------|
-| `.xlsx` 文件 | xlsx 场景 | `--input xxx.xlsx` → read_excel |
-| 目录路径 | yml 场景 | `--input 目录/` → read_yml |
-| 表名（非文件非目录） | AI 先找目录 | 找到后 `--input 目录/` → read_yml |
-
-AI 也可以在用户拖入 xlsx 或说"分析这个表""帮我看看这个ETL"时自动触发。
+| 目录（无 `*.yml`） | 制品目录 | 分拣装配（facts/spec 同核），LTS/DQ/DDL/I 视图全自动 |
+| 目录（含 `*.yml`） | 代码仓规则组 | `--input 目录/` → read_yml |
+| `.xlsx` 文件 | 术加制品包 | `--input xxx.xlsx` → read_excel |
+| 表名（非文件非目录） | AI 先找目录 | 找到后同代码仓形态；多个同名让用户选 |
 
 ## 执行流程
 
-> **路径约定**：`--output` 指定的是**基础目录**（如工作目录或 `docs/`）。
-> 脚本会自动在该目录下按**规则组英文名称**（取自 Excel/yml 的「规则组英文名称」，
-> 缺失则回退到规则组编码）建子目录，所有产物输出到那里。
-> 下面用 `{output_dir}` 代指这个自动创建的子目录，AI 从 Step 1 的输出日志读取其真实路径。
+> **路径约定**：`--output` 固定用 `./output/`（基础目录）。脚本会自动在其下按
+> **规则组英文名称**（缺失则回退规则组编码）建子目录。下文 `{output_dir}` 代指
+> 该自动创建的子目录，AI 从 Step 1 的输出日志读取其真实路径。
+>
+> **产物分层**：交付物在 `{output_dir}/` 根；knowledge 过程件在
+> `{output_dir}/_internal/`（AI 增强材料都在这里）。
 
-### Step 1: 执行分析脚本
+### Step 1: 执行分析脚本（一次全出）
 
 ```bash
-# xlsx 场景
-python {skill_dir}/run.py analyzer \
-    --input {input_xlsx} \
-    --output ./output/
+# 制品目录直入（推荐）
+python {skill_dir}/run.py analyze --input {制品目录} --output ./output/
 
-# yml 场景（--input 指向规则组目录）
-python {skill_dir}/run.py analyzer \
-    --input {规则组目录} \
-    --output ./output/
+# xlsx / 代码仓目录
+python {skill_dir}/run.py analyze --input {input} --output ./output/
 ```
 
-**输出目录固定为 `./output/`**：每次都用同一个基础目录，脚本在其下按规则组英文名建子目录。
-不要用 `docs/` 等其他名字，避免每次产出散落在不同地方。
-（代码仓场景见下方「输出目录建议」，建议指向代码仓外。）
+产出：
 
-**输入自动分流**：脚本根据 `--input` 是文件还是目录，自动选择 read_excel 或 read_yml，
-用户无需指定。两种路径产出完全一致（共用同一引擎）。
+```
+{output_dir}/
+├── mapping.xlsx          — 字段映射（模板 v2：实体级 13 列 + 属性级 15 列，
+│                           分组、DDL 元数据、关联方式并入关联条件列）
+├── asset_report.html     — 资产说明书（交互式，含血缘图+SQL高亮）
+├── tech_design.md        — 技术设计文档（9 章节）
+└── _internal/
+    ├── knowledge_draft.json   — knowledge 全量（过程件）
+    └── knowledge_summary.md   — AI 增强用摘要（过程件）
+```
 
-**输出目录建议**：`--output` 建议指定到**代码仓外**（如 `~/docs/` 或 `./output/`），
-不要放代码仓内。产出文档放代码仓内会污染 git 状态（每次分析产生未跟踪文件），
-和源码混在一起也不清晰。
+需求 SPEC 单独走 spec 通道：
+`python run.py spec --dir {制品目录} --output {路径} [--scenario {场景}]`
+（制品目录直入：术加必选 + LTS/DDL 可选；列口径见 docs/17）
 
-**DDL 发现**：
-- yml 场景：自动发现。从规则组目录向上定位代码仓根（含 `BFT/`+`DDL/`），再按
-  `DDL/{DWS_EDW|DWS_RT_EDW}/{schema}/table/{目标表}.sql` 查找
-- xlsx 场景：不自动发现（xlsx 是临时导出，DDL 位置不统一），需 `--ddl-dir` 指定
-- 找不到时不阻塞分析（DDL 是可选增强）
+### Step 2（可选精修）: AI 补充业务理解后覆盖视图
 
-`--output` 给基础目录即可，脚本会打印实际输出目录（`输出目录: ...`），后续步骤用它。
-
-产出：`{output_dir}/knowledge_draft.json` + `{output_dir}/knowledge_summary.md`
-
-### Step 2: AI 补充业务理解（必做，不能跳过）
-
-**AI 读 `{output_dir}/knowledge_summary.md`**（2-4KB 摘要，不读 34KB JSON）。
-
-基于摘要，按以下格式输出自然语言，保存为 `{output_dir}/knowledge_ai.md`：
+AI 读 `{output_dir}/_internal/knowledge_summary.md`（2-4KB 摘要，不读大 JSON），
+按以下格式输出自然语言，保存为 `{output_dir}/_internal/knowledge_ai.md`：
 
 ```markdown
 # 整体描述
@@ -108,19 +105,17 @@ python {skill_dir}/run.py analyzer \
 - 字段名: 业务含义
 ```
 
-注意：脚本已自动生成兜底描述，AI 补充的会覆盖兜底版本。
-
-### Step 3: 生成全部视图
+然后重跑 view_generator 覆盖视图（AI 内容注入 html/tech_design）：
 
 ```bash
 python {skill_dir}/run.py view_generator \
-    --input {output_dir}/knowledge_draft.json \
-    --ai-input {output_dir}/knowledge_ai.md \
+    --input {output_dir}/_internal/knowledge_draft.json \
+    --ai-input {output_dir}/_internal/knowledge_ai.md \
     --output {output_dir} \
     --views all
 ```
 
-### Step 4: 报告结果
+### Step 3: 报告结果
 
 向用户展示：
 
@@ -132,13 +127,9 @@ python {skill_dir}/run.py view_generator \
 加工模式：{patterns}
 
 已生成：
-- mapping.xlsx          — 字段映射（实体级+属性级，CTE穿透）
+- mapping.xlsx          — 字段映射（模板 v2，实体级+属性级，CTE穿透）
 - asset_report.html     — 资产说明书（交互式，含血缘图+SQL高亮）
 - tech_design.md        — 技术设计文档（9 章节）
-
-需求 SPEC（原 sdd.xlsx 已退役）单独走 spec 通道：
-`python run.py spec --dir {制品目录} --output {路径} [--scenario {场景}]`
-（制品目录直入：术加必选 + LTS/DDL 可选；列口径见 docs/17）
 
 路径：{output_dir}/
 ```
@@ -146,14 +137,16 @@ python {skill_dir}/run.py view_generator \
 ## 关键规则
 
 1. **第一步必须执行分析脚本**，不能跳过直接用 AI 分析
-2. **Step 2（AI 增强）不能跳过**，弱模型也要执行，即使只是复制 draft 加少量修改
-3. **视图用 knowledge_draft.json 生成**，AI 增强结果通过 `--ai-input knowledge_ai.md` 注入
-4. **视图全部自动生成**，不询问用户选哪些
-5. **输入自动分流**：`--input` 是 `.xlsx` 文件走 read_excel，是目录走 read_yml，用户无需区分
-6. **DDL 发现**：yml 场景从代码仓根自动定位 `DDL/` 子树；xlsx 场景需 `--ddl-dir` 指定；
+2. **一条命令跑到底**：Step 1 已产出全部交付物（含视图）；Step 2 是可选精修
+   （弱模型可跳过；要做就按格式写 knowledge_ai.md 后重跑 view_generator）
+3. **制品目录形态优先推荐**：用户只需收集制品，不需要挑文件、不需要附加参数
+4. **输入自动分流**：目录无 yml → 制品目录分拣；目录有 yml → read_yml；
+   .xlsx → read_excel
+5. **DDL 发现**：制品目录/yml 场景自动定位；xlsx 单文件场景需 `--ddl-dir` 指定；
    找不到不阻塞（DDL 是可选增强）
-7. **xlsx 与 yml 产出完全一致**：两种输入走同一引擎（analyze_pipeline），不会有内容差异
-8. **输出目录**：`--output` 给基础目录，脚本自动在其下按**规则组英文名称**建子目录，产物输出到那里（缺失则回退规则组编码）
+6. **输出目录**：`--output` 给基础目录，脚本自动在其下按规则组英文名建子目录；
+   交付物在根、knowledge 过程件在 `_internal/`
+7. **不要把产出到代码仓内**（污染 git 状态），用 `./output/` 或代码仓外目录
 
 ## SKILL 加载
 

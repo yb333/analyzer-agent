@@ -110,7 +110,7 @@ class TestDqInAnalysis:
         sys.argv = ["analyzer", "--input", str(mock_repo["group_dir"]), "--output", str(out_dir)]
         main()
 
-        kj_path = out_dir / mock_repo["group_dir"].name / "knowledge_draft.json"
+        kj_path = out_dir / mock_repo["group_dir"].name / "_internal" / "knowledge_draft.json"
         knowledge = json.loads(kj_path.read_text(encoding="utf-8"))
         assert "dq_rules" in knowledge.get("meta", {}), "knowledge.meta 应含 dq_rules"
         rules = knowledge["meta"]["dq_rules"]
@@ -134,6 +134,6 @@ class TestDqInAnalysis:
         sys.argv = ["analyzer", "--input", str(xlsx), "--output", str(out)]
         main()
 
-        kj = out / "DWB_TEST_F" / "knowledge_draft.json"
+        kj = out / "DWB_TEST_F" / "_internal" / "knowledge_draft.json"
         knowledge = json.loads(kj.read_text(encoding="utf-8"))
         assert "dq_rules" not in knowledge.get("meta", {})
