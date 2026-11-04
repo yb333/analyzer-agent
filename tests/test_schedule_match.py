@@ -72,7 +72,7 @@ class TestDependencyCandidates:
 
     UP1 = _task("task_ods_acct_balance_di", "Pjob_ods_acct_balance_di")
     UP2 = _task("task_ods_cust_info_di", "Pjob_ods_cust_info_di")
-    F = _f_task("DWB_CUST_ASSET_D_F",
+    F = _f_task("DWB_CUST_ASSET_F_F",
                 ["Pjob_ods_acct_balance_di", "Pjob_ods_cust_info_di"])
 
     def test_candidates_from_tskdep_only(self):

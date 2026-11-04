@@ -4,7 +4,7 @@ last_reviewed: 2026-08-18
 audience: design-dev-agent（正向生成制品包参考）+ 交付评审
 ---
 
-# 术加制品包参考案例：DWB_CUST_ASSET_D（客户资产汇总）
+# 术加制品包参考案例：DWB_CUST_ASSET_F（客户资产汇总）
 
 > 本目录是**执行平台制品包（execution_tasks.xlsx）的黄金参考**：给 design-dev-agent
 > 正向生成制品时对照。列头、sheet 名、取值形态逐字对齐真实导出（含全角括号等陷阱），
@@ -15,7 +15,7 @@ audience: design-dev-agent（正向生成制品包参考）+ 交付评审
 docs/术加制品参考案例/
 ├── README.md                              ← 本文（格式规约 + 易错清单）
 ├── _generate.py                           ← 案例生成脚本（可改案例重生成）
-└── execution_tasks_DWB_CUST_ASSET_D.xlsx  ← 参考制品包
+└── execution_tasks_DWB_CUST_ASSET_F.xlsx  ← 参考制品包
 ```
 
 ## 一、Sheet 结构（名称必须逐字一致）
@@ -42,7 +42,7 @@ docs/术加制品参考案例/
 | 目标Schema / 目标表 | 本步骤写入的表 | `dws` / `tmp_cust_asset_detail` |
 | 删除模式 / 删除条件 | 写入策略，见 §四 | `5` / `P_CUR` |
 | (生成的）查询语句1~9 | SQL 原文，超长分列拼接（见 §五） | |
-| 规则组编码 / 规则组英文名称 | 规则组标识 / 输出目录名来源 | `GR_CUST_ASSET` / `DWB_CUST_ASSET_D` |
+| 规则组编码 / 规则组英文名称 | 规则组标识 / 输出目录名来源 | `GR_CUST_ASSET` / `DWB_CUST_ASSET_F` |
 | 项目编码 / 数据源 / 业务责任人 | 归属信息 | `P_CUST` / `DWS_EDW` / `zhang_san` |
 | 交换分区来源表 | 仅规则类型=9 填 | `dwb_x`（正式表；目标表列此时填临时表） |
 
@@ -90,7 +90,7 @@ docs/术加制品参考案例/
 
 ```bash
 python dws-pipeline-analyzer/run.py analyzer \
-    --input docs/术加制品参考案例/execution_tasks_DWB_CUST_ASSET_D.xlsx \
+    --input docs/术加制品参考案例/execution_tasks_DWB_CUST_ASSET_F.xlsx \
     --output ./output/
 ```
 

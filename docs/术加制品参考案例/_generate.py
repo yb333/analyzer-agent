@@ -5,7 +5,7 @@
 真实制品（含全角括号等陷阱），覆盖常见规则形态。重新生成：
     python3 docs/术加制品参考案例/_generate.py
 
-案例资产 DWB_CUST_ASSET_D（客户资产汇总，两步加工 + 分区多场景写入）：
+案例资产 DWB_CUST_ASSET_F（客户资产汇总，两步加工 + 分区多场景写入）：
     R0001  dm=1   tmp 明细中间表（join 两源表）
     R0002  dm=1   tmp 汇总中间表（GROUP BY；SQL 故意拆在 查询语句1/2 两列，演示拼接规则）
     R0003  dm=5   最终表 当日分区（P_CUR）
@@ -23,7 +23,7 @@ from openpyxl import Workbook
 
 from _build_xlsx import GV_COLUMNS, RULE_COLUMNS, TF_COLUMNS
 
-OUT = Path(__file__).resolve().parent / "execution_tasks_DWB_CUST_ASSET_D.xlsx"
+OUT = Path(__file__).resolve().parent / "execution_tasks_DWB_CUST_ASSET_F.xlsx"
 
 # ── 案例数据 ──────────────────────────────────────────────────────
 
@@ -60,10 +60,10 @@ RULES = [
          delete_mode="1", delete_condition="",
          query_sql=SQL_R0002_PART1, query_sql2=SQL_R0002_PART2),
     dict(rule_code="R0003", rule_type=1, exec_sequence=3, rule_name="当日分区写入",
-         target_schema="dws", target_table="dwb_cust_asset_d",
+         target_schema="dws", target_table="dwb_cust_asset_f",
          delete_mode="5", delete_condition="P_CUR", query_sql=SQL_R0003),
     dict(rule_code="R0004", rule_type=1, exec_sequence=3, rule_name="历史分区写入",
-         target_schema="dws", target_table="dwb_cust_asset_d",
+         target_schema="dws", target_table="dwb_cust_asset_f",
          delete_mode="5", delete_condition="P_HIS", query_sql=SQL_R0004),
     dict(rule_code="R0005", rule_type=12, exec_sequence=0, rule_name="P_CYCLE_ID",
          target_schema="", target_table="", delete_mode="", delete_condition="",
@@ -112,7 +112,7 @@ def _rule_row(r: dict) -> list:
         "子项目编码": "SUB_CUST_ASSET", "子项目中文名": "客户资产",
         "子项目英文名": "CUST_ASSET",
         "规则组编码": "GR_CUST_ASSET", "规则组中文名称": "客户资产汇总",
-        "规则组英文名称": "DWB_CUST_ASSET_D",
+        "规则组英文名称": "DWB_CUST_ASSET_F",
         "规则组业务责任人": "zhang_san", "规则组数据源": "DWS_EDW",
         "规则编码": r["rule_code"],
         "规则中文名称": r["rule_name"], "规则英文名称": r["rule_code"],

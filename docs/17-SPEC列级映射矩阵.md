@@ -8,7 +8,7 @@ depends_on: [./13-v2支持方案与分层原则.md, ./15-自动分拣需求.md, 
 
 > 读者：analyzer 侧维护会话 + SPEC 通道实现/评审。本表是 **SPEC 通道（人向 xlsx 交付）的
 > 实施合同**：对齐靶 = `docs/需求SPEC.xlsx`（模板列头逐字基准，含全角/半角陷阱），
-> 形态参照 = `docs/需求SPEC-案例mock-DWB_CUST_ASSET_D.xlsx`（黄金案例手工设计稿）。
+> 形态参照 = `docs/需求SPEC-案例mock-DWB_CUST_ASSET_F.xlsx`（黄金案例手工设计稿）。
 > 每列标注处理方式与来源制品，实现与评审按本表逐列对账。
 >
 > **定位**：SPEC = ViewContext（v1.7 三视图公共取数层）+ LTS 调度匹配的 **xlsx 渲染**，

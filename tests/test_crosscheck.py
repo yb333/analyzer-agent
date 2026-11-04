@@ -23,7 +23,7 @@ sys.path.insert(0, str(ANALYZER_REF))
 
 from crosscheck import run_crosscheck
 
-ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_D.xlsx"
+ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_F.xlsx"
 
 
 def _draft(final_table="dwb_cust_asset_f", rgc="GR_CUST_ASSET"):

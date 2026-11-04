@@ -27,7 +27,7 @@ sys.path.insert(0, str(ANALYZER_REF))
 from ts_export import (LOAD_MODE_BY_KIND, TsDraftError, export_ts_draft,
                        render_ts_draft, validate_ts_draft)
 
-ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_D.xlsx"
+ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_F.xlsx"
 GOLDEN = PROJECT_ROOT / "tests" / "golden" / "snapshots"
 
 
@@ -211,9 +211,9 @@ class TestFactsFormatE2E:
         bag.mkdir()
         shutil.copy(ET_XLSX, bag / "et.xlsx")
         (bag / "ddl.sql").write_text(
-            "CREATE TABLE dws.dwb_cust_asset_d (cust_id INT NOT NULL)\n"
+            "CREATE TABLE dws.dwb_cust_asset_f (cust_id INT NOT NULL)\n"
             "DISTRIBUTE BY HASH (cust_id)\nTO GROUP LC_DW1;\n"
-            "CREATE OR REPLACE VIEW dws.dwb_cust_asset_i AS SELECT * FROM dws.dwb_cust_asset_d;",
+            "CREATE OR REPLACE VIEW dws.dwb_cust_asset_i AS SELECT * FROM dws.dwb_cust_asset_f;",
             encoding="utf-8")
         out = tmp_path / "o" / "ts_draft.json"
         stdout, _, code = self._run(["--dir", str(bag), "--output", str(out)])
@@ -224,7 +224,7 @@ class TestFactsFormatE2E:
         assert d["version"] == "2.1" and d["spec_type"] == "ts"
         assert all(r["query_sql"] for r in d["rules"].values())   # 四规则逐字 SQL 齐
         assert d["meta"]["target"]["i_view"]["table"] == "dwb_cust_asset_i"   # CREATE VIEW 识别
-        t = d["tables"]["dwb_cust_asset_d"]
+        t = d["tables"]["dwb_cust_asset_f"]
         assert t["distribution_key"] == ["cust_id"] and t["logical_group"] == "LC_DW1"
         assert len(d["rules"]) == 4                                          # 真实资产四规则
         assert validate_ts_draft(d) == []                                    # 进门验复验

@@ -24,7 +24,7 @@ sys.path.insert(0, str(ANALYZER_REF))
 
 from inputs import read_dq_excel
 
-ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_D.xlsx"
+ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_F.xlsx"
 
 
 def _write_dq_excel(path, rows):
@@ -48,8 +48,8 @@ class TestReadDqExcel:
         xlsx = tmp_path / "dq.xlsx"
         _write_dq_excel(xlsx, [
             ["R001", "1", "新增", "空值检查", "主键非空校验", "空值检查",
-             "zhangsan", "dws", "dwb_cust_asset_d", "T001",
-             "SELECT COUNT(*) FROM dws.dwb_cust_asset_d WHERE cust_id IS NULL", "严重"],
+             "zhangsan", "dws", "dwb_cust_asset_f", "T001",
+             "SELECT COUNT(*) FROM dws.dwb_cust_asset_f WHERE cust_id IS NULL", "严重"],
         ])
         rules = read_dq_excel(str(xlsx))
         assert rules is not None and len(rules) == 1
@@ -62,7 +62,7 @@ class TestReadDqExcel:
         assert r["rule_number"] == "R001"
         assert r["rule_name"] == "空值检查"
         assert r["target_schema"] == "dws"
-        assert r["target_table"] == "dwb_cust_asset_d"
+        assert r["target_table"] == "dwb_cust_asset_f"
         assert "cust_id IS NULL" in r["sql"]
         assert r["alert_level"] == "严重"
         assert r["dq_file"] == str(xlsx)
@@ -143,11 +143,11 @@ class TestDqChannelsE2E:
         xlsx = tmp_path / "dq.xlsx"
         _write_dq_excel(xlsx, [
             ["R001", "1", "新增", "空值检查", "主键非空", "空值检查",
-             "u", "dws", "dwb_cust_asset_d", "T1", "SELECT 1", "严重"],
+             "u", "dws", "dwb_cust_asset_f", "T1", "SELECT 1", "严重"],
         ])
         _run_main(["--input", str(ET_XLSX), "--output", str(tmp_path / "out"),
                    "--dq", str(xlsx)])
-        draft = json.loads((tmp_path / "out" / "DWB_CUST_ASSET_D" / "_internal" / "knowledge_draft.json")
+        draft = json.loads((tmp_path / "out" / "DWB_CUST_ASSET_F" / "_internal" / "knowledge_draft.json")
                            .read_text(encoding="utf-8"))
         assert len(draft["meta"]["dq_rules"]) == 1
         assert draft["meta"]["dq_rules"][0]["target_schema"] == "dws"
@@ -159,7 +159,7 @@ class TestDqChannelsE2E:
         shutil.copy(ET_XLSX, bag / "et.xlsx")
         _write_dq_excel(bag / "dq.xlsx", [
             ["R001", "1", "新增", "空值检查", "主键非空", "空值检查",
-             "u", "dws", "dwb_cust_asset_d", "T1", "SELECT 1", "严重"],
+             "u", "dws", "dwb_cust_asset_f", "T1", "SELECT 1", "严重"],
         ])
         out = tmp_path / "o" / "ts_draft.json"
         _run_facts(["--dir", str(bag), "--output", str(out)])
@@ -208,7 +208,7 @@ class TestBrokenDimension:
         xlsx = tmp_path / "dq_broken.xlsx"
         _write_dq_excel(xlsx, [
             ["R001", "1", "新增", "空值检查", "主键非空", "空值检查",
-             "u", "dws", "dwb_cust_asset_d", "T1", "SELECT 1", "严重"],
+             "u", "dws", "dwb_cust_asset_f", "T1", "SELECT 1", "严重"],
         ])
         self._break_dimension(xlsx)
         rules = read_dq_excel(str(xlsx))

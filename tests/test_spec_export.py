@@ -1,6 +1,6 @@
 """SPEC 通道端到端测试 —— spec 入口 → 需求SPEC.xlsx（docs/17 §〇~§五波A 口径）。
 
-黄金案例 = docs/术加制品参考案例（DWB_CUST_ASSET_D：双分区多场景 + 中间表链）；
+黄金案例 = docs/术加制品参考案例（DWB_CUST_ASSET_F：双分区多场景 + 中间表链）；
 单场景案例 = tests/fixtures/analyzer/case_08_self_reference（自引用防重，dm=0）。
 
 运行:
@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ANALYZER_REF = PROJECT_ROOT / "dws-pipeline-analyzer" / "references"
 sys.path.insert(0, str(ANALYZER_REF))
 
-GOLDEN_ET = PROJECT_ROOT / "docs" / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_D.xlsx"
+GOLDEN_ET = PROJECT_ROOT / "docs" / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_F.xlsx"
 CASE08_ET = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / "case_08_self_reference" / "execution_tasks.xlsx"
 CASE17_ET = PROJECT_ROOT / "tests" / "fixtures" / "analyzer" / "case_17_many_ctes" / "execution_tasks.xlsx"
 
@@ -109,11 +109,11 @@ class TestHumanFriendlyEntry:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 黄金案例（DWB_CUST_ASSET_D，场景 P_CUR）
+# 黄金案例（DWB_CUST_ASSET_F，场景 P_CUR）
 # ═══════════════════════════════════════════════════════════════
 
 class TestGoldenCase:
-    """端到端对拍 docs/需求SPEC-案例mock-DWB_CUST_ASSET_D.xlsx（波A 基础列）。"""
+    """端到端对拍 docs/需求SPEC-案例mock-DWB_CUST_ASSET_F.xlsx（波A 基础列）。"""
 
     @pytest.fixture(scope="class")
     def golden_run(self, tmp_path_factory):
@@ -204,7 +204,7 @@ class TestGoldenCase:
         assert by_target["asset_type"][5] == "直接复制"
         assert by_target["asset_type"][6] in (None, "")
         # 终态列
-        assert all(r[8] == "dws.dwb_cust_asset_d" for r in rows)
+        assert all(r[8] == "dws.dwb_cust_asset_f" for r in rows)
 
     def test_business_background_and_sample_empty(self, golden_run):
         """业务背景（人工位）与样例数据留空。"""
@@ -305,7 +305,7 @@ class TestLtsScheduleMatching:
                 ("task_ods_order_di", "Pjob_ods_order_di",
                  "PRJ_CUST_DAILY", "GRP_ASSET", "0 50 2 * * ?"),
             ],
-            f_name="DWB_CUST_ASSET_D_F",
+            f_name="DWB_CUST_ASSET_F_F",
             deps=["Pjob_ods_acct_balance_di", "Pjob_ods_cust_info_di",
                   "Pjob_ods_order_di"],
         )
@@ -325,8 +325,8 @@ class TestLtsScheduleMatching:
         assert r0[7] == "PRJ_CUST_DAILY" and r0[8] == "GRP_ASSET"
         assert not r0[6]                                  # 调度应用留空（缺口1）
         assert "精确匹配" in (r0[12] or "")            # 按依赖job（tskdep）表名精确匹配
-        assert all(r[5] != "DWB_CUST_ASSET_D_F" for r in rows)      # 资产自身任务不进匹配
-        assert all(r[9] != "Pjob_DWB_CUST_ASSET_D" for r in rows)    # 资产自身主 job 不进匹配
+        assert all(r[5] != "DWB_CUST_ASSET_F_F" for r in rows)      # 资产自身任务不进匹配
+        assert all(r[9] != "Pjob_DWB_CUST_ASSET_F" for r in rows)    # 资产自身主 job 不进匹配
         assert all("LTS制品未提供" not in (r[12] or "") for r in src)  # 两态不混淆
         um = [r for r in rows if not r[2]]
         assert len(um) == 1 and um[0][5] == "task_ods_order_di"

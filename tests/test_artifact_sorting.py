@@ -27,7 +27,7 @@ sys.path.insert(0, str(ANALYZER_REF))
 
 from inputs import ManifestError, assemble_artifact_dir, classify_artifact_excel
 
-ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_D.xlsx"
+ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_F.xlsx"
 LTS_XLSX = DOCS / "schedule-tasks_副本.xlsx"
 DQ_XLSX = DOCS / "dq模板.xlsx"
 
@@ -175,7 +175,7 @@ class TestFactsE2E:
         """真实语料 + .sql DDL：一次调用交卷，warnings 含未检出 DQ 披露。"""
         d = self._bag(tmp_path)
         (d / "t.sql").write_text(
-            "CREATE TABLE dwb_cust_asset_d (cust_id INT)\nDISTRIBUTE BY HASH (cust_id);",
+            "CREATE TABLE dwb_cust_asset_f (cust_id INT)\nDISTRIBUTE BY HASH (cust_id);",
             encoding="utf-8")
         out = tmp_path / "deep" / "ts_draft.json"
         stdout, stderr, code = _run_facts(["--dir", str(d), "--output", str(out)])
@@ -189,7 +189,7 @@ class TestFactsE2E:
         assert any(p["type"] == "lts" for p in data["_baseline"]["provenance"])
         types = {w["type"] for w in data["_reverse"]["warnings"]}
         assert "dq_not_detected" in types  # 两态披露进 warnings
-        t = data["tables"]["dwb_cust_asset_d"]
+        t = data["tables"]["dwb_cust_asset_f"]
         assert t["distribution_key"] == ["cust_id"] and t["distribute_type"] == "HASH"
 
     def test_unrecognized_files_in_warnings(self, tmp_path):
