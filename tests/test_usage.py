@@ -453,3 +453,85 @@ class TestIntegration:
         assert payload["run_id"]
         assert payload["install_id"]
         assert payload["agent_version"] == usage.__version__
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 9. 多地址候选序列（ENDPOINTS 逐个尝试 + last_ok_endpoint 记忆 + 静默切换）
+# 场景：服务端机器 DHCP 地址漂移，改 ENDPOINTS 后同事拉代码即静默自动切换
+# ════════════════════════════════════════════════════════════════════════
+
+class TestEndpointCandidates:
+    def test_env_overrides_all(self, isolated_usage, monkeypatch):
+        """环境变量整体覆盖候选序列（开发调试用）。"""
+        monkeypatch.setenv("ANALYZER_TELEMETRY_ENDPOINT", "http://env-host:3000/api/usage")
+        assert usage._endpoint_candidates() == ["http://env-host:3000/api/usage"]
+
+    def test_last_ok_ranked_first(self, isolated_usage):
+        """上次成功地址排最前，其余默认序列去重跟随。"""
+        usage.CONFIG_PATH.write_text(json.dumps({
+            "install_id": "x", "telemetry_enabled": True,
+            "last_ok_endpoint": usage.ENDPOINTS[1],
+        }), encoding="utf-8")
+        cands = usage._endpoint_candidates()
+        assert cands[0] == usage.ENDPOINTS[1]
+        assert cands[1] == usage.ENDPOINTS[0]
+        assert len(cands) == len(set(cands))  # 无重复
+
+    def test_no_config_falls_back_to_default_order(self, isolated_usage):
+        """无 config 时按 ENDPOINTS 默认序。"""
+        assert usage._endpoint_candidates() == list(usage.ENDPOINTS)
+
+
+class TestPostOneCandidates:
+    """_post_one 逐候选尝试 / 成功记忆 / 全失败熔断。"""
+
+    ROW = {"run_id": "cand-r1", "command": "analyze"}
+
+    def test_tries_in_order_until_success_and_remembers(self, isolated_usage, monkeypatch):
+        """第一个候选失败、第二个成功：按序尝试成功即返回，并记住成功地址。"""
+        tried = []
+
+        def fake_post_to(url, row):
+            tried.append(url)
+            return url == usage.ENDPOINTS[1]
+
+        monkeypatch.setattr(usage, "_post_to", fake_post_to)
+        assert usage._post_one(dict(self.ROW)) is True
+        assert tried == list(usage.ENDPOINTS)
+        # 成功地址写进 config，下次候选序列排最前
+        cfg = json.loads(usage.CONFIG_PATH.read_text(encoding="utf-8"))
+        assert cfg["last_ok_endpoint"] == usage.ENDPOINTS[1]
+        assert usage._endpoint_candidates()[0] == usage.ENDPOINTS[1]
+        assert usage._NET_DOWN is False  # 成功不熔断
+
+    def test_all_fail_trips_breaker(self, isolated_usage, monkeypatch):
+        """全部候选失败才熔断，熔断后本进程不再尝试网络。"""
+        monkeypatch.setattr(usage, "_post_to", lambda url, row: False)
+        assert usage._post_one(dict(self.ROW)) is False
+        assert usage._NET_DOWN is True
+        assert usage._post_one(dict(self.ROW)) is False  # 熔断后直接 False
+
+    def test_last_ok_short_circuits(self, isolated_usage, monkeypatch):
+        """记住地址后单点命中，不再付前面候选的尝试成本。"""
+        usage.CONFIG_PATH.write_text(json.dumps({
+            "install_id": "x", "telemetry_enabled": True,
+            "last_ok_endpoint": "http://remembered:3000/api/usage",
+        }), encoding="utf-8")
+        tried = []
+        monkeypatch.setattr(usage, "_post_to",
+                            lambda url, row: tried.append(url) or True)
+        assert usage._post_one(dict(self.ROW)) is True
+        assert tried == ["http://remembered:3000/api/usage"]
+
+
+class TestSilentSwitchover:
+    """集成视角：IP 漂移后，同事更新代码即静默切换 + 队列积压自动补发。"""
+
+    def test_queue_flushes_via_second_endpoint(self, isolated_usage, monkeypatch):
+        """断网期积压的队列，在只有第二候选可达时通过它全部补发。"""
+        monkeypatch.setattr(usage, "_post_to",
+                            lambda url, row: url == usage.ENDPOINTS[1])
+        for i in range(3):  # 断网期攒下 3 条
+            usage._enqueue({"run_id": f"q{i}", "command": "analyze"})
+        assert flush_queue() == 3
+        assert not usage.QUEUE_PATH.exists()  # 全部补发成功，队列清空

@@ -6,8 +6,9 @@
 设计三原则（不可破坏）：
 1. 用户不可感知 —— 无 stdout、无日志噪音；config.json 静默存在
 2. 不影响分析逻辑 —— record() 全程 try/except 吞异常；只在所有交付物落盘之后调用
-3. 无性能影响 —— CSV 写入 <10ms；HTTP POST 末尾调用、0.5s 超时、进程内熔断
-   （本地连不上内网服务端时每个进程最多付一次超时代价）；队列 5MB 封顶防滚雪球
+3. 无性能影响 —— CSV 写入 <10ms；HTTP POST 末尾调用、0.5s/候选超时、进程内熔断
+   （多地址候选逐个尝试，全失败才算一轮代价；连上过的机器记住地址、
+   之后直接命中零尝试）；队列 5MB 封顶防滚雪球
 
 数据流：
     命令结束(main 的 finally，交付物已落盘后)
@@ -33,9 +34,15 @@ from urllib import request as urllib_request
 
 __version__ = "1.0"
 
-# 内网服务端默认地址（端口与参考项目一致，路径用 /api/usage 区分）。
-# IP 再变时无需改码：设环境变量 ANALYZER_TELEMETRY_ENDPOINT 即可覆盖（_detect_endpoint）。
-DEFAULT_ENDPOINT = "http://10.96.160.104:3000/api/usage"
+# 内网服务端地址候选序列（按优先级，新的在前、旧的兜底——服务端机器的
+# DHCP 地址可能来回漂移）。IP 变更时只需往这里加一个新地址，同事们拉代码
+# 更新后静默自动切换，无需任何手工配置；上报成功的地址会记进 config.json
+# （last_ok_endpoint），之后优先用它、一次命中。环境变量
+# ANALYZER_TELEMETRY_ENDPOINT 仍可整体覆盖（开发调试用）。
+ENDPOINTS = [
+    "http://10.96.160.104:3000/api/usage",  # 2026-11-05 起
+    "http://10.96.160.123:3000/api/usage",  # 旧地址，可能还会漂回来
+]
 
 # HTTP 上报超时（秒）—— LAN 内网通常 30-50ms；0.5s 兜底足够。
 # 不设 2s：本地/外网开发时（服务端不可达）每个子进程都会等满超时，
@@ -179,12 +186,41 @@ def _get_os() -> str:
         return "unknown"
 
 
-def _detect_endpoint() -> str:
-    """取上报地址：环境变量优先，否则默认内网。"""
+def _endpoint_candidates() -> list:
+    """上报地址候选序列（按优先级）：环境变量 > 上次成功地址 > 默认序列。"""
     try:
-        return os.environ.get("ANALYZER_TELEMETRY_ENDPOINT", DEFAULT_ENDPOINT)
+        env = os.environ.get("ANALYZER_TELEMETRY_ENDPOINT", "")
+        if env:
+            return [env]
     except Exception:
-        return DEFAULT_ENDPOINT
+        pass
+    cands = []
+    try:
+        last_ok = (load_config().get("last_ok_endpoint") or "").strip()
+        if last_ok:
+            cands.append(last_ok)
+    except Exception:
+        pass
+    for e in ENDPOINTS:
+        if e not in cands:
+            cands.append(e)
+    return cands
+
+
+def _save_last_ok(endpoint: str) -> None:
+    """记住最近上报成功的地址（写 config.json）。下次直接优先用它，
+    免去逐候选尝试的超时代价。全程吞异常 —— 绝不影响主流程。"""
+    try:
+        cfg = load_config()
+        if cfg.get("last_ok_endpoint") == endpoint:
+            return
+        cfg["last_ok_endpoint"] = endpoint
+        _ensure_dir()
+        CONFIG_PATH.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
 
 
 # ── 错误分类 ─────────────────────────────────────────────────────────────
@@ -241,18 +277,9 @@ def _write_log(row: dict) -> None:
 
 # ── 上报（HTTP） ─────────────────────────────────────────────────────────
 
-def _post_one(row: dict, endpoint: str = None) -> bool:
-    """同步 POST 一条记录到服务端，返回是否成功。
-
-    用 urllib（不引入 requests 依赖）。超时 HTTP_TIMEOUT 秒。
-    失败置 _NET_DOWN（本进程内熔断，后续不再尝试网络）。
-    任何异常返回 False，由调用方决定是否落队列。
-    """
-    global _NET_DOWN
-    if _NET_DOWN:
-        return False
+def _post_to(url: str, row: dict) -> bool:
+    """POST 一条到指定地址（不碰熔断状态）。任何异常返回 False。"""
     try:
-        url = endpoint or _detect_endpoint()
         payload = json.dumps(row, ensure_ascii=False).encode("utf-8")
         req = urllib_request.Request(
             url, data=payload, method="POST",
@@ -261,8 +288,33 @@ def _post_one(row: dict, endpoint: str = None) -> bool:
         with urllib_request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             return 200 <= resp.status < 300
     except Exception:
-        _NET_DOWN = True
         return False
+
+
+def _post_one(row: dict, endpoint: str = None) -> bool:
+    """同步 POST 一条记录到服务端，返回是否成功。
+
+    用 urllib（不引入 requests 依赖）。超时 HTTP_TIMEOUT 秒/候选地址。
+    不指定 endpoint 时按 _endpoint_candidates() 序列逐个尝试（环境变量
+    > 上次成功地址 > 默认序列），任一候选成功即返回 True，并把该地址
+    记进 config.json（下次直接命中、不再付尝试成本）。
+    全部候选失败才置 _NET_DOWN（本进程内熔断，后续不再尝试网络）。
+    任何异常返回 False，由调用方决定是否落队列。
+    """
+    global _NET_DOWN
+    if _NET_DOWN:
+        return False
+    if endpoint:
+        ok = _post_to(endpoint, row)
+        if not ok:
+            _NET_DOWN = True
+        return ok
+    for cand in _endpoint_candidates():
+        if _post_to(cand, row):
+            _save_last_ok(cand)
+            return True
+    _NET_DOWN = True
+    return False
 
 
 def _enqueue(row: dict) -> None:
@@ -336,14 +388,15 @@ def flush_queue(max_attempts: int = 3) -> int:
         rows = _read_queue()
         if not rows:
             return 0
-        endpoint = _detect_endpoint()
+        # endpoint 不显式传：_post_one 内部走候选序列，第一条成功后记住
+        # 地址，后续条直接命中（LAN 内网单次 POST 约 30-50ms）
         ok_ids = set()
         sent = 0
         for row in rows[:max_attempts]:
             rid = row.get("run_id")
             if rid in ok_ids:
                 continue  # 队列内去重
-            if _post_one(row, endpoint):
+            if _post_one(row):
                 ok_ids.add(rid)
                 sent += 1
             elif _NET_DOWN:
@@ -444,7 +497,7 @@ def main():
     print(f"配置文件: {CONFIG_PATH}")
     print(f"install_id: {cfg.get('install_id', '?')}")
     print(f"启用状态: {cfg.get('telemetry_enabled', True)}")
-    print(f"上报地址: {_detect_endpoint()}")
+    print(f"上报地址候选: {' -> '.join(_endpoint_candidates())}")
     print(f"环境变量 ANALYZER_NO_TELEMETRY={os.environ.get('ANALYZER_NO_TELEMETRY', '未设置')}")
     print()
     if LOCAL_LOG_PATH.exists():
