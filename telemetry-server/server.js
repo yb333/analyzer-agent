@@ -209,7 +209,7 @@ function handlePostUsage(payload) {
         toStr(r.command), toStr(r.input_type), toStr(r.asset), toStr(r.target_table),
         toStr(r.batch_id), toInt(r.rule_count), toInt(r.field_count), toInt(r.source_count),
         toFloat(r.elapsed_sec), toStr(r.elapsed_detail), toStr(r.status) || 'unknown',
-        toStr(r.error_type), toStr(r.error_message), toInt(r.quality_issues), toStr(r.agent_version),
+        toStr(r.error_type), toInt(r.quality_issues), toStr(r.error_message), toStr(r.agent_version),
         toStr(r.python_version), toStr(r.os),
         Object.keys(extra).length ? JSON.stringify(extra) : null, now
       );
@@ -260,24 +260,23 @@ function handleStats() {
       COUNT(DISTINCT CASE WHEN status='ok' THEN run_id END) AS total_ok,
       COUNT(DISTINCT CASE WHEN status='error' THEN run_id END) AS total_error,
       ROUND(AVG(elapsed_sec), 2) AS avg_elapsed_sec,
+      SUM(CASE WHEN quality_issues > 0 THEN quality_issues ELSE 0 END) AS total_quality_issues,
       MIN(timestamp) AS first_event,
       MAX(timestamp) AS last_event
     FROM usage_records
   `).get();
 
-  // 2. 日活趋势（近 30 天，按天）
+  // 2. 日活趋势（全量按天返回——前端 30/90/全部 本地切换，不用重新请求）
   // users = 安装实例数，actions = 用户行为数（去重）
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
   result.daily_active = db.prepare(`
     SELECT
       substr(timestamp, 1, 10) AS date,
       COUNT(DISTINCT install_id) AS users,
       COUNT(DISTINCT CASE WHEN trace_id IS NOT NULL AND trace_id != '' THEN trace_id ELSE run_id END) AS actions
     FROM usage_records
-    WHERE timestamp >= ?
     GROUP BY date
     ORDER BY date DESC
-  `).all(thirtyDaysAgo);
+  `).all();
 
   // 3. 命令热度（各阶段各自计次 —— 看脚本被调多少次）
   result.command_usage = db.prepare(`
@@ -297,14 +296,16 @@ function handleStats() {
   `).all();
 
   // 5. 资产分析 Top10（按 trace_id 去重 —— 一次完整分析算1次）
+  // 注意 GROUP BY 用 asset_name 别名而非 asset —— 与表列 asset 同名时
+  // SQLite 按原始列分组，asset 列为 NULL 的行会被错误合并成一组
   result.top_assets = db.prepare(`
     SELECT
-      COALESCE(target_table, asset, '(unknown)') AS asset,
+      COALESCE(target_table, asset, '(unknown)') AS asset_name,
       COUNT(DISTINCT CASE WHEN trace_id IS NOT NULL AND trace_id != '' THEN trace_id ELSE run_id END) AS count,
       MAX(timestamp) AS last_analyzed
     FROM usage_records
     WHERE target_table IS NOT NULL OR asset IS NOT NULL
-    GROUP BY asset ORDER BY count DESC LIMIT 10
+    GROUP BY asset_name ORDER BY count DESC LIMIT 10
   `).all();
 
   // 错误详情（最近 20 条含 error_message 的错误记录）
@@ -340,6 +341,27 @@ function handleStats() {
       COUNT(*) AS count
     FROM usage_records GROUP BY agent_version ORDER BY count DESC
   `).all();
+
+  // 9. 质量问题 Top 资产（质量发现是分析器核心产出，看哪些资产最需要治理）
+  // GROUP BY 同上用 asset_name 别名，防原始列 NULL 时错误合并
+  result.quality_top_assets = db.prepare(`
+    SELECT
+      COALESCE(target_table, asset, '(unknown)') AS asset_name,
+      SUM(quality_issues) AS issues,
+      COUNT(*) AS analyses
+    FROM usage_records
+    WHERE quality_issues > 0
+    GROUP BY asset_name ORDER BY issues DESC LIMIT 10
+  `).all();
+
+  // 10. 耗时分位数（平均易被极端值拉爆：子命令级 P50<0.1s，极值可到分钟级）
+  const elapsed = db.prepare(
+    'SELECT elapsed_sec FROM usage_records WHERE elapsed_sec IS NOT NULL'
+  ).all().map(r => r.elapsed_sec).sort((a, b) => a - b);
+  const pct = (p) => elapsed.length
+    ? Math.round(elapsed[Math.min(elapsed.length - 1, Math.floor(elapsed.length * p))] * 100) / 100
+    : null;
+  result.elapsed_pct = { p50: pct(0.50), p90: pct(0.90), p99: pct(0.99), n: elapsed.length };
 
   statsCache = { at: Date.now(), data: result };
   return result;
@@ -377,6 +399,9 @@ function buildDashboardHtml() {
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   @media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
   #loading { text-align: center; padding: 60px; color: #888; }
+  .range-btns { float: right; font-weight: normal; }
+  .range-btns button { border: 1px solid #ddd; background: #fff; color: #666; font-size: 12px; padding: 3px 10px; border-radius: 4px; cursor: pointer; margin-left: 4px; }
+  .range-btns button.active { background: #1a73e8; color: #fff; border-color: #1a73e8; }
 </style>
 </head>
 <body>
@@ -389,7 +414,13 @@ function buildDashboardHtml() {
   <div class="cards" id="overviewCards"></div>
 
   <div class="section">
-    <h2>日活趋势（近 30 天）</h2>
+    <h2>日活趋势
+      <span class="range-btns">
+        <button class="active" onclick="setDailyRange(30, this)">近30天</button>
+        <button onclick="setDailyRange(90, this)">近90天</button>
+        <button onclick="setDailyRange(0, this)">全部</button>
+      </span>
+    </h2>
     <div id="dailyChart" class="chart"></div>
   </div>
 
@@ -412,6 +443,17 @@ function buildDashboardHtml() {
     <div class="section">
       <h2>资产分析 Top10（去重）</h2>
       <table><thead><tr><th>资产</th><th>分析次数</th><th>最后分析</th></tr></thead><tbody id="assetTable"></tbody></table>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="section">
+      <h2>质量问题 Top 资产</h2>
+      <table><thead><tr><th>资产</th><th>问题数</th><th>分析次数</th></tr></thead><tbody id="qualityTable"></tbody></table>
+    </div>
+    <div class="section">
+      <h2>版本分布</h2>
+      <div id="versionChart" class="chart" style="height:260px"></div>
     </div>
   </div>
 
@@ -457,13 +499,16 @@ function esc(s) {
 function cmdLabel(c) { return COMMAND_NAMES[c] || c || '(unknown)'; }
 function inputLabel(i) { return INPUT_NAMES[i] || i || '(未记录)'; }
 
-function renderOverview(o) {
+function renderOverview(o, ep) {
   var html = '';
   html += card('用户数', o.total_users || 0, '按 install_id 去重');
   html += card('分析行为数', o.total_actions || 0, '一次完整分析=1次（去重）');
   html += card('脚本调用数', o.total_records || 0,
     '成功 ' + (o.total_ok||0) + ' / 失败 ' + (o.total_error||0));
-  html += card('平均耗时', (o.avg_elapsed_sec || 0) + 's', '每条平均');
+  html += card('耗时 P50 / P90',
+    ((ep && ep.p50 != null ? ep.p50 : 0) + 's / ' + (ep && ep.p90 != null ? ep.p90 : 0) + 's'),
+    'P99 ' + (ep && ep.p99 != null ? ep.p99 : '-') + 's · 平均 ' + (o.avg_elapsed_sec || 0) + 's · n=' + (ep ? ep.n : 0));
+  html += card('质量问题', o.total_quality_issues || 0, '累计发现（汇总 quality_issues）');
   html += card('最后活跃', fmtTime(o.last_event).substring(0, 16), '');
   document.getElementById('overviewCards').innerHTML = html;
 }
@@ -496,9 +541,21 @@ var EMPTY_OPT = {
     style: { text: '暂无数据', fill: '#aaa', fontSize: 14 } }]
 };
 
-function renderDaily(da) {
+// 日活时间范围：30 / 90 / 0（全部）。切范围用已拉取的全量数据本地过滤，不发请求
+var dailyRangeDays = 30;
+var lastStats = null;
+
+function setDailyRange(days, btn) {
+  dailyRangeDays = days;
+  var btns = document.querySelectorAll('.range-btns button');
+  for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('active', btns[i] === btn);
+  if (lastStats) renderDaily(lastStats.daily_active || []);
+}
+
+function renderDaily(all) {
   var chart = getChart('dailyChart');
   if (!chart) return;
+  var da = dailyRangeDays > 0 ? all.slice(0, dailyRangeDays) : all; // all 按日期 DESC，前 N 即最近 N 天
   var dates = da.map(function(r){return r.date;}).reverse();
   var users = da.map(function(r){return r.users;}).reverse();
   var actions = da.map(function(r){return r.actions;}).reverse();
@@ -523,9 +580,9 @@ function renderDaily(da) {
 function renderTable(id, rows, mapper) {
   var el = document.getElementById(id);
   if (!el) return;
-  var html = rows.map(function(r) {
+  var html = rows.length ? rows.map(function(r) {
     return '<tr>' + mapper(r).map(function(c){return '<td>'+esc(c)+'</td>';}).join('') + '</tr>';
-  }).join('');
+  }).join('') : '<tr><td colspan="9" style="color:#aaa;text-align:center;padding:20px">暂无数据</td></tr>';
   el.innerHTML = html;
 }
 
@@ -568,16 +625,21 @@ function renderUserActivity(instances) {
 }
 
 function render(data) {
-  renderOverview(data.overview || {});
+  lastStats = data;
+  renderOverview(data.overview || {}, data.elapsed_pct || {});
   renderDaily(data.daily_active || []);
   renderTable('cmdTable', data.command_usage || [], function(r) {
     return [cmdLabel(r.command), r.count, fmtTime(r.last_used)];
   });
   renderTable('assetTable', data.top_assets || [], function(r) {
-    return [r.asset, r.count, fmtTime(r.last_analyzed)];
+    return [r.asset_name, r.count, fmtTime(r.last_analyzed)];
   });
   renderPie('inputChart', data.input_types || [], inputLabel);
   renderUserActivity(data.instance_activity || []);
+  renderTable('qualityTable', data.quality_top_assets || [], function(r) {
+    return [r.asset_name, r.issues, r.analyses];
+  });
+  renderPie('versionChart', data.versions || [], function(v){ return v; });
   renderTable('errorDetailTable', data.error_details || [], function(r) {
     return [
       fmtTime(r.timestamp).substring(0, 16),
