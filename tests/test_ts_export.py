@@ -236,3 +236,51 @@ class TestFactsFormatE2E:
         assert len(d["rules"]) == 4                                          # 真实资产四规则
         assert validate_ts_draft(d) == []                                    # 进门验复验
         assert any(l.startswith("self_check: ") for l in stdout.splitlines())
+
+# ── 7. 保真契约：TargetFields 原貌 + 别名大小写（2026-11-05 用户实报）────
+
+class TestFidelity:
+    def test_target_fields_by_rule_verbatim(self):
+        """_reverse.target_fields_by_rule = TargetFields 制品原序原量（与 field_targets
+        的 SELECT 序是两个独立事实——术加制品里二者顺序/数量本就可能不一致）。
+        case_13 夹具：TargetFields=3 条乱序（ProductID/PRODUCT_NAME/extra_field），
+        SELECT=2 列（product_id/product_name）。"""
+        ts = _render("case_13_field_mismatch")
+        tf = ts["_reverse"]["target_fields_by_rule"]["UR013"]
+        assert [t["target_field"] for t in tf] == ["ProductID", "PRODUCT_NAME", "extra_field"]
+        assert ts["rules"]["UR013"]["field_targets"] == \
+            ["product_id", "product_name", "ProductID", "extra_field"]  # SELECT 序+尾部披露
+
+    def test_alias_case_verbatim_e2e(self, tmp_path):
+        """e2e：大写别名/表名（A/C、_DI）→ ts 草稿 source_tables/joins 与逐字
+        query_sql 同形态（解析层存储保原文，不再 lower）。"""
+        import openpyxl
+        bag = tmp_path / "bag"
+        bag.mkdir()
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "RULE"
+        ws.append(["规则编码", "规则中文名称", "执行序列", "规则类型", "删除模式",
+                   "删除条件", "目标Schema", "目标表", "(生成的）查询语句1"])
+        ws.append(["R0001", "测试", "1", "1", "1", "", "dws", "dwb_test_f",
+                   "SELECT A.cust_id, C.cust_name FROM ods.ods_acct_balance_DI A "
+                   "JOIN ods.ods_cust_info_DI C ON A.cust_id = C.cust_id"])
+        ws_tf = wb.create_sheet("TargetFields")
+        ws_tf.append(["规则编码", "目标字段名称", "来源字段名称"])
+        ws_tf.append(["R0001", "cust_name", "C.cust_name"])
+        ws_tf.append(["R0001", "cust_id", "A.cust_id"])
+        wb.save(bag / "et.xlsx")
+        out = tmp_path / "ts.json"
+        stdout, _, code = TestFactsFormatE2E()._run(["--dir", str(bag), "--output", str(out)])
+        assert code == 0, stdout
+        d = json.loads(out.read_text(encoding="utf-8"))
+        r = d["rules"]["R0001"]
+        assert r["source_tables"] == [
+            {"schema": "ods", "table": "ods_acct_balance_DI", "alias": "A"},
+            {"schema": "ods", "table": "ods_cust_info_DI", "alias": "C"},
+        ]
+        assert r["joins"][0]["alias"] == "C"
+        assert "A.cust_id = C.cust_id" in r["joins"][0]["condition"]  # 同条 join 一个说法
+        # TargetFields 原貌（乱序 2 条）独立随行
+        assert [t["target_field"] for t in d["_reverse"]["target_fields_by_rule"]["R0001"]] \
+            == ["cust_name", "cust_id"]

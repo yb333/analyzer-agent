@@ -636,7 +636,7 @@ def parse_query_unit(node, dialect="oracle", depth=0, comment_alias_map=None):
         with_node = node.args.get("with") or node.args.get("with_")
         if with_node:
             for cte_expr in with_node.expressions:
-                cte_name = (cte_expr.alias or "").lower()
+                cte_name = cte_expr.alias or ""
                 cte_inner = cte_expr.this
                 cte_unit = parse_query_unit(cte_inner, dialect, depth + 1, comment_alias_map)
                 cte_unit.cte_name = cte_name
@@ -677,17 +677,17 @@ def _enhance_with_query_unit(parsed_sql, tree, dialect, comment_alias_map):
         # 补充 JOIN/WHERE（递归所有层级，去重）
         all_join, all_where = collect_all_usage(unit)
 
-        # 合并到 parsed_sql（去重）
-        existing_join_keys = {(j["field"], j.get("on_condition", "")) for j in parsed_sql.join_usage}
+        # 合并到 parsed_sql（去重；field 归一 lower——同一字段不同大小写形态算一条）
+        existing_join_keys = {(j["field"].lower(), j.get("on_condition", "")) for j in parsed_sql.join_usage}
         for j in all_join:
-            key = (j["field"], j.get("on_condition", ""))
+            key = (j["field"].lower(), j.get("on_condition", ""))
             if key not in existing_join_keys:
                 parsed_sql.join_usage.append(j)
                 existing_join_keys.add(key)
 
-        existing_where_keys = {(w["field"], w.get("condition", "")) for w in parsed_sql.where_usage}
+        existing_where_keys = {(w["field"].lower(), w.get("condition", "")) for w in parsed_sql.where_usage}
         for w in all_where:
-            key = (w["field"], w.get("condition", ""))
+            key = (w["field"].lower(), w.get("condition", ""))
             if key not in existing_where_keys:
                 parsed_sql.where_usage.append(w)
                 existing_where_keys.add(key)
@@ -695,11 +695,11 @@ def _enhance_with_query_unit(parsed_sql, tree, dialect, comment_alias_map):
         # 补充 source_tables（递归收集所有物理表）
         existing_tables = {j.source_table.lower() for j in parsed_sql.source_tables}
         all_tables = collect_all_tables(unit)
-        # CTE 名集合（CTE 名不是物理表，不加入）
+        # CTE 名集合（CTE 名不是物理表，不加入；t.table 侧比较用 lower，此处同口径归一）
         cte_names = set()
         if unit.type == "select":
             for cte_def in unit.cte_defs:
-                cte_names.add(cte_def["name"])
+                cte_names.add(cte_def["name"].lower())
         for t in all_tables:
             if t.table and t.table.lower() not in existing_tables and t.table.lower() not in cte_names:
                 from analyzer import ParsedJoin
@@ -725,13 +725,13 @@ def _parse_select_to_unit(tree, select_node, dialect, depth, comment_alias_map):
         if isinstance(main_expr, exp.Table):
             unit.tables.append(TableRef(
                 table=".".join(_clean_name(p.name) for p in main_expr.parts),
-                alias=(main_expr.alias or "").lower(),
+                alias=main_expr.alias or "",
                 join_type="FROM",
             ))
         elif isinstance(main_expr, exp.Subquery):
             inner = main_expr.this
             sub_unit = parse_query_unit(inner, dialect, depth + 1, comment_alias_map)
-            sub_unit.cte_name = (main_expr.alias or "").lower()  # 复用 cte_name 存子查询别名
+            sub_unit.cte_name = main_expr.alias or ""  # 复用 cte_name 存子查询别名
             unit.from_subquery = sub_unit
 
     # JOIN
@@ -745,16 +745,16 @@ def _parse_select_to_unit(tree, select_node, dialect, depth, comment_alias_map):
         if isinstance(jt_node, exp.Table):
             unit.tables.append(TableRef(
                 table=".".join(_clean_name(p.name) for p in jt_node.parts),
-                alias=(jt_node.alias or "").lower(),
+                alias=jt_node.alias or "",
                 join_type=join_type,
                 on_condition=on_sql,
             ))
         elif isinstance(jt_node, exp.Subquery):
             inner = jt_node.this
             sub_unit = parse_query_unit(inner, dialect, depth + 1, comment_alias_map)
-            sub_unit.cte_name = (jt_node.alias or "").lower()
+            sub_unit.cte_name = jt_node.alias or ""
             unit.join_subqueries.append({
-                "alias": (jt_node.alias or "").lower(),
+                "alias": jt_node.alias or "",
                 "on_condition": on_sql,
                 "join_type": join_type,
                 "body": sub_unit,
@@ -792,16 +792,16 @@ def _parse_select_to_unit(tree, select_node, dialect, depth, comment_alias_map):
 def _parse_column_ref(proj, position, comment_alias_map):
     """解析 SELECT 投影列为 ColumnRef。"""
     if isinstance(proj, exp.Alias):
-        alias = _clean_name(proj.alias).lower()
+        alias = _clean_name(proj.alias)
         inner = proj.this
     elif isinstance(proj, exp.Column):
-        alias = _clean_name(proj.name).lower()
+        alias = _clean_name(proj.name)
         inner = proj
     else:
         # 字面量/表达式
         alias = comment_alias_map.get(position, f"_col_{position}")
         if isinstance(proj, exp.Alias):
-            alias = _clean_name(proj.alias).lower()
+            alias = _clean_name(proj.alias)
             inner = proj.this
         else:
             inner = proj
@@ -812,15 +812,15 @@ def _parse_column_ref(proj, position, comment_alias_map):
     # source_fields
     if isinstance(inner, exp.Column):
         col.source_fields = [{
-            "alias": _clean_name(inner.table).lower() if inner.table else "",
-            "field": _clean_name(inner.name).lower(),
+            "alias": _clean_name(inner.table) if inner.table else "",
+            "field": _clean_name(inner.name),
         }]
     else:
         # 表达式：提取引用的列
         for c in inner.find_all(exp.Column):
             col.source_fields.append({
-                "alias": _clean_name(c.table).lower() if c.table else "",
-                "field": _clean_name(c.name).lower(),
+                "alias": _clean_name(c.table) if c.table else "",
+                "field": _clean_name(c.name),
             })
 
     return col
@@ -867,17 +867,15 @@ def collect_all_usage(unit, depth=0):
         # JOIN 条件
         for t in unit.tables:
             if t.on_condition:
-                # 提取 ON 条件里的字段
+                # 提取 ON 条件里的字段（保原文形态）
                 for m in re.finditer(r'(\w+)\.(\w+)', t.on_condition):
-                    field = m.group(2).lower()
-                    join_usage.append({"field": field, "alias": m.group(1).lower(),
+                    join_usage.append({"field": m.group(2), "alias": m.group(1),
                                        "join_type": t.join_type, "on_condition": t.on_condition})
 
         # WHERE 条件
         if unit.where:
             for m in re.finditer(r'(\w+)\.(\w+)', unit.where):
-                field = m.group(2).lower()
-                where_usage.append({"field": field, "alias": m.group(1).lower(),
+                where_usage.append({"field": m.group(2), "alias": m.group(1),
                                     "condition": unit.where})
 
         # 递归子查询
@@ -1359,7 +1357,7 @@ def _extract_subquery_tables(subquery_node, depth=0) -> list[tuple[str, str, str
         inner_main = inner_from.this
         if isinstance(inner_main, exp.Table):
             tname = ".".join(_clean_name(p.name) for p in inner_main.parts)
-            alias = _clean_name(inner_main.alias).lower() if inner_main.alias else ""
+            alias = _clean_name(inner_main.alias) if inner_main.alias else ""
             tables.append((tname, alias or tname.split(".")[-1], "main"))
         elif isinstance(inner_main, exp.Subquery):
             # 嵌套子查询：递归（嵌套层的主表在更深处，但相对本层也是主表）
@@ -1370,7 +1368,7 @@ def _extract_subquery_tables(subquery_node, depth=0) -> list[tuple[str, str, str
         for extra in inner_from.expressions:
             if isinstance(extra, exp.Table):
                 tname = ".".join(_clean_name(p.name) for p in extra.parts)
-                alias = _clean_name(extra.alias).lower() if extra.alias else ""
+                alias = _clean_name(extra.alias) if extra.alias else ""
                 tables.append((tname, alias or tname.split(".")[-1], "secondary"))
 
     # 内部 JOIN 表（从表）
@@ -1378,7 +1376,7 @@ def _extract_subquery_tables(subquery_node, depth=0) -> list[tuple[str, str, str
         jt = join_node.this
         if isinstance(jt, exp.Table):
             tname = ".".join(_clean_name(p.name) for p in jt.parts)
-            alias = _clean_name(jt.alias).lower() if jt.alias else ""
+            alias = _clean_name(jt.alias) if jt.alias else ""
             tables.append((tname, alias or tname.split(".")[-1], "secondary"))
         elif isinstance(jt, exp.Subquery):
             for tn, al, _ in _extract_subquery_tables(jt, depth + 1):
@@ -1416,7 +1414,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
             if short_name.upper() in cte_names:
                 pass  # CTE 不加入 source_tables，但其内部表会通过 _extract_ctes 加入
             else:
-                alias = _clean_name(main_expr.alias).lower() if main_expr.alias else ""
+                alias = _clean_name(main_expr.alias) if main_expr.alias else ""
                 joins.append(ParsedJoin(
                     source_table=table_name,
                     alias=alias or table_name.split(".")[-1],
@@ -1425,7 +1423,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
                 ))
         elif isinstance(main_expr, exp.Subquery):
             # FROM 子查询：记录子查询别名 + 递归提取内部表
-            sub_alias = _clean_name(main_expr.alias).lower() if main_expr.alias else ""
+            sub_alias = _clean_name(main_expr.alias) if main_expr.alias else ""
             sub_sql = main_expr.sql(dialect="oracle")
             sub_tables = _extract_subquery_tables(main_expr)
             # 子查询别名作为虚拟 FROM 表（让字段来源能匹配）
@@ -1452,7 +1450,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         for extra in from_clause.expressions:
             if isinstance(extra, exp.Table):
                 table_name = ".".join(_clean_name(p.name) for p in extra.parts)
-                alias = _clean_name(extra.alias).lower() if extra.alias else ""
+                alias = _clean_name(extra.alias) if extra.alias else ""
                 joins.append(ParsedJoin(
                     source_table=table_name,
                     alias=alias or table_name.split(".")[-1],
@@ -1468,7 +1466,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
 
         # JOIN 子查询：提取子查询别名 + 内部表
         if isinstance(join_expr, exp.Subquery):
-            sub_alias = _clean_name(join_expr.alias).lower() if join_expr.alias else ""
+            sub_alias = _clean_name(join_expr.alias) if join_expr.alias else ""
             on_node = join_node.args.get("on")
             join_condition = on_node.sql(dialect="oracle") if on_node else ""
             sub_sql2 = join_expr.sql(dialect="oracle")
@@ -1496,8 +1494,9 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         table = join_expr if isinstance(join_expr, exp.Table) else (join_expr.find(exp.Table) if join_expr else None)
         if not table:
             continue
-        table_name = ".".join(_clean_name(p.name) for p in table.parts).lower()
-        alias = _clean_name(table.alias).lower() if table.alias else ""
+        # 表名/别名保 SQL 原文形态（与 FROM 主表同口径）；匹配一律在消费点归一化
+        table_name = ".".join(_clean_name(p.name) for p in table.parts)
+        alias = _clean_name(table.alias) if table.alias else ""
 
         # 过滤 CTE 引用（CTE 名作为表名出现在 JOIN 中）
         short_name = table_name.split(".")[-1] if "." in table_name else table_name
@@ -1701,7 +1700,7 @@ def _extract_select_columns(select_node, comment_alias_map: dict | None = None, 
         for col in proj.walk():
             if isinstance(col, exp.Column):
                 col_name = _clean_name(col.name)
-                tbl_alias = _clean_name(col.table).lower() if col.table else ""
+                tbl_alias = _clean_name(col.table) if col.table else ""
                 # 无表前缀时回填（只适用于单表 FROM）
                 if not tbl_alias and fallback_alias:
                     tbl_alias = fallback_alias
@@ -1791,7 +1790,7 @@ def _penetrate_subquery_columns(tree, columns: list, depth=0):
                 if jalias and jalias not in inner_alias_map:
                     inner_alias_map[jalias] = ".".join(_clean_name(p.name) for p in jt.parts)
 
-    # 内层 SELECT 列 → {列名(LOWER): (别名, 字段名)}
+    # 内层 SELECT 列 → {列名(LOWER 匹配键): (别名原文, 字段名原文)}
     # 从第一分支取（UNION 按位置对齐）
     # 注意：单 Column 的表达式（如 cast(user_id as bigint)）可以穿透，
     # 但多 Column 的表达式（如 a.x||a.y）不能穿透为 direct——会丢失"表达式加工"语义
@@ -1808,14 +1807,14 @@ def _penetrate_subquery_columns(tree, columns: list, depth=0):
         # 统计表达式内引用的 Column 数量
         all_cols = list(col_node.find_all(exp.Column)) if not isinstance(col_node, exp.Column) else [col_node]
         if len(all_cols) == 1:
-            # 单 Column（直传或 cast/单参数函数）：可穿透
+            # 单 Column（直传或 cast/单参数函数）：可穿透（来源保原文形态）
             source_col = all_cols[0]
-            inner_cols[alias_name] = (source_col.table.lower() if source_col.table else "",
-                                      source_col.name.lower())
+            inner_cols[alias_name] = (source_col.table if source_col.table else "",
+                                      source_col.name)
         elif isinstance(col_node, exp.Column):
             # 直传 Column（all_cols=1 已覆盖，这里是防御）
-            inner_cols[alias_name] = (col_node.table.lower() if col_node.table else "",
-                                      col_node.name.lower())
+            inner_cols[alias_name] = (col_node.table if col_node.table else "",
+                                      col_node.name)
         # 多 Column 表达式（a.x||a.y / coalesce(a,b)）：不穿透，保留在子查询层
 
     # 对顶层 columns 穿透
@@ -1826,7 +1825,7 @@ def _penetrate_subquery_columns(tree, columns: list, depth=0):
             sf_field = (sf.get("field", "") or "").lower()
             if sf_alias == sub_alias and sf_field in inner_cols:
                 inner_alias, inner_field = inner_cols[sf_field]
-                phys_table = inner_alias_map.get(inner_alias, inner_alias)
+                phys_table = inner_alias_map.get(inner_alias.lower(), inner_alias)
                 sf["alias"] = inner_alias
                 sf["field"] = inner_field
                 if phys_table and phys_table != sub_alias:
@@ -1970,8 +1969,8 @@ def _extract_subquery_usage(tree, join_usage: list, where_usage: list, depth=0):
                 continue
             on_sql = on_expr.sql(dialect="oracle")
             for col in on_expr.find_all(exp.Column):
-                col_name = _clean_name(col.name).lower()
-                col_alias = _clean_name(col.table).lower() if col.table else ""
+                col_name = _clean_name(col.name)
+                col_alias = _clean_name(col.table) if col.table else ""
                 if col_name:
                     # 避免重复
                     if not any(ju["field"] == col_name and ju.get("on_condition","") == on_sql for ju in join_usage):
@@ -1996,7 +1995,7 @@ def _extract_subquery_usage(tree, join_usage: list, where_usage: list, depth=0):
                     cond_sql = cond.sql(dialect="oracle")
                     is_join = any(c.args.get("join_mark") for c in cond.find_all(exp.Column))
                     for col in cond.find_all(exp.Column):
-                        col_name = _clean_name(col.name).lower()
+                        col_name = _clean_name(col.name)
                         if not col_name:
                             continue
                         if is_join:
@@ -2008,8 +2007,8 @@ def _extract_subquery_usage(tree, join_usage: list, where_usage: list, depth=0):
             else:
                 where_sql = where_node.sql(dialect="oracle")
                 for col in where_node.find_all(exp.Column):
-                    col_name = _clean_name(col.name).lower()
-                    col_alias = _clean_name(col.table).lower() if col.table else ""
+                    col_name = _clean_name(col.name)
+                    col_alias = _clean_name(col.table) if col.table else ""
                     if col_name:
                         if not any(wu["field"] == col_name and wu.get("condition","") == where_sql for wu in where_usage):
                             where_usage.append({"field": col_name, "alias": col_alias, "condition": where_sql})
@@ -2053,8 +2052,8 @@ def _extract_cte_usage(tree, join_usage: list, where_usage: list):
                     continue
                 on_sql = on_expr.sql(dialect="oracle")
                 for col in on_expr.find_all(exp.Column):
-                    col_name = _clean_name(col.name).lower()
-                    col_alias = _clean_name(col.table).lower() if col.table else ""
+                    col_name = _clean_name(col.name)
+                    col_alias = _clean_name(col.table) if col.table else ""
                     if col_name:
                         if not any(ju["field"] == col_name and ju.get("on_condition", "") == on_sql for ju in join_usage):
                             join_usage.append({
@@ -2067,8 +2066,8 @@ def _extract_cte_usage(tree, join_usage: list, where_usage: list):
             if where_node:
                 where_sql = where_node.sql(dialect="oracle")
                 for col in where_node.find_all(exp.Column):
-                    col_name = _clean_name(col.name).lower()
-                    col_alias = _clean_name(col.table).lower() if col.table else ""
+                    col_name = _clean_name(col.name)
+                    col_alias = _clean_name(col.table) if col.table else ""
                     if col_name:
                         if not any(wu["field"] == col_name and wu.get("condition", "") == where_sql for wu in where_usage):
                             where_usage.append({"field": col_name, "alias": col_alias, "condition": where_sql})
@@ -2136,11 +2135,11 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
         join_expr = join_node.this
         tables_info = []
         if isinstance(join_expr, exp.Table):
-            j_tbl_name = ".".join(_clean_name(p.name) for p in join_expr.parts).lower()
-            j_alias = _clean_name(join_expr.alias).lower() if join_expr.alias else j_tbl_name.split(".")[-1]
+            j_tbl_name = ".".join(_clean_name(p.name) for p in join_expr.parts)
+            j_alias = _clean_name(join_expr.alias) if join_expr.alias else j_tbl_name.split(".")[-1]
             tables_info.append({"alias": j_alias, "table": j_tbl_name})
         elif isinstance(join_expr, exp.Subquery):
-            j_alias = _clean_name(join_expr.alias).lower() if join_expr.alias else "sub"
+            j_alias = _clean_name(join_expr.alias) if join_expr.alias else "sub"
             # 找子查询内部主表
             inner_tables = _extract_subquery_tables(join_expr)
             inner_names = [t[0] for t in inner_tables]
@@ -2149,11 +2148,11 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
         # FROM 主表也加入 tables_info
         from_clause = select_node.args.get("from_")
         if from_clause and isinstance(from_clause.this, exp.Table):
-            main_tbl = ".".join(_clean_name(p.name) for p in from_clause.this.parts).lower()
-            main_alias = _clean_name(from_clause.this.alias).lower() if from_clause.this.alias else main_tbl.split(".")[-1]
+            main_tbl = ".".join(_clean_name(p.name) for p in from_clause.this.parts)
+            main_alias = _clean_name(from_clause.this.alias) if from_clause.this.alias else main_tbl.split(".")[-1]
             tables_info.insert(0, {"alias": main_alias, "table": main_tbl})
         elif from_clause and isinstance(from_clause.this, exp.Subquery):
-            sub_alias = _clean_name(from_clause.this.alias).lower() if from_clause.this.alias else "t"
+            sub_alias = _clean_name(from_clause.this.alias) if from_clause.this.alias else "t"
             inner_tables = _extract_subquery_tables(from_clause.this)
             inner_names = [t[0] for t in inner_tables]
             tables_info.insert(0, {"alias": sub_alias, "table": f"(子查询: {', '.join(inner_names[:3])})"})
@@ -2161,8 +2160,8 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
         # 从 ON 条件提取字段
         on_sql = on_node.sql(dialect=sqlglot_dialect)
         for col in on_node.find_all(exp.Column):
-            col_name = _clean_name(col.name).lower()
-            col_alias = _clean_name(col.table).lower() if col.table else ""
+            col_name = _clean_name(col.name)
+            col_alias = _clean_name(col.table) if col.table else ""
             if col_name:
                 join_usage.append({
                     "field": col_name,
@@ -2191,16 +2190,17 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
                 cond_cols = list(cond.find_all(exp.Column))
                 is_join_cond = any(c.args.get("join_mark") for c in cond_cols)
                 for col in cond_cols:
-                    col_name = _clean_name(col.name).lower()
-                    col_alias = _clean_name(col.table).lower() if col.table else ""
+                    col_name = _clean_name(col.name)
+                    col_alias = _clean_name(col.table) if col.table else ""
                     if not col_name:
                         continue
                     if is_join_cond:
                         # (+) 关联条件 → join_usage
-                        # 构建简化的 tables_info（从 alias_map）
+                        # 构建简化的 tables_info（从 alias_map；匹配键归一 lower，呈现保原文）
                         plus_tables = [
-                            {"alias": a, "table": alias_map.get(a, a)}
-                            for a in {c.table.lower() for c in cond_cols if c.table}
+                            {"alias": _clean_name(c.table),
+                             "table": alias_map.get(_clean_name(c.table).lower(), _clean_name(c.table))}
+                            for c in cond_cols if c.table
                         ]
                         join_usage.append({
                             "field": col_name,
@@ -2218,8 +2218,8 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
                         })
         else:
             for col in where_node.find_all(exp.Column):
-                col_name = _clean_name(col.name).lower()
-                col_alias = _clean_name(col.table).lower() if col.table else ""
+                col_name = _clean_name(col.name)
+                col_alias = _clean_name(col.table) if col.table else ""
                 if col_name:
                     where_usage.append({
                         "field": col_name,
@@ -2232,15 +2232,15 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
     if group_node:
         for expr in group_node.expressions:
             if isinstance(expr, exp.Column):
-                col_name = _clean_name(expr.name).lower()
-                col_alias = _clean_name(expr.table).lower() if expr.table else ""
+                col_name = _clean_name(expr.name)
+                col_alias = _clean_name(expr.table) if expr.table else ""
                 if col_name:
                     groupby_usage.append({
                         "field": col_name,
                         "alias": col_alias,
                     })
 
-    # 去重（同字段同步骤可能多次出现）
+    # 去重（同字段同步骤可能多次出现；键归一 lower——同一字段不同大小写形态算一条）
     def _dedup(items, key_func):
         seen = set()
         result = []
@@ -2251,9 +2251,9 @@ def _extract_field_usage(tree, select_node, joins: list, sqlglot_dialect: str) -
                 result.append(item)
         return result
 
-    join_usage = _dedup(join_usage, lambda x: f"{x['field']}.{x['alias']}.{x['join_type']}")
-    where_usage = _dedup(where_usage, lambda x: f"{x['field']}.{x['alias']}")
-    groupby_usage = _dedup(groupby_usage, lambda x: f"{x['field']}.{x['alias']}")
+    join_usage = _dedup(join_usage, lambda x: f"{x['field'].lower()}.{x['alias'].lower()}.{x['join_type']}")
+    where_usage = _dedup(where_usage, lambda x: f"{x['field'].lower()}.{x['alias'].lower()}")
+    groupby_usage = _dedup(groupby_usage, lambda x: f"{x['field'].lower()}.{x['alias'].lower()}")
 
     return join_usage, where_usage, groupby_usage
 
@@ -2467,16 +2467,16 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
             # FROM
             cte_from = branch_select.args.get("from_")
             if cte_from and isinstance(cte_from.this, exp.Table):
-                tname = ".".join(_clean_name(p.name) for p in cte_from.this.parts).lower()
-                talias = _clean_name(cte_from.this.alias).lower() if cte_from.this.alias else ""
+                tname = ".".join(_clean_name(p.name) for p in cte_from.this.parts)
+                talias = _clean_name(cte_from.this.alias) if cte_from.this.alias else ""
                 tkey = tname
                 if tkey not in cte_seen_tables:
                     cte_seen_tables.add(tkey)
                     cte_tables.append({"name": tname, "alias": talias, "join_type": "FROM"})
             for extra in cte_from.expressions if cte_from else []:
                 if isinstance(extra, exp.Table):
-                    tname = ".".join(_clean_name(p.name) for p in extra.parts).lower()
-                    talias = _clean_name(extra.alias).lower() if extra.alias else ""
+                    tname = ".".join(_clean_name(p.name) for p in extra.parts)
+                    talias = _clean_name(extra.alias) if extra.alias else ""
                     tkey = tname
                     if tkey not in cte_seen_tables:
                         cte_seen_tables.add(tkey)
@@ -2485,8 +2485,8 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
             for cte_join in branch_select.args.get("joins", []):
                 t = cte_join.find(exp.Table)
                 if t:
-                    tname = ".".join(_clean_name(p.name) for p in t.parts).lower()
-                    talias = _clean_name(t.alias).lower() if t.alias else ""
+                    tname = ".".join(_clean_name(p.name) for p in t.parts)
+                    talias = _clean_name(t.alias) if t.alias else ""
                     tkey = tname
                     if tkey in cte_seen_tables:
                         continue
@@ -2522,7 +2522,7 @@ def _extract_ctes(tree, sqlglot_dialect: str) -> list[ParsedCTE]:
             # fallback: find_all（覆盖非标准结构）
             for table in cte_query.find_all(exp.Table):
                 tname = ".".join(_clean_name(p.name) for p in table.parts)
-                talias = _clean_name(table.alias).lower() if table.alias else ""
+                talias = _clean_name(table.alias) if table.alias else ""
                 cte_tables.append({"name": tname, "alias": talias})
 
         # CTE 输出字段（含 transform_type 和 source_fields）
@@ -2644,8 +2644,10 @@ def _apply_cte_penetration(columns: list, ctes: list, cte_alias_map: dict = None
 
     # 构建 CTE 字段查找表: {CTE名(UPPER): {字段名(UPPER): field_dict}}
     cte_field_map: dict[str, dict[str, dict]] = {}
+    cte_name_by_upper = {}  # {UPPER键: 原文名}——注入 lineage.cte_name 保持原文形态
     for cte in ctes:
         cte_key = cte.name.upper()
+        cte_name_by_upper[cte_key] = cte.name
         field_dict = {}
         for f in cte.fields:
             if isinstance(f, dict) and f.get("name"):
@@ -2691,8 +2693,8 @@ def _apply_cte_penetration(columns: list, ctes: list, cte_alias_map: dict = None
             if cte_prio > main_prio:
                 final_transform = cte_transform
 
-            # 注入 CTE 穿透信息
-            sf["cte_name"] = resolved_cte
+            # 注入 CTE 穿透信息（cte_name 用原文形态）
+            sf["cte_name"] = cte_name_by_upper.get(resolved_cte, resolved_cte)
             sf["cte_transform_type"] = cte_transform
             sf["cte_source_fields"] = cte_sources
             sf["cte_expression"] = cte_expr
@@ -4236,7 +4238,7 @@ def build_field_mappings(
         if not getattr(rule, "is_view_step", False) and rule.rule_type != 9:
             only_in_sql = [
                 col.alias for col in parsed.select_columns
-                if col.alias and col.alias not in tf_index
+                if col.alias and col.alias.lower() not in tf_index
             ]
             if only_in_sql or only_in_excel:
                 all_warnings.append({
@@ -4918,7 +4920,7 @@ def build_join_key_lineage(
             for _l in _f.get("lineage", []):
                 if (_l.get("source_table", "").upper() == table_alias.upper()
                         and _l.get("cte_name")):
-                    resolved_table = _l["cte_name"].lower()
+                    resolved_table = _l["cte_name"]  # 原文形态（匹配处各自归一）
                     break
             if resolved_table != table_alias:
                 break
@@ -4952,7 +4954,7 @@ def build_join_key_lineage(
                 "table": resolved_table,
                 # 入口别名随节点带出（2026-11-04 结构优化：同表多别名 t1/t2/t3
                 # 各自的字段引用要能区分——physical_source.alias 的数据源）
-                "alias": (table_alias or "").lower(),
+                "alias": table_alias or "",
                 "transform": "direct",
                 "raw_sql": "",
                 "is_physical": False,
@@ -4969,8 +4971,8 @@ def build_join_key_lineage(
         "step_id": step_id,
         "field": field_name,
         "table": resolved_table,
-        # 入口别名随节点带出（同上：呈现贴原文小写口径，与兜底反查一致）
-        "alias": (table_alias or "").lower(),
+        # 入口别名随节点带出（同上：保持 SQL 原文形态，与兜底反查一致）
+        "alias": table_alias or "",
         "transform": "direct",
         "raw_sql": "",
         "is_physical": is_physical,
@@ -5268,9 +5270,10 @@ def _trace_subquery_sources(
     # 对每个来源构建子节点
     children = []
     for sf in sq_col.source_fields:
-        sf_alias = (sf.get("alias", "") or "").upper()
+        sf_alias_raw = sf.get("alias", "") or ""
+        sf_alias = sf_alias_raw.upper()  # 匹配键（sq_alias_map 键 upper）
         sf_field = sf.get("field", "")
-        src_table = sq_alias_map.get(sf_alias, sf_alias)
+        src_table = sq_alias_map.get(sf_alias, sf_alias_raw)
         src_norm = _norm_table(src_table)
         src_is_physical = (not _is_intermediate_table(src_table)
                           and not src_table.startswith("(subquery:"))
@@ -5279,7 +5282,7 @@ def _trace_subquery_sources(
             "step_id": step_id,
             "field": sf_field,
             "table": src_table,
-            "alias": sf_alias,
+            "alias": sf_alias_raw,  # 原文形态
             "transform": sq_col.transform_type,
             "raw_sql": sq_col.expression,
             "is_physical": src_is_physical,

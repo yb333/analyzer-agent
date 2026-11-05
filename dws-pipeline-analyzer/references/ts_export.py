@@ -632,12 +632,23 @@ def _ts_reverse(knowledge: dict, ctx, topo: dict, plans: dict, wp_warnings: list
         if plan.get("kind") == "merge_upsert" and plan.get("condition_expr"):
             bk_evidence.append({"source": "merge_on", "expr": str(plan["condition_expr"]),
                                 "origin": code})
+    # TargetFields 制品原貌（按规则分组、制品原序原量随行）——与 field_targets
+    # （query_sql SELECT 列序）是两个独立事实：术加制品里二者顺序/数量本就可能
+    # 不一致，各归各位不加判断（消费方对照用，交叉差异另有 warnings 披露）
+    tf_by_rule: dict = {}
+    for tf in knowledge.get("source", {}).get("target_fields_raw", []):
+        rc = str(tf.get("rule_code") or "")
+        tf_by_rule.setdefault(rc, []).append({
+            "target_field": str(tf.get("target_field") or ""),
+            "source_field": str(tf.get("source_field") or ""),
+        })
     return {
         "self_check": _derive_self_check(warnings_out),
         "warnings": warnings_out,
         "write_plan": write_plan,
         "schedule_evidence": list((schedule_rec or {}).get("evidence") or []),
         "evidence": {"business_key": bk_evidence},
+        "target_fields_by_rule": tf_by_rule,
     }
 
 

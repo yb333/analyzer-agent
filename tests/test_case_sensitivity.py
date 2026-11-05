@@ -249,3 +249,36 @@ SELECT b.x FROM ods.tab1 b"""},
         for br, pairs in by_branch.items():
             assert len(pairs) == len(set(pairs)), \
                 f"分组'{br}'内（表,别名）对有大小写重复: {pairs}"
+
+
+class TestCaseVerbatim:
+    """产物形态保真契约（2026-11-05 用户实报）：表名/别名/血缘引用与 SQL 原文
+    同形态——解析层存储保原文，大小写归一只发生在匹配点（键比较时 lower/upper）。
+
+    与上面的"大小写不敏感匹配"是同一枚硬币两面：
+    - 匹配不漏不重（归一）——既有类已锁
+    - 呈现逐字保真（原文）——本类锁定
+    """
+
+    SQL = ("SELECT A.cust_id, C.cust_name, 'N' AS del_flag "
+           "FROM ods.ods_acct_balance_DI A "
+           "JOIN ods.ods_cust_info_DI C ON A.cust_id = C.cust_id "
+           "WHERE A.del_flag = 'N'")
+
+    def test_source_tables_verbatim(self):
+        p = parse_single_sql(self.SQL, "dws")
+        tables = [(j.source_table, j.alias) for j in p.source_tables]
+        assert tables == [("ods.ods_acct_balance_DI", "A"), ("ods.ods_cust_info_DI", "C")]
+
+    def test_usage_verbatim(self):
+        p = parse_single_sql(self.SQL, "dws")
+        assert any(u["field"] == "del_flag" and u["alias"] == "A"
+                   for u in p.where_usage)  # WHERE 原文形态，不再 lower
+        assert any(u["field"] == "cust_id" and u["alias"] == "A"
+                   for u in p.join_usage)
+
+    def test_lineage_source_verbatim(self):
+        """血缘引用（source_fields 的 别名/字段）保原文——direct 桶 refs 同源。"""
+        p = parse_single_sql(self.SQL, "dws")
+        c0 = next(c for c in p.select_columns if c.alias == "cust_id")
+        assert c0.source_fields == [{"alias": "A", "field": "cust_id"}]
