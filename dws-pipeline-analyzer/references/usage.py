@@ -33,8 +33,9 @@ from urllib import request as urllib_request
 
 __version__ = "1.0"
 
-# 内网服务端默认地址（端口与参考项目一致，路径用 /api/usage 区分）
-DEFAULT_ENDPOINT = "http://10.96.160.123:3000/api/usage"
+# 内网服务端默认地址（端口与参考项目一致，路径用 /api/usage 区分）。
+# IP 再变时无需改码：设环境变量 ANALYZER_TELEMETRY_ENDPOINT 即可覆盖（_detect_endpoint）。
+DEFAULT_ENDPOINT = "http://10.96.160.104:3000/api/usage"
 
 # HTTP 上报超时（秒）—— LAN 内网通常 30-50ms；0.5s 兜底足够。
 # 不设 2s：本地/外网开发时（服务端不可达）每个子进程都会等满超时，

@@ -2,7 +2,8 @@
  * Analyzer Agent 运营埋点接收服务端。
  *
  * 单文件实现：HTTP 服务 + SQLite 存储 + 聚合统计 + ECharts 看板。
- * 唯一外部依赖：better-sqlite3。
+ * 零外部依赖：node:sqlite（Node v22.5+ 内置）+ vendor/echarts.min.js（本地
+ * 提供，内网无外网 CDN 也能打开看板）。
  *
  * 接口：
  *   POST /api/usage      接收单条或数组记录（INSERT OR IGNORE 幂等）
@@ -113,6 +114,23 @@ const insertStmt = db.prepare(
    VALUES (${INSERT_COLS.map(() => '?').join(', ')}, ?)`
 );
 
+// ── 静态资源（echarts 本地 vendor，启动时读入内存）────────────────────────
+// 内网环境访问不了外网 CDN（cdn.jsdelivr.net 挂起等到超时），看板必须离线可用。
+const VENDOR_ECHARTS = (() => {
+  try {
+    return fs.readFileSync(path.join(__dirname, 'vendor', 'echarts.min.js'));
+  } catch (e) {
+    console.warn('[WARN] vendor/echarts.min.js 缺失，看板图表将无法渲染');
+    return null;
+  }
+})();
+
+// ── /api/stats 聚合缓存 ──────────────────────────────────────────────────
+// 多人/多标签页同时开看板时，避免每次刷新都重复跑 8 个全表聚合查询。
+// TTL 内直接回内存结果；有新记录写入立即失效。
+const STATS_TTL_MS = 10 * 1000;
+let statsCache = { at: 0, data: null };
+
 // ── HTTP 工具 ────────────────────────────────────────────────────────────
 
 function corsHeaders() {
@@ -203,6 +221,8 @@ function handlePostUsage(payload) {
     return { statusCode: 500, body: { ok: false, error: 'Database error: ' + err.message } };
   }
 
+  if (received > 0) statsCache = { at: 0, data: null }; // 有新数据，统计缓存失效
+
   const ts = new Date().toISOString();
   console.log(`[${ts}] Received ${received}/${records.length} records`);
   return { statusCode: 200, body: { ok: true, received } };
@@ -224,6 +244,9 @@ function handleHealth() {
 // ── GET /api/stats ───────────────────────────────────────────────────────
 
 function handleStats() {
+  if (statsCache.data && Date.now() - statsCache.at < STATS_TTL_MS) {
+    return statsCache.data;
+  }
   const result = {};
 
   // 1. 概览
@@ -318,19 +341,20 @@ function handleStats() {
     FROM usage_records GROUP BY agent_version ORDER BY count DESC
   `).all();
 
+  statsCache = { at: Date.now(), data: result };
   return result;
 }
 
 // ── GET / 看板 ────────────────────────────────────────────────────────────
 
-function handleDashboard() {
+function buildDashboardHtml() {
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Analyzer Agent 运营数据</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"><\/script>
+<script src="/vendor/echarts.min.js"><\/script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; color: #333; padding: 20px; }
@@ -449,9 +473,32 @@ function card(label, value, sub) {
     (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>';
 }
 
+// ── 图表实例池（性能关键）─────────────────────────────────────────────
+// 同一容器只 init 一次：反复 echarts.init 同一 DOM 会泄漏实例（canvas 和
+// 动画 ticker 不释放），看板长开 + 60s 自动刷新会累积数千个实例，浏览器
+// 内存/GPU 持续上涨导致整机越来越卡。resize 监听同理只注册一次。
+var charts = [];
+window.addEventListener('resize', function () {
+  for (var i = 0; i < charts.length; i++) charts[i].resize();
+}, { passive: true });
+
+function getChart(id) {
+  var el = document.getElementById(id);
+  if (!el) return null;
+  var c = echarts.getInstanceByDom(el);
+  if (!c) { c = echarts.init(el); charts.push(c); }
+  return c;
+}
+
+// 空数据占位用 graphic 文本，不用 innerHTML 清容器（清 DOM 会让存活实例失效）
+var EMPTY_OPT = {
+  graphic: [{ type: 'text', left: 'center', top: 'middle',
+    style: { text: '暂无数据', fill: '#aaa', fontSize: 14 } }]
+};
+
 function renderDaily(da) {
-  var el = document.getElementById('dailyChart');
-  var chart = echarts.init(el);
+  var chart = getChart('dailyChart');
+  if (!chart) return;
   var dates = da.map(function(r){return r.date;}).reverse();
   var users = da.map(function(r){return r.users;}).reverse();
   var actions = da.map(function(r){return r.actions;}).reverse();
@@ -470,8 +517,7 @@ function renderDaily(da) {
       { name: '行为数', type: 'line', smooth: true, yAxisIndex: 1, data: actions,
         itemStyle: { color: '#34a853' }, areaStyle: { opacity: 0.1 } }
     ]
-  });
-  window.addEventListener('resize', function(){ chart.resize(); });
+  }, true); // notMerge：全量替换，防旧系列残留
 }
 
 function renderTable(id, rows, mapper) {
@@ -484,9 +530,9 @@ function renderTable(id, rows, mapper) {
 }
 
 function renderPie(id, data, nameMapper) {
-  var el = document.getElementById(id);
-  if (!el || !data.length) { if(el) el.innerHTML='<div style="color:#aaa;padding:20px;text-align:center">暂无数据</div>'; return; }
-  var chart = echarts.init(el);
+  var chart = getChart(id);
+  if (!chart) return;
+  if (!data.length) { chart.setOption(EMPTY_OPT, true); return; }
   var pieData = data.map(function(d) {
     return { name: nameMapper(d[Object.keys(d)[0]]), value: d.count };
   });
@@ -496,18 +542,16 @@ function renderPie(id, data, nameMapper) {
       type: 'pie', radius: ['40%', '70%'], data: pieData,
       label: { fontSize: 11 }
     }]
-  });
-  window.addEventListener('resize', function(){ chart.resize(); });
+  }, true);
 }
 
 function renderUserActivity(instances) {
-  var el = document.getElementById('userActivityChart');
-  if (!el) return;
-  if (!instances.length) { el.innerHTML = '<div style="color:#aaa;padding:20px;text-align:center">暂无数据</div>'; return; }
+  var chart = getChart('userActivityChart');
+  if (!chart) return;
+  if (!instances.length) { chart.setOption(EMPTY_OPT, true); return; }
   // 取 Top10，横向柱状图：行为数 + 调用次数 双系列
   var top = instances.slice(0, 10);
   var names = top.map(function(r){ return r.user_name || '(未识别)'; });
-  var chart = echarts.init(el);
   chart.setOption({
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: { data: ['行为数', '调用次数'] },
@@ -520,8 +564,7 @@ function renderUserActivity(instances) {
       { name: '调用次数', type: 'bar', data: top.map(function(r){return r.records;}),
         itemStyle: { color: '#34a853' } }
     ]
-  });
-  window.addEventListener('resize', function(){ chart.resize(); });
+  }, true);
 }
 
 function render(data) {
@@ -548,22 +591,36 @@ function render(data) {
 }
 
 function refresh() {
+  if (document.hidden) return; // 后台标签页不刷新（省 CPU），回前台立刷
   fetch('/api/stats').then(function(r){return r.json();}).then(function(data){
     document.getElementById('loading').style.display = 'none';
     document.getElementById('content').style.display = 'block';
     document.getElementById('lastUpdate').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
-    setTimeout(function(){ render(data); }, 0);
+    setTimeout(function(){
+      try { render(data); }
+      catch (e) {
+        var el = document.getElementById('loading');
+        if (el) { el.style.display = 'block'; el.textContent = '渲染失败: ' + e.message; }
+      }
+    }, 0);
   }).catch(function(err){
     document.getElementById('loading').textContent = '加载失败: ' + err.message;
   });
 }
 refresh();
 setInterval(refresh, 60000);
+// 切回前台立即刷新（补上后台期间跳过的数据）
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden) refresh();
+});
 <\/script>
 </body>
 </html>`;
   return html;
 }
+
+// 看板 HTML 启动时构建一次（内容静态，无需每个请求重建大字符串）
+const DASHBOARD_HTML = buildDashboardHtml();
 
 // ── 路由分发 ──────────────────────────────────────────────────────────────
 
@@ -606,10 +663,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/vendor/echarts.min.js') {
+    if (VENDOR_ECHARTS) {
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'public, max-age=86400', // 看板标签页长开也只拉一次
+      });
+      res.end(VENDOR_ECHARTS);
+    } else {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('vendor/echarts.min.js missing');
+    }
+    return;
+  }
+
   if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
-    const html = handleDashboard();
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(html);
+    res.end(DASHBOARD_HTML);
     return;
   }
 
