@@ -87,8 +87,10 @@ class TestUpstream:
                          {"name": "Pjob_up_x", "type": "TSKDEP"}]}  # 大小写容错
         idx = {"up_x": {"task_name": "task_up_x", "project": "P", "task_group": "G"}}
         ups = extract_upstream(task, idx)
+        # app/via 为 2026-11-09 加性字段（执行路径坐标：调度应用 + 解析出处）
         assert ups == [{"task": "task_up_x", "table": "up_x", "dep_type": DEFAULT_DEP_TYPE,
-                        "project": "P", "group": "G", "job": "Pjob_up_x", "resolved": True}]
+                        "app": "", "project": "P", "group": "G", "job": "Pjob_up_x",
+                        "resolved": True, "via": "in_artifact"}]
 
 
 # ── 3. 参数还原 ───────────────────────────────────────────────

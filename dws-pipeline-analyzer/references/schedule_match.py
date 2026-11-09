@@ -83,9 +83,22 @@ def dependency_candidates(schedule_info) -> tuple:
                 continue
             job_name = str(j.get("name") or "")
             key = _job_table(job_name)
+            ep = j.get("exec_parsed") or {}
+            up = tasks_index.get(key)
+            # 二次索引：tskdep 执行路径里的上游任务名（集群|appid|项目|任务组|任务）
+            if up is None and ep.get("task"):
+                up = tasks_index.get(_task_table(ep["task"]))
+            if up is None and ep.get("task"):
+                # 跨制品依赖（上游任务不在本 excel）：路径坐标合成上游行——
+                # 任务名/项目/任务组可用，可参与匹配；_via=path 标注出处
+                up = {"task_name": ep.get("task", ""),
+                      "project": ep.get("project", ""),
+                      "task_group": ep.get("task_group", ""),
+                      "task_type": "", "schedule_cron": "",
+                      "_via": "path"}
             candidates.append({
                 "job": job_name, "table_key": key,
-                "up_task": tasks_index.get(key),
+                "up_task": up, "exec_parsed": ep,
             })
     if not candidates:
         return [], "no_tskdep"
@@ -106,10 +119,14 @@ def _hit_label(key: str, table: str) -> str:
 
 
 def _upstream_row(cand: dict) -> dict:
-    """依赖候选 → Sheet2 调度七列（上游任务行；调度应用列 LTS 无对应字段，留空）。
+    """依赖候选 → Sheet2 调度七列（上游任务行）。
 
-    pjob = tskdep job 名（平台约定：= 上游任务的主 Pjob 名）。
+    调度应用 = tskdep 执行路径的 appid 段（com.huawei.xxx，2026-11-09 闭合
+    缺口①：此前误判"LTS 无对应字段"——路径坐标里有）；项目/任务组制品内
+    任务行权威、路径坐标兜底。pjob = tskdep job 名（平台约定：= 上游任务的
+    主 Pjob 名）。via = 解析出处（in_artifact / path）。
     """
+    ep = cand.get("exec_parsed") or {}
     up = cand.get("up_task")
     if up is None:
         return {"task_name": "", "app": "", "project": "", "group": "",
@@ -117,12 +134,13 @@ def _upstream_row(cand: dict) -> dict:
                 "unresolved": True}
     return {
         "task_name": up.get("task_name", ""),
-        "app": "",  # 缺口 1：LTS 制品无「调度应用」对应字段
-        "project": up.get("project", ""),
-        "group": up.get("task_group", ""),
+        "app": ep.get("appid", ""),          # 调度应用 = appid（执行路径坐标）
+        "project": up.get("project", "") or ep.get("project", ""),
+        "group": up.get("task_group", "") or ep.get("task_group", ""),
         "pjob": cand.get("job", "") or _main_job_name(up),
         "schedule_type": up.get("task_type", ""),
         "cron": up.get("schedule_cron", ""),
+        "via": up.get("_via", "in_artifact"),
     }
 
 

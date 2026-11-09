@@ -24,6 +24,8 @@ Author: 院博
 
 from __future__ import annotations
 
+from inputs import strip_rt_suffix
+
 import re
 
 TSKDEP = "tskdep"          # LTS 任务依赖型 job 的 job类型 值
@@ -80,11 +82,15 @@ def infer_schedule_type(cron: str) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 def _task_table(task_name: str) -> str:
-    return _TASK_PREFIX_RE.sub("", task_name or "").strip().lower()
+    """任务名 → 表名（去 task_ 前缀 + 去 _RT 实时尾缀，2026-11-09）。"""
+    t = _TASK_PREFIX_RE.sub("", task_name or "").strip().lower()
+    return strip_rt_suffix(t)
 
 
 def _job_table(job_name: str) -> str:
-    return _JOB_PREFIX_RE.sub("", job_name or "").strip().lower()
+    """job 名 → 表名（去 Pjob_ 前缀 + 去 _RT 实时尾缀，2026-11-09）。"""
+    t = _JOB_PREFIX_RE.sub("", job_name or "").strip().lower()
+    return strip_rt_suffix(t)
 
 
 def _main_job_name(task: dict) -> str:
@@ -114,15 +120,27 @@ def extract_upstream(task: dict, tasks_index: dict) -> list:
             continue
         job_name = str(j.get("name") or "")
         table = _job_table(job_name)
+        ep = j.get("exec_parsed") or {}
         up = tasks_index.get(table)
+        # 二次索引：tskdep 执行路径里的上游任务名（制品内 RT 任务等命名差异兜底）
+        if up is None and ep.get("task"):
+            up = tasks_index.get(_task_table(ep["task"]))
+        path_hit = up is None and bool(ep.get("task"))
         out.append({
-            "task": str(up.get("task_name") or "") if up else "",
+            # 制品内任务行权威；不在制品内时用路径坐标（跨应用依赖可解析，
+            # 2026-11-09：任务名/项目/任务组来自 集群|appid|项目|任务组|任务）
+            "task": str(up.get("task_name") or "") if up else str(ep.get("task") or ""),
             "table": table,
             "dep_type": DEFAULT_DEP_TYPE,       # 制品无依赖语义类型——不推断
-            "project": str(up.get("project") or "") if up else "",
-            "group": str(up.get("task_group") or "") if up else "",
+            "app": str(ep.get("appid") or ""),  # 调度应用=appid（执行路径坐标）
+            "project": (str(up.get("project") or "") if up else "")
+                       or str(ep.get("project") or ""),
+            "group": (str(up.get("task_group") or "") if up else "")
+                     or str(ep.get("task_group") or ""),
             "job": job_name,
-            "resolved": up is not None,
+            # resolved=解析出处：制品内任务行 > 执行路径坐标 > 未解析（不编造）
+            "resolved": up is not None or path_hit,
+            "via": "in_artifact" if up is not None else ("path" if path_hit else ""),
         })
     return out
 

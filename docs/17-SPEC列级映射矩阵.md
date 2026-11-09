@@ -347,3 +347,15 @@ analyze 入口规整（同日）：
   必做中间步降级为可选精修（写 `knowledge_ai.md` 后重跑 view_generator 覆盖）；
 - 产物分层：交付物在 `{output_dir}/` 根，knowledge 过程件（draft/summary/ai）
   进 `_internal/；chain 路径同口径。
+
+## 十二、LTS 调度解析修订（2026-11-09）
+
+§六 匹配口径的两点增强（落点 inputs.py，excel/yml 双源唯一权威）：
+
+- **RT 实时任务**：纯命名识别（表名_RT），剥尾缀按基名归类——只有实时任务
+  的资产不再 no_f_task；
+- **tskdep 执行路径坐标**：`集群|appid|项目|任务组|任务`（首段 com.huawei.
+  开头=同集群 4 段，否则 5 段跨集群、集群忽略）；依赖解析优先级 = 制品内
+  任务行权威 → 路径坐标兜底；**调度应用列 = appid**（缺口①闭合）；
+  url 型 ${xxx} 实值从 taskParams 解析（非坐标，不参与依赖）、database 型
+  select 只分类——形态不吻合不硬解。

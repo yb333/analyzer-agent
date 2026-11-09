@@ -16,6 +16,7 @@ Author: 院博
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from engine import RawRule, _is_intermediate_table
@@ -132,6 +133,7 @@ def _parse_lts_task(yml_path: Path) -> dict | None:
             result = _parse_lts_from_dict(data)
             if result:
                 result["lts_file"] = str(yml_path)
+                _enrich_jobs_exec_parsed(result)
             return result
     except Exception:
         pass
@@ -140,6 +142,7 @@ def _parse_lts_task(yml_path: Path) -> dict | None:
     result = _parse_lts_from_text(raw_text)
     if result:
         result["lts_file"] = str(yml_path)
+        _enrich_jobs_exec_parsed(result)
     return result
 
 
@@ -393,29 +396,136 @@ def _build_lts_result(data, task_name, group_code, params, jobs):
     }
 
 
+# ════════════════════════════════════════════════════════════
+# LTS 执行路径 / 实时任务尾缀解析（2026-11-09 用户口径，excel/yml 双源唯一权威）
+# ════════════════════════════════════════════════════════════
+
+_RT_SUFFIX_RE = re.compile(r"[_\-]?rt$", re.IGNORECASE)
+
+
+def strip_rt_suffix(name: str) -> str:
+    """剥实时任务尾缀（命名规范：表名_RT）。
+
+    纯命名识别（2026-11-09 拍板：tasks 页签无可靠的批量/实时类型列可依）。
+    兼容 `_RT`/`-rt` 等大小写/连字符变体。
+    """
+    return _RT_SUFFIX_RE.sub("", (name or "").strip())
+
+
+def parse_exec_path(path: str, task_params=None) -> dict:
+    """jobs 页签「执行路径信息」→ 结构化坐标（制品结构解析，唯一归属本层）。
+
+    平台三种常见形态（2026-11-09 用户口径）：
+    - tskdep 型：`集群|appid|项目|任务组|任务`；**同集群任务省集群段**——首段
+      以 com.huawei. 开头即 appid（同集群 4 段），否则首段是集群名（跨集群 5 段）
+    - url 型：`${xxx}` 参数变量 → 从 taskParams 解析实值（实值**不是** tskdep
+      坐标，不参与依赖，仅解析留存）
+    - database 型：一段 select 语句（不参与依赖，仅分类标注）
+
+    Returns: {kind: tskdep|database|url|other, cluster, appid, project,
+        task_group, task, resolved}——非 tskdep 形态坐标字段为空；
+        形态不吻合（如 | 分段但无 com.huawei. appid 段）不硬解，kind=other。
+    """
+    out = {"kind": "other", "cluster": "", "appid": "", "project": "",
+           "task_group": "", "task": "", "resolved": ""}
+    p = (path or "").strip()
+    if not p:
+        out["kind"] = ""
+        return out
+    # url 型：${xxx} → taskParams 实值
+    m = re.fullmatch(r"\$\{(\w+)\}", p)
+    if m:
+        out["kind"] = "url"
+        out["resolved"] = _param_value(task_params, m.group(1))
+        return out
+    # database 型：select / with 开头的语句
+    if re.match(r"(?is)^\s*(select|with)\b", p):
+        out["kind"] = "database"
+        return out
+    # tskdep 型：| 分段，appid 段（com.huawei. 开头）锚定位置
+    if "|" in p:
+        segs = [s.strip() for s in p.split("|")]
+        appid_idx = next((i for i, s in enumerate(segs)
+                          if s.lower().startswith("com.huawei.")), -1)
+        # 形态校验：appid 在首位（同集群）或次位（跨集群），其后恰好
+        # 项目|任务组|任务 三段——不吻合不硬解（不编造坐标）
+        if appid_idx in (0, 1) and len(segs) == appid_idx + 4:
+            if appid_idx == 1:
+                out["cluster"] = segs[0]
+            (out["appid"], out["project"],
+             out["task_group"], out["task"]) = segs[appid_idx:appid_idx + 4]
+            out["kind"] = "tskdep"
+    return out
+
+
+def _param_value(task_params, name: str) -> str:
+    """taskParams（[{name,value}] 或 {name:value}）里查参数实值。"""
+    if not task_params or not name:
+        return ""
+    if isinstance(task_params, dict):
+        return str(task_params.get(name, "") or "")
+    for p in task_params:
+        if isinstance(p, dict) and str(p.get("name") or "").strip() == name:
+            return str(p.get("value") or "")
+    return ""
+
+
+def _enrich_jobs_exec_parsed(task: dict) -> None:
+    """给 task.jobs 注入 exec_parsed（执行路径结构化坐标）。
+
+    url 型 ${xxx} 的实值载体是 taskParams（按任务关联），故在 task 级注入
+    （excel/yml 双源在任务装配完成处统一调用，同构纪律）。
+    """
+    params = task.get("params") or []
+    for j in task.get("jobs") or []:
+        if isinstance(j, dict):
+            j["exec_parsed"] = parse_exec_path(j.get("exec_path", ""), params)
+
+
 def _classify_lts_tasks(matched: list, lookup: dict | None = None) -> dict:
-    """LTS 任务分类（_F/_I/其他）+ F→I 命名关联。excel/yml 两源共用的唯一权威定义。
+    """LTS 任务分类（_F/_I/其他，_RT 实时尾缀容错）+ F→I 命名关联。
+
+    excel/yml 两源共用的唯一权威定义。实时任务命名规范：表名_RT（纯命名
+    识别，2026-11-09）——剥 _RT 尾缀后按基名分类（X_F_RT → F 任务），
+    命中尾缀的任务打 realtime 标记；F→I 关联同样用基名。
 
     I 任务通常不带 V_GROUP_CODE（不会被规则组匹配命中），按 _F→_I 命名从
     lookup（同批候选任务索引，key=任务名）关联补入 i_tasks。
 
     Returns: {"f_tasks": [...], "i_tasks": [...], "other_tasks": [...], "all_tasks": [...]}
     """
-    f_tasks = [t for t in matched if t["task_name"].endswith("_F")]
-    i_tasks = [t for t in matched if t["task_name"].endswith("_I")]
-    other_tasks = [t for t in matched
-                   if not t["task_name"].endswith("_F") and not t["task_name"].endswith("_I")]
+    f_tasks, i_tasks, other_tasks = [], [], []
+    for t in matched:
+        name = t.get("task_name", "") or ""
+        base = strip_rt_suffix(name)
+        low = base.lower()
+        if base and base != name:
+            t["realtime"] = True          # 实时任务标记（原名保留，展示不改）
+        if low.endswith("_f"):
+            f_tasks.append(t)
+        elif low.endswith("_i"):
+            i_tasks.append(t)
+        else:
+            other_tasks.append(t)
+    # 基名索引（RT 剥除后）：F→I 命名关联用基名，大小写容错
     pool = dict(lookup or {})
     for t in matched:
-        pool.setdefault(t["task_name"], t)
+        pool.setdefault(t.get("task_name", ""), t)
+    base_pool = {strip_rt_suffix(n).upper(): t for n, t in pool.items()}
     for f_task in f_tasks:
-        i_task = pool.get(f_task["task_name"][:-2] + "_I")
+        f_base = strip_rt_suffix(f_task.get("task_name", ""))
+        i_task = base_pool.get(f_base[:-2].upper() + "_I")
         if i_task and i_task not in i_tasks:
             i_tasks.append(i_task)
     all_tasks = list(matched)
     for t in i_tasks:
         if t not in all_tasks:
             all_tasks.append(t)
+    # realtime 标记统一出口：F→I 关联补入的 I 任务不在 matched 里，此处补标
+    for t in f_tasks + i_tasks + other_tasks:
+        name = t.get("task_name", "") or ""
+        if name and strip_rt_suffix(name) != name:
+            t["realtime"] = True
     return {"f_tasks": f_tasks, "i_tasks": i_tasks, "other_tasks": other_tasks,
             "all_tasks": all_tasks}
 
@@ -658,6 +768,7 @@ def read_lts_excel(excel_path, rule_group_code: str = "") -> dict | None:
                 "params": params,
                 "lts_file": str(path),  # 与 yml 源同构（provenance 采集用）
             })
+            _enrich_jobs_exec_parsed(tasks[-1])  # 执行路径结构化坐标（双源同构）
     finally:
         wb.close()
 
