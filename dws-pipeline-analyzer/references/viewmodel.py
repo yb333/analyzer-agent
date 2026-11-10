@@ -293,6 +293,8 @@ class ViewContext:
         self.source = knowledge.get("source", {})
 
         self.steps_list = self.topo.get("steps", [])
+        # 全量/增量双链维度（2026-11-10，engine detect_chains；缺 = 无双链）
+        self.chains = self.topo.get("chains") or {}
         self.data_flow_steps = self.df.get("steps", [])
         self.fields_list = self.fm.get("fields", [])
 

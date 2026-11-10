@@ -1573,6 +1573,14 @@ def generate_tech_design(knowledge, output_dir):
     lines.append(f"# {target_table} 技术设计文档")
     lines.append("")
     lines.append(f"> 由 dws-pipeline-analyzer 从制品包反向生成")
+    # 加载策略（2026-11-10）：双链资产在此呈现链路维度——全量链重刷 + 增量链
+    # 日常；SPEC/mapping 走共底座+「增量链限制」段（链路维度不占产出件行结构）
+    _dc = ((knowledge.get("meta", {}).get("load_strategy") or {})
+           .get("dual_chain"))
+    if _dc:
+        lines.append("")
+        lines.append(f"**加工方式**：{_dc.get('label', '')}——{_dc.get('detail', '')}"
+                     f"（增量链限制见 mapping/SPEC 关联条件列）")
     lines.append(f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     lines.append("")
 

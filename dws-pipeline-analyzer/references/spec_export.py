@@ -254,6 +254,8 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
     # 同语义关联去重（2026-11-10 拍板：一行——行身份 = 左表×右表×类型×归一化
     # 条件，别名降级为引用名；SPEC/mapping 同源出口统一收口）
     sheet3 = _semantic_dedup(sheet3)
+    # 双链差分标注（2026-11-10，共底座方案）：增量链独有谓词 →「增量链限制」段
+    sheet3 = _attach_incremental_segments(sheet3, ctx.chains)
 
     # 别名体系：Sheet3 行别名对（表短名, 别名）→ 物理别名集 / 表→别名（非锚
     # 优先）/ 别名→表反查（代入升级用）；锚 = 逻辑从表别名（可被代入替换）
@@ -806,3 +808,55 @@ def _semantic_dedup(rows: list) -> list:
         seen[key] = r
         out.append(r)
     return out
+
+
+def _attach_incremental_segments(rows: list, chains: dict) -> list:
+    """双链差分标注：增量链独有谓词 → Sheet3「增量链限制：…」段。
+
+    共底座方案（2026-11-10 拍板）：挂载基底 = 全量链（完整设计），双链
+    重复体不重复挂载；增量链独有谓词是**设计**（定义增量行集范围，谓词
+    守恒必须落地），按谓词引用的源别名附着到对应行（主表行/关联行），
+    找不到别名归属时落首个主表行；附标签防污染共享行语义。
+
+    mapping 经同源 Sheet3 自动获得该段（条件列）；tmp_field_gap（审计
+    字段物化位置差）= 实现差异，不落行结构（分界线 §十三）。
+    """
+    if not chains.get("has_dual_chain"):
+        return rows
+    incr = next((c for c in chains.get("chains", [])
+                 if c.get("kind") == "incremental"), None)
+    if not incr:
+        return rows
+    first_main = next((r for r in rows if r[5] == "主表"), None)
+
+    def _row_of_alias(alias: str):
+        """谓词别名 → 登记行（主表行别名 r[3] / 关联行左右别名 r[2]/r[4]）。"""
+        for r in rows:
+            if r[5] == "主表":
+                if (r[3] or "") == alias:
+                    return r
+            elif (r[2] or "") == alias or (r[4] or "") == alias:
+                return r
+        return None
+
+    attached = set()
+    for p in incr.get("extra_predicates", []):
+        pred = re.sub(r"(?i)^where\s+", "", str(p.get("predicate") or "").strip())
+        # 谓词去重键保留别名（b.del_flag 与 c.del_flag 是不同源表的不同谓词；
+        # 仅去空白/小写——剥别名前缀会把不同源的谓词误判为同一）
+        _pk = re.sub(r"\s+", "", pred).lower()
+        if not pred or _pk in attached:
+            continue
+        attached.add(_pk)
+        m = re.match(r"([A-Za-z_]\w*)\.", pred)
+        row = _row_of_alias(m.group(1)) if m else None
+        if row is None:
+            row = first_main
+        if row is None and rows:
+            row = rows[0]   # E1 单表形态：落首行（行级限制既有口径同位）
+        if row is None:
+            continue
+        seg = f"增量链限制：{pred}"
+        if seg not in (row[6] or ""):
+            row[6] = (row[6] + "；" + seg) if row[6] else seg
+    return rows

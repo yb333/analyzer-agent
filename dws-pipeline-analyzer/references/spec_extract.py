@@ -164,14 +164,31 @@ def _short_lower(t: str) -> str:
     return split_schema_table(t or "")[1].lower()
 
 
+def _chain_codes(ctx, kind: str) -> set:
+    """双链维度里某条链的规则编码集（无双链 → 空集）。"""
+    if not ctx.chains.get("has_dual_chain"):
+        return set()
+    return {c for ch in ctx.chains.get("chains", []) if ch.get("kind") == kind
+            for c in ch.get("rule_codes", [])}
+
+
 def _producer_of(ctx, table_full: str):
     """产出某表的步骤（target_table 匹配；短名比较——生产步登记短名、
-    消费侧引用可带 schema，两形态都真实存在）。"""
-    for s in ctx.steps_list:
-        t = s.get("target_table", "")
-        if t and _short_lower(t) == _short_lower(table_full):
+    消费侧引用可带 schema，两形态都真实存在）。
+
+    双链资产（2026-11-10）：同表有全量/增量两个生产步时优先**全量链**——
+    挂载基底取完整设计（全字段无增量过滤），增量链差异走「增量链限制」段。
+    """
+    full_codes = _chain_codes(ctx, "full")
+    hits = [s for s in ctx.steps_list
+            if s.get("target_table", "")
+            and _short_lower(s["target_table"]) == _short_lower(table_full)]
+    if not hits:
+        return None
+    for s in hits:
+        if s.get("rule_code") in full_codes:
             return s
-    return None
+    return hits[0]
 
 
 def _tmp_chain_index(ctx) -> dict:
@@ -190,11 +207,17 @@ def _tmp_chain_index(ctx) -> dict:
     }}
     """
     out: dict = {}
+    _incr_codes = _chain_codes(ctx, "incremental")
     for s in ctx.steps_list:
         sid = s.get("step_id", "")
         # 终端 = 写终态表的步骤（自身 target 是中间表的属于链内生产步，
         # 不作为挂载终端——否则整链会被中间消费者重复呈现）
         if _is_intermediate_table(s.get("target_table", "")):
+            continue
+        # 双链重复体（2026-11-10）：增量链终端与全量链共享全部结构，不重复
+        # 挂载——其差异（增量谓词/字段差）由 chains 结构承载、经
+        # 「增量链限制」段落位（共底座 + 差分标注）
+        if _incr_codes and s.get("rule_code") in _incr_codes:
             continue
         joins = ctx.df_step(sid).get("joins") or []
         if not joins:
@@ -495,9 +518,15 @@ def build_sheet3_rows(ctx, sq_sqls: dict = None) -> list:
                 attached_wheres.append(sw)
             last_pos_by_step[sid] = len(rows) - 1
 
-    # 未被附着的步骤 WHERE（logic_join_rows 对无 JOIN 步骤不产出承载行）
+    # 未被附着的步骤 WHERE（logic_join_rows 对无 JOIN 步骤不产出承载行）。
+    # 双链资产（2026-11-10）：增量链步骤的 WHERE 不走此通道——增量谓词是
+    # 链路级设计（定义增量行集范围），只经「增量链限制」标签段落位，
+    # 防同一谓词在写入前限制里无标签泄漏（污染共享行语义）
+    _incr_codes = _chain_codes(ctx, "incremental")
     unattached = []
     for s in ctx.steps_list:
+        if _incr_codes and s.get("rule_code") in _incr_codes:
+            continue
         w = ctx.step_where(s.get("step_id", ""))
         if w and w not in attached_wheres:
             unattached.append(w)
@@ -564,13 +593,32 @@ def predicate_conservation(ctx, sheet3_rows: list, sheet4_rows: list) -> list:
         " ".join(str(r[6]) for r in sheet4_rows if len(r) > 6)).lower()
 
     warnings = []
+    # 双链资产（2026-11-10）：增量链步骤的 WHERE 拆原子校验——共享谓词落在
+    # 全量链基底段（限定/写入前限制）、增量谓词落在「增量链限制」段，两处
+    # 命中即守恒；整段文本比对会把合法的共底座+差分标注误判为缺失
+    _incr_codes = _chain_codes(ctx, "incremental")
+
+    def _atoms_conserved(where_text: str) -> bool:
+        """WHERE 按顶层 AND 拆原子，逐原子在 Sheet3/Sheet4 段里可寻即守恒。"""
+        for atom in re.split(r"(?i)\band\b", where_text):
+            atom = atom.strip()
+            if not atom or atom.replace(" ", "") in ("1=1", "1 = 1"):
+                continue
+            if _squeeze(atom).lower() not in g_blob and \
+                    _squeeze(atom).lower() not in logic_blob:
+                return False
+        return True
+
     for s in ctx.steps_list:
         sid = s.get("step_id", "")
         label = s.get("rule_code", "") or sid
         w = ctx.step_where(sid)
         if w:
             w_v = w
-            if _squeeze(w_v).lower() not in g_blob:
+            ok = _squeeze(w_v).lower() in g_blob
+            if not ok and _incr_codes and s.get("rule_code") in _incr_codes:
+                ok = _atoms_conserved(w_v)
+            if not ok:
                 warnings.append({
                     "type": "predicate_missing_where",
                     "title": f"谓词守恒：步骤 {label} 的 WHERE 未落入表3"

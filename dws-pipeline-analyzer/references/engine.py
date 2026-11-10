@@ -5610,7 +5610,8 @@ def _split_predicates(where_text: str) -> list:
     """WHERE 文本按 AND 拆谓词原子（顶层，容 OR 原子整段保留）。"""
     if not where_text:
         return []
-    parts = re.split(r"(?i)\band\b", where_text)
+    text = re.sub(r"(?i)^where\s+", "", str(where_text).strip())
+    parts = re.split(r"(?i)\band\b", text)
     return [p.strip() for p in parts if p.strip() and p.strip() != "1=1"]
 
 
@@ -7056,6 +7057,7 @@ def analyze_pipeline(
     if _chains.get("has_dual_chain"):
         topology["chains"] = _chains
 
+
     # ── Step 5a: 构建多表结构目录（DDL，可选增强，容错）──
     _t0 = _time.time()
     table_catalog = build_table_catalog(rules, ddl_dir, parsed_map) if ddl_dir else {}
@@ -7124,6 +7126,19 @@ def analyze_pipeline(
 
     # 加工方式判断（增量/全量/分区/追加）
     load_strategy = detect_load_strategy(rules)
+    # 双链加载策略摘要（2026-11-10，html REPORT_DATA / tech_design 消费）：
+    # 双链 = 全量重刷 + 增量日常；拓扑 chains 结构化产出在前（Step 5z）
+    _dc = topology.get("chains") or {}
+    if _dc.get("has_dual_chain"):
+        _full = next((c for c in _dc["chains"] if c["kind"] == "full"), {})
+        _incr = next((c for c in _dc["chains"] if c["kind"] == "incremental"), {})
+        load_strategy["dual_chain"] = {
+            "label": "全量+增量双链",
+            "full_chain": _full.get("rule_codes", []),
+            "incremental_chain": _incr.get("rule_codes", []),
+            "detail": (f"全量链({','.join(_full.get('rule_codes', []))})重刷 + "
+                       f"增量链({','.join(_incr.get('rule_codes', []))})日常"),
+        }
 
     # DDL 字段元数据（从多表 catalog 取目标表的结构，可选增强）
     # catalog 在 Step 5a 已构建（含过程表+目标表），这里只取目标表部分
