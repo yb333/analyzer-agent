@@ -60,6 +60,15 @@ def _sorting_warnings(unrecognized: list, dq_detected: bool, lts_detected: bool)
     return out
 
 
+def _record_usage(payload: dict) -> None:
+    """运营埋点（全程吞异常——绝不影响交付）。"""
+    try:
+        from usage import record as _rec
+        _rec(payload)
+    except Exception:
+        pass
+
+
 def run_facts(dir_path, output_path) -> Path:
     """制品目录 → 分析 → ts 草稿精确路径落盘（一次调用一次交卷）。
 
@@ -67,6 +76,8 @@ def run_facts(dir_path, output_path) -> Path:
     v1 asset_facts 投影已于 2026-11-04 退役（消费方 v1 入料路径同日删除，
     一波换彻底不留双版本）。
     """
+    import time as _t
+    t0 = _t.time()
     # ── 共享装配核（docs/17 §九：facts/spec 同一条链，唯一定义在 pipeline_core）──
     try:
         core = run_from_dir(dir_path, include_dq=True, channel="facts",
@@ -128,7 +139,17 @@ def run_facts(dir_path, output_path) -> Path:
     # 自检结论行（交付门，机器按行前缀判读；与定位行同风格）
     import json as _json
     product = _json.loads(out.read_text(encoding="utf-8"))
-    print(f"self_check: {product.get('_reverse', {}).get('self_check', {}).get('verdict', '')}")
+    verdict = product.get('_reverse', {}).get('self_check', {}).get('verdict', '')
+    print(f"self_check: {verdict}")
+    # ── 运营埋点：成功记全字段（失败由 main 拦 SystemExit 粗记，不会重复）──
+    _record_usage({
+        "command": "facts",
+        "input_type": "artifact_dir",
+        "asset": raw.get("rule_group_en") or "",
+        "elapsed_sec": round(_t.time() - t0, 2),
+        "status": "ok",
+        "self_check": verdict,  # 自检结论随行（自动进 extra）
+    })
     return out
 
 
@@ -142,7 +163,23 @@ def main():
     parser.add_argument("--output", required=True,
                         help="产物落盘路径（ts 草稿 json，父目录自动创建）")
     args = parser.parse_args()
-    run_facts(args.dir, args.output)
+    import time as _t
+    t0 = _t.time()
+    try:
+        run_facts(args.dir, args.output)
+    except SystemExit as e:
+        # 失败统一粗记（成功已由 run_facts 内部记过，这里只拦非零退出）
+        if e.code not in (0, None):
+            _record_usage({
+                "command": "facts",
+                "input_type": "artifact_dir",
+                "asset": Path(args.dir).name,
+                "elapsed_sec": round(_t.time() - t0, 2),
+                "status": "error",
+                "error_type": "input_error",  # exit 1 = 制品/数据问题（exit 2 在 parse 阶段，到不了这里）
+                "error_message": "non-zero exit (见 stderr 错误清单)",
+            })
+        raise
 
 
 if __name__ == "__main__":

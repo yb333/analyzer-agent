@@ -535,3 +535,36 @@ class TestSilentSwitchover:
             usage._enqueue({"run_id": f"q{i}", "command": "analyze"})
         assert flush_queue() == 3
         assert not usage.QUEUE_PATH.exists()  # 全部补发成功，队列清空
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 10. 调用方识别（caller：SKILL.md 约定 agent 带 ANALYZER_CALLER=agent 前缀）
+# ════════════════════════════════════════════════════════════════════════
+
+class TestCaller:
+    @staticmethod
+    def _extra_of(payload):
+        return json.loads(payload["extra"]) if payload.get("extra") else {}
+
+    def test_env_agent_marks_agent(self, isolated_usage, monkeypatch, fake_post_ok):
+        """环境变量 ANALYZER_CALLER=agent → extra.caller=agent。"""
+        monkeypatch.setenv("ANALYZER_CALLER", "agent")
+        record({"command": "facts"})
+        assert self._extra_of(fake_post_ok[0])["caller"] == "agent"
+
+    def test_default_is_human(self, isolated_usage, fake_post_ok):
+        """不带环境变量（人工调用）→ extra.caller=human。"""
+        record({"command": "analyze"})
+        assert self._extra_of(fake_post_ok[0])["caller"] == "human"
+
+    def test_env_value_normalized(self, isolated_usage, monkeypatch, fake_post_ok):
+        """值原样小写存储（非 agent 枚举也存原值，看板只认 'agent'）。"""
+        monkeypatch.setenv("ANALYZER_CALLER", "  Agent ")
+        record({"command": "spec"})
+        assert self._extra_of(fake_post_ok[0])["caller"] == "agent"
+
+    def test_explicit_caller_not_overwritten(self, isolated_usage, monkeypatch, fake_post_ok):
+        """调用方显式传了 caller 不覆盖（埋点字段优先于环境探测）。"""
+        monkeypatch.setenv("ANALYZER_CALLER", "agent")
+        record({"command": "analyze", "caller": "ci"})
+        assert self._extra_of(fake_post_ok[0])["caller"] == "ci"

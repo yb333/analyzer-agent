@@ -32,7 +32,7 @@ from urllib import request as urllib_request
 
 # ── 常量 ──────────────────────────────────────────────────────────────────
 
-__version__ = "1.0"
+__version__ = "1.1"
 
 # 内网服务端地址候选序列（按优先级，新的在前、旧的兜底——服务端机器的
 # DHCP 地址可能来回漂移）。IP 变更时只需往这里加一个新地址，同事们拉代码
@@ -221,6 +221,17 @@ def _save_last_ok(endpoint: str) -> None:
         )
     except Exception:
         pass
+
+
+def _detect_caller() -> str:
+    """调用方识别（SKILL.md 全局约定：agent 调用任何命令统一带
+    ANALYZER_CALLER=agent 前缀；人工调用不带）。存进 extra.caller，
+    看板按它统计 agent 采纳率。识别不到一律按人工。"""
+    try:
+        v = (os.environ.get("ANALYZER_CALLER") or "").strip().lower()
+        return v or "human"
+    except Exception:
+        return "human"
 
 
 # ── 错误分类 ─────────────────────────────────────────────────────────────
@@ -450,6 +461,9 @@ def record(data: dict) -> None:
         row["agent_version"] = __version__
         row["python_version"] = platform.python_version()
         row["os"] = _get_os()
+        # 调用方标识（agent / human）—— 运营核心维度，进 extra 不动 schema
+        # （必须在 row["extra"] 序列化之前注入）
+        extra.setdefault("caller", _detect_caller())
         row["extra"] = json.dumps(extra, ensure_ascii=False) if extra else ""
         # elapsed_detail 序列化为 JSON 字符串（CSV 存文本，服务端存 TEXT）
         detail = row.get("elapsed_detail")

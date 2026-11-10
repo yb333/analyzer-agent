@@ -42,6 +42,13 @@ python -c "import openpyxl, sqlglot; print('OK')"
 > - 手工复制 skill 目录：只要系统 python 装好依赖即可，run.py 会自检提示
 > - 本文档统一用 `python`。Windows 直接用 `python`（如果 PATH 里有 `py` launcher 也可用 `py -3`）；macOS/Linux 如果只有 `python3`，请用 `python3` 替代。注意：Windows 上不要用 `py3`（不存在这个命令）。
 
+> **调用标识（AI agent 必读）**：你是 AI agent 时，调用本 skill 的**任何命令**都
+> 统一加环境变量前缀 `ANALYZER_CALLER=agent`（运营统计 agent 采纳率；人工调用
+> 不带，自动按人工计）：
+> ```bash
+> ANALYZER_CALLER=agent python {skill_dir}/run.py analyze --input {制品目录} --output ./output/
+> ```
+
 ---
 
 ## 工作流程

@@ -41,8 +41,19 @@ def _scenario_label(sc: dict) -> str:
     return sc.get("partition") or sc.get("name") or sc.get("id")
 
 
+def _record_usage(payload: dict) -> None:
+    """运营埋点（全程吞异常——绝不影响交付）。"""
+    try:
+        from usage import record as _rec
+        _rec(payload)
+    except Exception:
+        pass
+
+
 def run_spec(dir_path, output_path, scenario: str = None) -> Path:
     """制品目录 → 需求SPEC.xlsx（一次调用一次交卷）。"""
+    import time as _t
+    t0 = _t.time()
     # ── 共享装配核（DQ 忽略：include_dq=False，docs/17 §〇）──
     try:
         core = run_from_dir(dir_path, include_dq=False, channel="spec",
@@ -132,6 +143,16 @@ def run_spec(dir_path, output_path, scenario: str = None) -> Path:
         print(f"  [披露] {d['title']}")
     print(f"spec: {out.resolve()}")
     print(f"self_check: {self_check['verdict']}")
+    # ── 运营埋点：成功记全字段（失败由 main 拦 SystemExit 粗记，不会重复）──
+    _record_usage({
+        "command": "spec",
+        "input_type": "artifact_dir",
+        "asset": core["raw"].get("rule_group_en") or "",
+        "elapsed_sec": round(_t.time() - t0, 2),
+        "status": "ok",
+        "scenario": scenario or "",  # 多场景口径时随行（自动进 extra）
+        "self_check": self_check["verdict"],  # 自检结论随行（自动进 extra）
+    })
     return out
 
 
@@ -150,7 +171,24 @@ def main():
                         help="多场景资产必填：按该场景单场景口径产出（场景名 = "
                              "分区分组名，如 P_CUR）")
     args = parser.parse_args()
-    run_spec(args.dir, args.output, scenario=args.scenario)
+    import time as _t
+    t0 = _t.time()
+    try:
+        run_spec(args.dir, args.output, scenario=args.scenario)
+    except SystemExit as e:
+        # 失败统一粗记（成功已由 run_spec 内部记过，这里只拦非零退出；
+        # exit 1 含多场景未指定 --scenario 等可修正调用）
+        if e.code not in (0, None):
+            _record_usage({
+                "command": "spec",
+                "input_type": "artifact_dir",
+                "asset": Path(args.dir).name,
+                "elapsed_sec": round(_t.time() - t0, 2),
+                "status": "error",
+                "error_type": "input_error",
+                "error_message": "non-zero exit (见 stderr 错误清单)",
+            })
+        raise
 
 
 if __name__ == "__main__":

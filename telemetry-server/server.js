@@ -261,6 +261,7 @@ function handleStats() {
       COUNT(DISTINCT CASE WHEN status='error' THEN run_id END) AS total_error,
       ROUND(AVG(elapsed_sec), 2) AS avg_elapsed_sec,
       SUM(CASE WHEN quality_issues > 0 THEN quality_issues ELSE 0 END) AS total_quality_issues,
+      SUM(CASE WHEN json_extract(extra, '$.caller') = 'agent' THEN 1 ELSE 0 END) AS agent_calls,
       MIN(timestamp) AS first_event,
       MAX(timestamp) AS last_event
     FROM usage_records
@@ -278,9 +279,11 @@ function handleStats() {
     ORDER BY date DESC
   `).all();
 
-  // 3. 命令热度（各阶段各自计次 —— 看脚本被调多少次）
+  // 3. 命令热度（各阶段各自计次 —— 看脚本被调多少次；agent_count = agent 调用占比分母分子）
   result.command_usage = db.prepare(`
-    SELECT command, COUNT(*) AS count, MAX(timestamp) AS last_used
+    SELECT command, COUNT(*) AS count,
+           SUM(CASE WHEN json_extract(extra, '$.caller') = 'agent' THEN 1 ELSE 0 END) AS agent_count,
+           MAX(timestamp) AS last_used
     FROM usage_records GROUP BY command ORDER BY count DESC
   `).all();
 
@@ -425,9 +428,9 @@ function buildDashboardHtml() {
   </div>
 
   <div class="grid-2">
-    <div class="section">
+      <div class="section">
       <h2>命令热度</h2>
-      <table><thead><tr><th>命令</th><th>次数</th><th>最后使用</th></tr></thead><tbody id="cmdTable"></tbody></table>
+      <table><thead><tr><th>命令</th><th>次数</th><th>agent 占比</th><th>最后使用</th></tr></thead><tbody id="cmdTable"></tbody></table>
     </div>
     <div class="section">
       <h2>输入类型占比</h2>
@@ -476,7 +479,9 @@ var COMMAND_NAMES = {
   'view-generator': '视图生成',
   'impact-analysis': '关联影响分析',
   'impact-analysis-cross': '跨资产影响分析',
-  'field-search': '字段使用检索'
+  'field-search': '字段使用检索',
+  'facts': 'ts草稿导出（存量契约）',
+  'spec': '需求SPEC导出'
 };
 var INPUT_NAMES = {
   'xlsx': '术加制品包Excel',
@@ -484,7 +489,8 @@ var INPUT_NAMES = {
   'table_name': '仅表名',
   'impact_excel': '变更清单Excel',
   'field_list': '字段列表',
-  'knowledge_json': '解析结果JSON(view-generator)'
+  'knowledge_json': '解析结果JSON(view-generator)',
+  'artifact_dir': '制品目录'
 };
 
 function fmtTime(s) {
@@ -505,6 +511,9 @@ function renderOverview(o, ep) {
   html += card('分析行为数', o.total_actions || 0, '一次完整分析=1次（去重）');
   html += card('脚本调用数', o.total_records || 0,
     '成功 ' + (o.total_ok||0) + ' / 失败 ' + (o.total_error||0));
+  var agentCalls = o.agent_calls || 0;
+  var agentPct = o.total_records ? Math.round(agentCalls * 100 / o.total_records) : 0;
+  html += card('agent 调用占比', agentPct + '%', agentCalls + ' 次 / 共 ' + (o.total_records || 0) + ' 次');
   html += card('耗时 P50 / P90',
     ((ep && ep.p50 != null ? ep.p50 : 0) + 's / ' + (ep && ep.p90 != null ? ep.p90 : 0) + 's'),
     'P99 ' + (ep && ep.p99 != null ? ep.p99 : '-') + 's · 平均 ' + (o.avg_elapsed_sec || 0) + 's · n=' + (ep ? ep.n : 0));
@@ -629,7 +638,8 @@ function render(data) {
   renderOverview(data.overview || {}, data.elapsed_pct || {});
   renderDaily(data.daily_active || []);
   renderTable('cmdTable', data.command_usage || [], function(r) {
-    return [cmdLabel(r.command), r.count, fmtTime(r.last_used)];
+    var pct = r.agent_count ? Math.round(r.agent_count * 100 / r.count) + '%' : '-';
+    return [cmdLabel(r.command), r.count, pct, fmtTime(r.last_used)];
   });
   renderTable('assetTable', data.top_assets || [], function(r) {
     return [r.asset_name, r.count, fmtTime(r.last_analyzed)];
