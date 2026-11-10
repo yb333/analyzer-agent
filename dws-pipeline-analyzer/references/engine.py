@@ -5580,6 +5580,146 @@ def _walk_chain_for_extract(chain):
         yield from _walk_chain_for_extract(child)
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# 全量/增量双链维度检测（2026-11-10，用户口径：规则编码无规律；
+# 判据 = 共享目标表 + 写入方式族差 + 过滤条件特征）
+# ═══════════════════════════════════════════════════════════════
+
+# 写入方式族：全量（重刷整表/分区）vs 增量（追加/合并）
+_FULL_DELETE_MODES = {"1", "3", "4", "5"}      # TRUNCATE/SUBPARTITION/DELETE/PARTITION
+_INCREMENTAL_DELETE_MODES = {"2", "6"}          # NO DELETE(追加)/MERGE INTO
+
+
+def _write_family(delete_mode: str) -> str:
+    """delete_mode → full / incremental / ''（认不出不归类）。"""
+    dm = str(delete_mode or "").strip()
+    if dm in _FULL_DELETE_MODES:
+        return "full"
+    if dm in _INCREMENTAL_DELETE_MODES:
+        return "incremental"
+    return ""
+
+
+def _norm_predicate(text: str) -> str:
+    """谓词归一（比对用）：去空白/括号，小写。"""
+    return re.sub(r"[\s()]+", "", str(text or "")).lower()
+
+
+def _split_predicates(where_text: str) -> list:
+    """WHERE 文本按 AND 拆谓词原子（顶层，容 OR 原子整段保留）。"""
+    if not where_text:
+        return []
+    parts = re.split(r"(?i)\band\b", where_text)
+    return [p.strip() for p in parts if p.strip() and p.strip() != "1=1"]
+
+
+def detect_chains(rules: list, parsed_map: dict, data_flow: dict) -> dict:
+    """全量/增量双链检测 → topology["chains"]（结构化产出，投影层只消费）。
+
+    双链特征（用户口径 2026-11-10）：
+    - 两套规则链共享全部临时表和目标表（同 target 被 2+ 步骤写）
+    - 写入方式有差别：全量族（TRUNCATE/DELETE/分区）vs 增量族（追加/MERGE）
+    - 增量链有额外过滤条件（增量范围谓词）
+    - 审计字段在增量链不写入临时表（物化位置差异=实现，字段差集如实给出）
+    - 规则编码无规律（不参与判断）
+
+    Returns: {
+        "has_dual_chain": bool,
+        "chains": [                       # 无双链时为空
+            {"kind": "full", "rule_codes": [...]},
+            {"kind": "incremental", "rule_codes": [...],
+             "extra_predicates": [{rule, target, predicate}],   # 增量链独有谓词
+             "tmp_field_gap": [{rule, target, fields}]},        # 增量链少写的字段
+        ],
+    }
+    """
+    out = {"has_dual_chain": False, "chains": []}
+    if not rules:
+        return out
+
+    by_code = {r.rule_code: r for r in rules}
+    df_where = {s.get("step_id", ""): s.get("where_clause", "")
+                for s in data_flow.get("steps", [])}
+    sid_of = {}   # rule_code → step_id
+    for s in data_flow.get("steps", []):
+        if s.get("rule_code"):
+            sid_of[s["rule_code"]] = s.get("step_id", "")
+
+    # 1) 按目标表分组生产者（共享目标 = 双链第一特征）
+    producers: dict = {}   # target_table(lower) → [rule_code]
+    for r in rules:
+        if r.target_table:
+            producers.setdefault(_norm_table(r.target_table), []).append(r.rule_code)
+
+    dual_targets = {t: codes for t, codes in producers.items()
+                    if len({by_code[c].delete_mode for c in codes
+                            if _write_family(by_code[c].delete_mode)}) >= 1
+                    and len(codes) >= 2
+                    and {_write_family(by_code[c].delete_mode) for c in codes} >= {"full", "incremental"}}
+    if not dual_targets:
+        return out
+
+    # 2) 链归属：按写入方式族分链；经共享目标表连通传播
+    full_set, incr_set = set(), set()
+    frontier = set(dual_targets)
+    while frontier:
+        tgt = frontier.pop()
+        for code in producers.get(tgt, []):
+            fam = _write_family(by_code[code].delete_mode)
+            bucket = full_set if fam == "full" else incr_set if fam == "incremental" else None
+            if bucket is None or code in bucket:
+                continue
+            bucket.add(code)
+            # 传播：该步读的共享目标，其生产者们同链（读 tmp 的终表步）
+            parsed = parsed_map.get(code)
+            if parsed:
+                for j in parsed.source_tables:
+                    jt = _norm_table(j.source_table)
+                    if jt in producers and jt not in frontier:
+                        frontier.add(jt)
+
+    if not full_set or not incr_set:
+        return out
+
+    # 3) 差分点：增量链独有谓词（与同目标全量步的 WHERE 差集）+ 临时表字段差
+    extra_predicates, tmp_field_gap = [], []
+    for tgt, codes in dual_targets.items():
+        pairs = [(f, i) for f in codes if f in full_set for i in codes if i in incr_set]
+        if not pairs:
+            continue
+        full_wheres = set()
+        for f_code, _ in pairs:
+            for atom in _split_predicates(df_where.get(sid_of.get(f_code, ""), "")):
+                full_wheres.add(_norm_predicate(atom))
+        for _, i_code in pairs:
+            i_rule = by_code[i_code]
+            for atom in _split_predicates(df_where.get(sid_of.get(i_code, ""), "")):
+                if _norm_predicate(atom) not in full_wheres:
+                    extra_predicates.append({
+                        "rule": i_code, "target": str(i_rule.target_table or ""),
+                        "predicate": atom})
+            # 临时表目标：增量链少写的字段（全量链 select 列集 - 增量链列集）
+            if _is_intermediate_table(i_rule.target_table or ""):
+                f_code = pairs[0][0]
+                f_cols = {c.alias.lower() for c in
+                          (parsed_map.get(f_code) or ParsedSQL()).select_columns if c.alias}
+                i_cols = {c.alias.lower() for c in
+                          (parsed_map.get(i_code) or ParsedSQL()).select_columns if c.alias}
+                gap = sorted(f_cols - i_cols)
+                if gap:
+                    tmp_field_gap.append({
+                        "rule": i_code, "target": str(i_rule.target_table or ""),
+                        "fields": gap})
+
+    out["has_dual_chain"] = True
+    out["chains"] = [
+        {"kind": "full", "rule_codes": sorted(full_set)},
+        {"kind": "incremental", "rule_codes": sorted(incr_set),
+         "extra_predicates": extra_predicates, "tmp_field_gap": tmp_field_gap},
+    ]
+    return out
+
 # ═══════════════════════════════════════════════════════════════
 # 辅助: detect_patterns() — 加工模式标签自动检测
 # ═══════════════════════════════════════════════════════════════
@@ -6909,6 +7049,12 @@ def analyze_pipeline(
     _t0 = _time.time()
     data_flow = build_data_flow(rules, parsed_map)
     _timings["build_data_flow"] = _time.time() - _t0
+
+    # ── Step 5z: 全量/增量双链维度（2026-11-10：结构化产出，投影层只消费）──
+    # 仅双链资产挂载（缺键 = 无双链），非双链零负载
+    _chains = detect_chains(rules, parsed_map, data_flow)
+    if _chains.get("has_dual_chain"):
+        topology["chains"] = _chains
 
     # ── Step 5a: 构建多表结构目录（DDL，可选增强，容错）──
     _t0 = _time.time()
