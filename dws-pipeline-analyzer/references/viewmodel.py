@@ -259,13 +259,15 @@ class EntitySource:
     origin: "main"（主查询 JOIN）/ "union:N"（UNION 分支 N）/ "cte:CNAME"（CTE 内部）
     """
     __slots__ = ("schema", "table", "alias", "origin", "join_type",
-                 "join_condition", "rewritten_condition", "transfer_note", "step_id")
+                 "join_condition", "rewritten_condition", "transfer_note", "step_id",
+                 "aliases")
 
     def __init__(self, schema, table, alias, origin, join_type="", join_condition="",
                  rewritten_condition="", transfer_note="", step_id=""):
         self.schema = schema
         self.table = table
-        self.alias = alias
+        self.alias = alias          # 首次出现的别名（兼容字段）
+        self.aliases = [alias] if alias else []   # 别名全集（出现序，2026-11-10 统一口径）
         self.origin = origin
         self.join_type = join_type
         self.join_condition = join_condition
@@ -462,6 +464,18 @@ class ViewContext:
         seen_global = set()
         seen_branches = set()
         out = []
+        # 别名出现登记（2026-11-10 统一别名身份）：同表多次参与（t1/t2/t3）的
+        # 别名全记录——行去重是表级（keep-first 行），别名身份不丢
+        alias_occ: dict = {}
+
+        def _reg_alias(src_full: str, alias: str):
+            if not src_full or not alias:
+                return
+            _, short = split_schema_table(src_full)
+            key = norm_name(short)
+            lst = alias_occ.setdefault(key, [])
+            if alias not in lst:
+                lst.append(alias)
 
         for s in self.steps_list:
             sid = s.get("step_id", "")
@@ -476,6 +490,7 @@ class ViewContext:
                     bidx = b.get("branch_index", 0)
                     for j in b.get("source_tables", []):
                         src_full = j.get("source_table", "")
+                        _reg_alias(src_full, j.get("alias", ""))  # 身份先登记（去重挡行不挡别名）
                         if not self._is_entity_eligible(src_full, seen_global):
                             continue
                         dedup_key = (bidx, norm_name(src_full))
@@ -493,6 +508,7 @@ class ViewContext:
                 step_jkl = df_step.get("join_key_lineage", {})
                 for j in joins:
                     src_full = j.get("source_table", "")
+                    _reg_alias(src_full, j.get("alias", ""))  # 身份先登记（去重挡行不挡别名）
                     if not self._is_entity_eligible(src_full, seen_global):
                         continue
                     seen_global.add(norm_name(src_full))
@@ -508,6 +524,7 @@ class ViewContext:
             for cte in ctes:
                 for st in cte.get("source_tables", []):
                     tname = st.get("name", "")
+                    _reg_alias(tname, st.get("alias", ""))  # 身份先登记（去重挡行不挡别名）
                     if not self._is_entity_eligible(tname, seen_global):
                         continue
                     seen_global.add(norm_name(tname))
@@ -518,6 +535,9 @@ class ViewContext:
                         join_type=st.get("join_type", "FROM"),
                         join_condition=st.get("join_condition", ""), step_id=sid))
 
+        # 别名全集回填（出现序，顿号合并由消费方决定呈现）
+        for es in out:
+            es.aliases = alias_occ.get(norm_name(es.table), es.aliases)
         self._entity_sources = out
         return out
 

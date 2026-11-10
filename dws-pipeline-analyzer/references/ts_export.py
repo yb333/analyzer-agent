@@ -405,14 +405,27 @@ def _ts_rules(ctx, knowledge: dict, topo: dict, plans: dict) -> dict:
         info = topo[code]
         plan = plans.get(code) or {}
         joins_raw = ctx.df_step(info["step_id"]).get("joins") or []
-        alias_of = {str(j.get("source_table") or "").lower(): str(j.get("alias") or "")
-                    for j in joins_raw if j.get("source_table")}
-        src = []
+        # 别名身份统一口径（2026-11-10）：按（表×别名）逐参与一行——同表多别名
+        # （t/t1/t2 多次独立关联）与 joins 同基数；不再做表级反查（first/last-wins
+        # 都是编造单一别名，曾与 meta.source_tables 互相打架）
+        occ: dict = {}
+        for j in joins_raw:
+            st = str(j.get("source_table") or "")
+            al = str(j.get("alias") or "")
+            if st and al:
+                occ.setdefault(_short(st).lower(), []).append(al)
+        src, seen_pa = [], set()
         for full in (s.get("source_tables_from_sql") or []):
             if full.lower() in written and written[full.lower()] != code:
                 continue  # 本资产中间表 → reads
-            src.append({"schema": full.split(".")[0] if "." in full else "",
-                        "table": _short(full), "alias": alias_of.get(full.lower(), "")})
+            aliases = occ.get(_short(full).lower()) or [""]
+            for al in dict.fromkeys(aliases):   # 去重保出现序
+                key = (full.lower(), al.lower())
+                if key in seen_pa:
+                    continue
+                seen_pa.add(key)
+                src.append({"schema": full.split(".")[0] if "." in full else "",
+                            "table": _short(full), "alias": al})
         joins = [{"alias": str(j.get("alias") or ""), "type": str(j.get("join_type") or ""),
                   "condition": str(j.get("join_condition") or ""), "filter": ""}
                  for j in joins_raw if str(j.get("join_type") or "").upper() != "FROM"]
@@ -565,13 +578,15 @@ def _ts_meta(ctx, knowledge: dict, engine_ctx: dict, tables: dict, topo: dict,
         return str(e.get("__table_comment__") or "")
 
     source_tables, seen = [], set()
+    # 别名全集（2026-11-10 统一口径）：同表多别名顿号合并，不再是首现单别名
     for es in ctx.entity_source_tables():
         key = f"{es.schema}.{es.table}".lower()
         if key in seen:
             continue
         seen.add(key)
         source_tables.append({"schema": es.schema, "table": es.table,
-                              "table_cn": _cn(es.schema, es.table), "alias": es.alias})
+                              "table_cn": _cn(es.schema, es.table),
+                              "alias": "、".join(es.aliases) if es.aliases else ""})
 
     final_fields = tables.get(_short(f_table), {}).get("fields", [])
     audit = sum(1 for f in final_fields if f["target_field"].lower() in STANDARD_AUDIT_FIELDS)
