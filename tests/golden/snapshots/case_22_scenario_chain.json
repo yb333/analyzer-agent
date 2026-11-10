@@ -175,7 +175,38 @@
      "is_common": false,
      "is_multi_scenario": false
     }
-   ]
+   ],
+   "chains": {
+    "has_dual_chain": true,
+    "chains": [
+     {
+      "kind": "full",
+      "rule_codes": [
+       "UR001"
+      ]
+     },
+     {
+      "kind": "incremental",
+      "rule_codes": [
+       "UR002",
+       "UR003"
+      ],
+      "extra_predicates": [
+       {
+        "rule": "UR002",
+        "target": "dwb_chain_f",
+        "predicate": "WHERE b.del_flag = 'N'"
+       },
+       {
+        "rule": "UR003",
+        "target": "dwb_chain_f",
+        "predicate": "WHERE c.del_flag = 'N'"
+       }
+      ],
+      "tmp_field_gap": []
+     }
+    ]
+   }
   },
   "data_flow": {
    "tables": [
