@@ -86,3 +86,75 @@ def test_entity_source_aliases_registry():
 
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__, "-v"]))
+
+
+class TestSemanticJoinIdentity:
+    """同语义关联行身份（2026-11-10 拍板：一行）。
+
+    行身份 = 左表×右表×关联类型×归一化条件；别名降级为引用名。
+    场景：从表 s 在生产步与终端步以相同条件各关联一次（跨步重复关联），
+    tmp 链内外两处呈现 → 设计层同一关联关系 → SPEC/mapping 各一行，
+    且关联方式为生产步真实类型（此前写死 INNER JOIN 的实现失真已修）。
+    """
+
+    SQL1 = """SELECT a.cust_id, a.name, s.acct_no
+FROM fin.a_table a
+LEFT JOIN fin.s_table s ON a.cust_id = s.cust_id"""
+    SQL2 = """SELECT t.cust_id, t.name, t.acct_no, s.phone
+FROM fin.tmp1 t
+LEFT JOIN fin.s_table s ON t.cust_id = s.cust_id"""
+
+    def _rules(self):
+        from engine import RawRule
+        return [
+            RawRule(rule_code="R1", rule_name="s1", rule_type=1, exec_sequence=1,
+                    target_schema="fin", target_table="tmp1", delete_mode="1",
+                    query_sql=self.SQL1),
+            RawRule(rule_code="R2", rule_name="s2", rule_type=1, exec_sequence=2,
+                    target_schema="fin", target_table="final_f", delete_mode="1",
+                    query_sql=self.SQL2),
+        ]
+
+    def _knowledge(self):
+        from engine import analyze_pipeline, detect_dialect
+        knowledge, _ = analyze_pipeline(self._rules(), {}, {},
+                                        detect_dialect([self.SQL1, self.SQL2]),
+                                        source_file="x.xlsx")
+        return knowledge
+
+    def test_sheet3_one_row_real_type(self):
+        """SPEC Sheet3：s_table 一行、LEFT JOIN（生产步真实类型，非写死 INNER）。"""
+        from spec_export import build_spec_model
+        knowledge = self._knowledge()
+        model = build_spec_model(knowledge, {})
+        s_rows = [r for r in model["sheet3"] if r[3] == "s_table"]
+        assert len(s_rows) == 1, f"同语义应一行，实际 {len(s_rows)} 行"
+        assert s_rows[0][5] == "LEFT JOIN", s_rows[0][5]
+        # 条件贴物理别名（物化无关：a.cust_id，不是 tmp 别名 t.cust_id 独占）
+        assert "a.cust_id = s.cust_id" in (s_rows[0][6] or "")
+
+    def test_mapping_entity_one_row(self):
+        """mapping 实体级：s_table 一行 LEFT JOIN，条件含锚贴别名。"""
+        from mapping_export import build_mapping_model
+        m = build_mapping_model(self._knowledge(), {})
+        s_rows = [e for e in m["entity"] if e["table"] == "s_table"]
+        assert len(s_rows) == 1
+        assert s_rows[0]["on_condition"].startswith("LEFT JOIN:")
+        assert "a.cust_id = s.cust_id" in s_rows[0]["on_condition"]
+
+    def test_different_condition_not_merged(self):
+        """条件不同的同表参与（t1/t2/t3）不合并——语义不同=不同设计关系。"""
+        sql = """SELECT a.id, t1.f AS f1, t2.f AS f2
+FROM ods.a a
+LEFT JOIN ods.b t1 ON a.id = t1.id AND t1.tp = '1'
+LEFT JOIN ods.b t2 ON a.id = t2.id AND t2.tp = '2'"""
+        from engine import RawRule, analyze_pipeline, detect_dialect
+        rules = [RawRule(rule_code="R1", rule_name="s", rule_type=1, exec_sequence=1,
+                         target_schema="dws", target_table="f_d", delete_mode="1",
+                         query_sql=sql)]
+        knowledge, _ = analyze_pipeline(rules, {}, {}, detect_dialect([sql]),
+                                        source_file="x.xlsx")
+        from mapping_export import build_mapping_model
+        m = build_mapping_model(knowledge, {})
+        b_rows = [e for e in m["entity"] if e["table"] == "b"]
+        assert len(b_rows) == 2, "不同条件不合并"

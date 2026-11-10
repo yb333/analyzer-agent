@@ -234,6 +234,7 @@ def _tmp_chain_index(ctx) -> dict:
                 else:
                     inner.append({"table": jst, "alias": j.get("alias", ""),
                                   "on": j.get("join_condition", ""),
+                                  "join_type": j.get("join_type", ""),
                                   "anchor": consumer_alias})
 
         visit(first, joins[0].get("alias", ""))
@@ -406,8 +407,10 @@ def build_sheet3_rows(ctx, sq_sqls: dict = None) -> list:
                  f"参与逻辑从表 {it['anchor']}，定义见 {drive_alias} 行"
                  if it["on"] else
                  f"参与逻辑从表 {it['anchor']}，定义见 {drive_alias} 行")
+            # 关联方式 = 生产步真实类型（2026-11-10 修正：此前写死 INNER JOIN
+            # ——实现泄漏成设计失真）；引擎拿不到时留空不编造
             rows.append([None, d_short, drive_alias, t_short, it["alias"],
-                         "INNER JOIN", g])
+                         _join_kind(it.get("join_type", "")), g])
         # 终端步骤自有的直接物理 JOIN（tmp 之外的）照常成行
         for j in (ctx.df_step(sid).get("joins") or [])[1:]:
             jst = j.get("source_table", "")

@@ -251,6 +251,9 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
     # ── Sheet3 表关联：行集语义段式重组 + E1 单表行（§三，口径在 spec_extract）──
     sheet3 = build_sheet3_rows(
         ctx, sq_sqls=(engine_ctx or {}).get("subquery_sqls") or {})
+    # 同语义关联去重（2026-11-10 拍板：一行——行身份 = 左表×右表×类型×归一化
+    # 条件，别名降级为引用名；SPEC/mapping 同源出口统一收口）
+    sheet3 = _semantic_dedup(sheet3)
 
     # 别名体系：Sheet3 行别名对（表短名, 别名）→ 物理别名集 / 表→别名（非锚
     # 优先）/ 别名→表反查（代入升级用）；锚 = 逻辑从表别名（可被代入替换）
@@ -731,3 +734,75 @@ def export_spec(knowledge: dict, engine_ctx: dict, output_path,
                else ("pass_with_noise" if any(d["severity"] == "noise" for d in disclosures)
                      else "pass"))
     return out, {"verdict": verdict}, disclosures
+
+
+# ════════════════════════════════════════════════════════════
+# 同语义关联去重（2026-11-10）：设计层的行身份
+# ════════════════════════════════════════════════════════════
+
+_SEG_MARK_RE = re.compile(
+    r"；?(?:限制：|写入前限制：|预处理：贴码|主表链预处理：|参与逻辑从表)")
+_BLK_PREFIX_RE = re.compile(r"^【\w+\s+内】")
+
+
+def _cond_core(g: str) -> str:
+    """G 列段式文本 → 关联条件核心：截掉段标记之后的内容、去【x 内】前缀。"""
+    if not g:
+        return ""
+    m = _SEG_MARK_RE.search(g)
+    core = g[:m.start()] if m else g
+    return _BLK_PREFIX_RE.sub("", core)
+
+
+def _norm_cond(core: str) -> str:
+    """条件核心归一：去 别名. 前缀 + 空白 + 小写。
+
+    比语义不比字面：t.cust_id = s.cust_id 与 a.cust_id = s.cust_id 逻辑同一
+    （t 是 a 经 tmp 链的物化载体，锚穿透后同一设计关系）。
+    """
+    return re.sub(r"\s+", "", re.sub(r"\w+\.", "", core)).lower()
+
+
+def _norm_seg(seg: str) -> str:
+    """单个段文本归一（段级比对用）：先剥【x 内】块前缀再归一——
+    同 ON 核心在不同块语境下不构成"独有段"。"""
+    return _norm_cond(_BLK_PREFIX_RE.sub("", seg))
+
+
+def _semantic_dedup(rows: list) -> list:
+    """同语义关联去重：同一从表多次参与、条件逻辑相同 → 一行。
+
+    行身份 = （左表短名 × 右表 × 关联类型 × 归一化条件）——别名是引用名不是
+    身份（别名不同语义同 → 合并，别名顿号保序合并，属性级引用仍闭合）。
+    典型场景：从表 s 在生产步和终端步以相同条件各关联一次（跨步重复关联，
+    tmp 链内外两处呈现）——设计层是同一个关联关系。
+
+    合并规则：首行保留（锚链装配序在前，条件贴物理别名、物化无关）；后行
+    独有的限定段并入首行（谓词守恒，不做静默丢弃）。
+    主表行/E1/虚拟逻辑表行不参与去重（各自唯一身份）。
+    """
+    seen: dict = {}
+    out = []
+    for r in rows:
+        if (r[5] == "主表" or (r[3] or "").startswith("虚拟逻辑表")
+                or (r[3] or "").startswith("—")):
+            out.append(r)
+            continue
+        key = ((r[1] or "").split(".")[-1].lower(), (r[3] or "").lower(),
+               (r[5] or ""), _norm_cond(_cond_core(r[6] or "")))
+        if key in seen:
+            first = seen[key]
+            aliases = [a for a in str(first[4] or "").split("、") if a]
+            if r[4] and r[4] not in aliases:
+                first[4] = "、".join(aliases + [r[4]])
+            # 后行独有段并入（归一化段级比对，同 ON 核心不重复并入）
+            have = {_norm_seg(x) for x in (first[6] or "").split("；")}
+            extras = [x.strip() for x in (r[6] or "").split("；")
+                      if x.strip() and _norm_seg(x) not in have]
+            if extras:
+                first[6] = (first[6] + "；" + "；".join(extras)) if first[6] \
+                    else "；".join(extras)
+            continue
+        seen[key] = r
+        out.append(r)
+    return out
