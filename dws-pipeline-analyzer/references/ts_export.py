@@ -74,6 +74,8 @@ _SEVERITY_BY_TYPE = {
     "unrecognized_artifact": "noise",
     "dq_not_detected": "structural",
     "lts_not_detected": "structural",
+    # 视图体缺定义壳（纯 SELECT 无 CREATE VIEW，视图名无从恢复）→ 待审补料
+    "ddl_view_without_name": "structural",
     # 一致性交叉（crosscheck 模块产出）
     "dq_target_mismatch": "structural",
     "ddl_target_missing": "structural",

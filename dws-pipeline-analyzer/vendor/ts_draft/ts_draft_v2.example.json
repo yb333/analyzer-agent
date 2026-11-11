@@ -315,5 +315,18 @@
         }
       ]
     }
-  }
+  },
+  "dq": [
+    {
+      "rule_number": "DQ2026001",
+      "rule_name": "订单金额非空",
+      "rule_desc": "金额为空即违规",
+      "check_type": "空值检查",
+      "alert_level": "严重",
+      "sql": "SELECT order_id FROM dws.dwb_cust_asset_i WHERE amt IS NULL",
+      "target_table": "dwb_cust_asset_i",
+      "target_schema": "dws",
+      "owner": "张三"
+    }
+  ]
 }

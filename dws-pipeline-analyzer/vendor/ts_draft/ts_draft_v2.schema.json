@@ -28,7 +28,8 @@
         "target": {
           "type": "object",
           "required": [
-            "f_table"
+            "f_table",
+            "i_view"
           ],
           "properties": {
             "f_table": {
@@ -61,7 +62,8 @@
                 "cn": {
                   "type": "string"
                 }
-              }
+              },
+              "description": "I/F 镜像视图（2026-11-11 R1 必填：视图名材料在手[mapping 目标表即 I 视图名]，沉默缺省与漏解析在消费侧不可区分致 DDL 不产视图且无提示——有视图带真名，无视图显式空对象「没有」也是答案）"
             }
           }
         },
@@ -481,6 +483,48 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "dq": {
+      "type": "array",
+      "description": "存量 DQ 规则明细（2026-11-11 R2：read_dq_excel 产出同名同构零翻译投影；rule_number=平台编码=条目身份键永不重编；sql 全文逐字。无 DQ 制品无此段——dq_not_detected 披露语义不变。建档时剥出为 archive/dq.json，ts 本体不带）",
+      "items": {
+        "type": "object",
+        "required": [
+          "rule_number",
+          "sql"
+        ],
+        "properties": {
+          "rule_number": {
+            "type": "string",
+            "description": "平台规则编码（身份键）"
+          },
+          "rule_name": {
+            "type": "string"
+          },
+          "rule_desc": {
+            "type": "string"
+          },
+          "check_type": {
+            "type": "string"
+          },
+          "alert_level": {
+            "type": "string"
+          },
+          "sql": {
+            "type": "string",
+            "description": "检查 SQL 全文逐字"
+          },
+          "target_table": {
+            "type": "string"
+          },
+          "target_schema": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
           }
         }
       }

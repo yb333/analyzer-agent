@@ -284,3 +284,44 @@ class TestFidelity:
         # TargetFields 原貌（乱序 2 条）独立随行
         assert [t["target_field"] for t in d["_reverse"]["target_fields_by_rule"]["R0001"]] \
             == ["cust_name", "cust_id"]
+
+
+# ── 8. 无壳视图体披露（2026-11-11 内网实报：视图 DDL 只有 SELECT）────────
+
+class TestUnnamedViewBodyE2E:
+    """视图名必须在 DDL 内容里（本仓口径，不从文件名猜）；纯 SELECT 体不静默丢——
+    ddl_view_without_name（structural）随产物披露，补壳重跑即恢复。"""
+
+    def test_pure_select_body_disclosed_not_silent(self, tmp_path):
+        bag = tmp_path / "bag"
+        bag.mkdir()
+        shutil.copy(ET_XLSX, bag / "et.xlsx")
+        (bag / "f.sql").write_text(
+            "CREATE TABLE dws.dwb_cust_asset_f (cust_id INT NOT NULL)\n"
+            "DISTRIBUTE BY HASH (cust_id);", encoding="utf-8")
+        (bag / "i.sql").write_text("SELECT * FROM dws.dwb_cust_asset_f;", encoding="utf-8")
+        out = tmp_path / "ts.json"
+        stdout, _, code = TestFactsFormatE2E()._run(["--dir", str(bag), "--output", str(out)])
+        assert code == 0                                    # 披露不阻断交卷
+        d = json.loads(out.read_text(encoding="utf-8"))
+        assert d["meta"]["target"]["i_view"]["table"] == ""  # 无从恢复=显式空
+        w = [w for w in d["_reverse"]["warnings"] if w["type"] == "ddl_view_without_name"]
+        assert len(w) == 1 and "i.sql" in w[0]["title"]      # 点名文件+补料指引
+        assert d["_reverse"]["self_check"]["verdict"] == "review"  # structural → 待审
+
+    def test_shell_restores_and_clears_warning(self, tmp_path):
+        """同一目录补 CREATE VIEW 壳 → i_view 恢复、披露消失（补料闭环）。"""
+        bag = tmp_path / "bag"
+        bag.mkdir()
+        shutil.copy(ET_XLSX, bag / "et.xlsx")
+        (bag / "f.sql").write_text(
+            "CREATE TABLE dws.dwb_cust_asset_f (cust_id INT NOT NULL);", encoding="utf-8")
+        (bag / "i.sql").write_text(
+            'CREATE OR REPLACE VIEW "dws"."dwb_cust_asset_i" AS SELECT * FROM dws.dwb_cust_asset_f;',
+            encoding="utf-8")                                # 引号标识符（内网盲区）
+        out = tmp_path / "ts.json"
+        TestFactsFormatE2E()._run(["--dir", str(bag), "--output", str(out)])
+        d = json.loads(out.read_text(encoding="utf-8"))
+        assert d["meta"]["target"]["i_view"]["table"] == "dwb_cust_asset_i"
+        assert not any(w["type"] == "ddl_view_without_name"
+                       for w in d["_reverse"]["warnings"])

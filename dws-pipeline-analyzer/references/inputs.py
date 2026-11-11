@@ -1181,6 +1181,10 @@ def discover_i_view_from_ddl(ddl_files: list, f_schema: str, f_table: str) -> di
     facts 目录通道用（excel 制品无代码仓 I 视图发现；DDL 目录里混有视图 DDL 时
     恢复 meta.target.i_view——docs/16 缺口 1）。复用 _extract_view_sql 的提取纪律。
 
+    识别容错（内网实报 2026-11-11：i_view 全空）：平台 DDL 导出常见引号标识符
+    （"dws"."dwb_x_i"）与 CREATE 关键字换行——前置闸与名字正则均按空白/引号
+    容错；抓不到有效视图名（如仅引号前缀截断）不注入。
+
     Returns: {"view_name", "view_schema", "ddl_path"} 或 None（未发现/无 DDL）。
     """
     import re
@@ -1188,6 +1192,12 @@ def discover_i_view_from_ddl(ddl_files: list, f_schema: str, f_table: str) -> di
         return None
     f_full = f"{f_schema}.{f_table}".lower() if f_schema else f_table.lower()
     f_short = f_full.split(".")[-1]
+    # CREATE 关键字序列（空白容错：换行/多空格——"create\nor replace view" 类）
+    _has_view = re.compile(r"create\s+(?:or\s+replace\s+)?view", re.IGNORECASE)
+    # 视图名：引号标识符容错（"dws"."dwb_x_i" / dws."dwb_x_i" / 裸名三形态）
+    _name = re.compile(
+        r'CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))*)',
+        re.IGNORECASE)
     for path in ddl_files:
         f = Path(path)
         try:
@@ -1195,24 +1205,56 @@ def discover_i_view_from_ddl(ddl_files: list, f_schema: str, f_table: str) -> di
         except Exception:
             continue
         cl = content.lower()
-        if "create view" not in cl and "create or replace view" not in cl:
+        if not _has_view.search(cl):
             continue
         if f_full not in cl and f_short not in cl:
             continue
-        # 视图名与 schema（CREATE VIEW schema.name AS）
-        nm = re.search(r'CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+([\w.]+)',
-                       content, re.IGNORECASE)
+        # 视图名与 schema（引号剥除；多段名取首段为 schema、末段为名）
+        nm = _name.search(content)
         if not nm:
             continue
-        full = nm.group(1)
-        parts = full.split(".")
+        parts = [p.strip().strip('"') for p in nm.group(1).split(".")]
         view_schema = parts[0] if len(parts) > 1 else (f_schema or "")
         view_name = parts[-1]
-        if view_name.lower() == f_short:
-            continue  # 自引用（非视图）
+        if not view_name or view_name.lower() == f_short:
+            continue  # 空名（截断残片）或自引用（非视图）
         return {"view_name": view_name, "view_schema": view_schema,
                 "ddl_path": str(f)}
     return None
+
+
+def scan_unnamed_view_bodies(ddl_files: list) -> list:
+    """扫 DDL 清单里的「无壳视图体」：内容是纯 SELECT/WITH（无任何 DDL 关键字）。
+
+    平台导出的一种形态：视图 DDL 只给查询逻辑体、不带 CREATE VIEW 壳——视图名
+    无从恢复（2026-11-11 内网实报：i_view 全空的真因之一）。本仓口径：视图名必须
+    在 DDL 内容里，不从文件名猜；此类文件披露为 ddl_view_without_name（structural，
+    补完整 DDL 可解），不静默跳过——沉默缺省与漏解析在产物里不可区分。
+
+    判据（轻量文本，零引擎依赖）：strip 后以 SELECT/WITH 开头，且全文无
+    CREATE/DROP/ALTER/TRUNCATE/COMMENT/GRANT/REVOKE 关键字（F 表 DDL 等带
+    CREATE 的文件天然分流）。
+
+    Returns: [{"file": 文件名, "head": 内容前 60 字（产物里指认用）}, ...]
+    """
+    import re
+    _ddl_kw = re.compile(
+        r"\b(create|drop|alter|truncate|comment|grant|revoke)\b", re.IGNORECASE)
+    out = []
+    for path in ddl_files or []:
+        try:
+            content = Path(path).read_text(encoding="utf-8", errors="ignore").strip()
+        except Exception:
+            continue
+        if not content:
+            continue
+        head = content[:120].upper()
+        if not head.startswith(("SELECT", "WITH")):
+            continue
+        if _ddl_kw.search(content):
+            continue  # 带 DDL 关键字（非纯查询体）
+        out.append({"file": Path(path).name, "head": content[:60]})
+    return out
 
 # ═══════════════════════════════════════════════════════════════
 # 装配函数（原 analyzer.main 内联逻辑收敛于此；行为零变）

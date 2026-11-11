@@ -22,7 +22,7 @@ sys.path.insert(0, str(ANALYZER_REF))
 import analyzer
 import impact_analyzer
 import inputs
-from inputs import build_baseline_export_ctx
+from inputs import build_baseline_export_ctx, discover_i_view_from_ddl, scan_unnamed_view_bodies
 import excel_utils
 
 
@@ -210,3 +210,82 @@ class TestBaselineExportCtxSheets:
         assert lts_entries[0]["sheets"] == ["tasks", "jobs", "taskParams"]
         yml_entries = [p for p in ctx["provenance"] if p["type"] == "rule_yml"]
         assert all("sheets" not in e for e in yml_entries)
+
+
+class TestDiscoverIViewFromDdl:
+    """facts 通道 DDL 视图识别（2026-11-11 内网实报加固：引号标识符/换行/空名）。
+
+    平台 DDL 导出常见形态全覆盖；视图名必须在 DDL 内容里（本仓口径），
+    不从文件名推断——纯 SELECT 体由 scan_unnamed_view_bodies 披露（见 facts e2e）。
+    """
+
+    def _run(self, sql, f_schema="dws", f_table="dwb_x_f"):
+        f = self._tmp / "v.sql"
+        f.write_text(sql, encoding="utf-8")
+        return discover_i_view_from_ddl([str(f)], f_schema, f_table)
+
+    _tmp = None
+
+    @classmethod
+    def setup_class(cls):
+        import tempfile
+        cls._tmp = Path(tempfile.mkdtemp())
+
+    def test_quoted_fully(self):
+        """全引号标识符（"dws"."dwb_x_i"）——内网盲区 1：正则不吃引号曾致 None。"""
+        r = self._run('CREATE OR REPLACE VIEW "dws"."dwb_x_i" AS SELECT * FROM dws.dwb_x_f;')
+        assert r["view_name"] == "dwb_x_i" and r["view_schema"] == "dws"
+
+    def test_quoted_partial(self):
+        """局部引号（dws."dwb_x_i"）——内网盲区 2：曾截断注入空名。"""
+        r = self._run('CREATE OR REPLACE VIEW dws."dwb_x_i" AS SELECT * FROM dws.dwb_x_f;')
+        assert r["view_name"] == "dwb_x_i" and r["view_schema"] == "dws"
+
+    def test_create_keyword_multiline(self):
+        """CREATE 换行（CREATE\n  OR REPLACE VIEW）——内网盲区 3：前置闸子串不匹配。"""
+        r = self._run("CREATE\n  OR REPLACE VIEW dws.dwb_x_i AS\nSELECT * FROM dws.dwb_x_f;")
+        assert r["view_name"] == "dwb_x_i"
+
+    def test_column_list_and_no_schema_ref(self):
+        r = self._run("CREATE VIEW dws.dwb_x_i (cust_id) AS SELECT cust_id FROM dwb_x_f;")
+        assert r["view_name"] == "dwb_x_i"
+
+    def test_materialized_view_not_matched(self):
+        assert self._run("CREATE MATERIALIZED VIEW dws.dwb_x_mv AS SELECT * FROM dws.dwb_x_f;") is None
+
+    def test_self_reference_skipped(self):
+        assert self._run("CREATE VIEW dwb_x_f AS SELECT 1;") is None
+
+
+class TestScanUnnamedViewBodies:
+    """无壳视图体扫描（纯 SELECT 无 CREATE VIEW——视图名无从恢复，必须披露）。"""
+
+    def _tmpdir(self):
+        import tempfile
+        return Path(tempfile.mkdtemp())
+
+    def test_pure_select_flagged(self):
+        d = self._tmpdir()
+        f = d / "dwb_x_i.sql"
+        f.write_text("SELECT * FROM dws.dwb_x_f;", encoding="utf-8")
+        out = scan_unnamed_view_bodies([str(f)])
+        assert len(out) == 1 and out[0]["file"] == "dwb_x_i.sql"
+
+    def test_create_table_not_flagged(self):
+        d = self._tmpdir()
+        f = d / "f.sql"
+        f.write_text("CREATE TABLE dws.dwb_x_f (a INT);", encoding="utf-8")
+        assert scan_unnamed_view_bodies([str(f)]) == []
+
+    def test_create_view_shell_not_flagged(self):
+        d = self._tmpdir()
+        f = d / "v.sql"
+        f.write_text("CREATE OR REPLACE VIEW dws.dwb_x_i AS SELECT 1;", encoding="utf-8")
+        assert scan_unnamed_view_bodies([str(f)]) == []
+
+    def test_union_body_flagged(self):
+        """UNION 多段查询体仍是纯 SELECT（视图逻辑常见形态）。"""
+        d = self._tmpdir()
+        f = d / "dwb_x_i.sql"
+        f.write_text("SELECT a FROM t1 UNION ALL SELECT a FROM t2;", encoding="utf-8")
+        assert len(scan_unnamed_view_bodies([str(f)])) == 1

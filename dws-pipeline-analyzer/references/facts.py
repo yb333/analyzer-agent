@@ -32,7 +32,7 @@ if sys.platform == "win32":
 from crosscheck import run_crosscheck
 from schedule_recovery import recover_schedule
 from ts_export import TsDraftError, export_ts_draft
-from inputs import build_baseline_export_ctx
+from inputs import build_baseline_export_ctx, scan_unnamed_view_bodies
 from pipeline_core import AssemblyError, run_from_dir
 
 
@@ -99,6 +99,18 @@ def run_facts(dir_path, output_path) -> Path:
     knowledge.setdefault("meta", {}).setdefault("warnings_extra", []).extend(
         _sorting_warnings(asm["unrecognized"], dq_detected=asm["dq"] is not None,
                           lts_detected=asm["lts"] is not None))
+    # 无壳视图体披露（纯 SELECT 无 CREATE VIEW：视图名无从恢复，i_view 将为空——
+    # 不静默跳过，要求补完整 DDL 重跑）
+    for vb in scan_unnamed_view_bodies(asm["ddl"]):
+        knowledge["meta"]["warnings_extra"].append({
+            "type": "ddl_view_without_name",
+            "title": f"DDL 文件 {vb['file']} 为纯 SELECT 查询体（无 CREATE VIEW 定义壳）——"
+                     f"疑似 I 视图逻辑体但视图名不在 DDL 内容中、无从恢复"
+                     f"（meta.target.i_view 将为空）。本仓口径：视图名必须在 DDL 内容里、"
+                     f"不从文件名推断。请补完整视图 DDL"
+                     f"（CREATE [OR REPLACE] VIEW <schema>.<视图名> AS <原 SELECT>）重跑",
+            "detail": f"内容开头：{vb['head']}",
+        })
     # 制品间一致性交叉（v3.1 §十：披露不阻断，经同一 warnings 通道）
     knowledge["meta"]["warnings_extra"].extend(
         run_crosscheck(knowledge, engine_ctx, asm,
