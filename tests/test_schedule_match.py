@@ -220,3 +220,73 @@ class TestJobSidePointing:
             ["Pjob_b_tbl"], [self._task("TASK_B_TBL", [])],
             [{"schema": "dwrdim", "table": "b_tbl"}])
         assert m["dwrdim.b_tbl"]["task_name"] == "TASK_B_TBL" and not u
+
+
+# ════════════════════════════════════════════════════════════
+# 两级匹配：整串包含（快路径）→ 段级包含（2026-11-11 用户案例定稿）
+# ════════════════════════════════════════════════════════════
+
+class TestSegmentLevelMatching:
+    """段级包含：表名每段在 job 名段集有着落（精确相等或 job 段包含表段）。
+
+    用户真实案例：表 see_expense_claim_rta_9804 ↔ job
+    Pjob_EXT_9804_see_expense_claim_rtansfer_t_d2s——整串包含因段序（9804
+    前置）与拼接变形（rta→rtansfer）断链，人眼段级判断可匹配。
+    """
+
+    USER_JOB = "Pjob_EXT_9804_see_expense_claim_rtansfer_t_d2s"
+    USER_TABLE = "see_expense_claim_rta_9804"
+
+    def test_user_real_case_hits(self):
+        """用户案例：段级命中 + 备注标注段级方式。"""
+        from schedule_match import _hit, _hit_label
+        assert _hit(self.USER_JOB, self.USER_TABLE) is True
+        assert "分段含表名全部段、序无关" in _hit_label(self.USER_JOB, self.USER_TABLE)
+
+    def test_digit_segment_discriminates(self):
+        """数字段（平台编号）精确判别：9805 不被 9804 的 job 拉中。"""
+        from schedule_match import _hit
+        assert _hit(self.USER_JOB, "see_expense_claim_rta_9805") is False
+
+    def test_missing_segment_no_hit(self):
+        """表多一段没着落即不中（方向不变：表段全集 ⊆ job）。"""
+        from schedule_match import _hit
+        assert _hit(self.USER_JOB, "see_expense_claim_rta_9804_x") is False
+
+    def test_order_independent(self):
+        """段序无关：段打乱仍中。"""
+        from schedule_match import _hit
+        assert _hit("Pjob_9804_acct_dim", "dim_acct_9804") is True
+
+    def test_short_segment_guard(self):
+        """短段守卫：单字母表段不能靠 ⊂ext 误配（t ⊂ ext 不算归属）。"""
+        from schedule_match import _hit
+        # 段序打乱后 t 只能从 ext 里找包含 → 守卫拦截
+        assert _hit("Pjob_9804_acct_ext", "t_acct_9804") is False
+        # 段序一致走整串快路径（既有口径不回归）
+        assert _hit("Pjob_t_acct_9804", "t_acct_9804") is True
+
+    def test_segment_ambiguity_gated_to_listing(self):
+        """段级放宽后歧义保护兜底：一个 job 段级命中两表（子集段）→ 一对多
+        列举，不错配落行。"""
+        from schedule_match import match_schedules
+
+        def _task(name, deps):
+            jobs = [{"name": "start_1", "type": "start"}]
+            jobs += [{"name": d, "type": "tskdep"} for d in deps]
+            jobs.append({"name": f"Pjob_{name.lower()}", "type": "database"})
+            return {"task_name": name, "task_type": "批处理",
+                    "schedule_cron": "0 2 * * *", "project": "P", "task_group": "G",
+                    "jobs": jobs, "params": []}
+
+        f = _task("TGT_F", [self.USER_JOB])
+        # 上游任务名对齐 job 表键（task_ 剥除后相等）→ 候选可解析
+        up = _task("TASK_EXT_9804_SEE_EXPENSE_CLAIM_RTANSFER_T_D2S", [])
+        si = {"f_tasks": [f], "i_tasks": [], "other_tasks": [],
+              "_all_raw_tasks": [f, up]}
+        # 第二张表是第一张的段子集（少了 see 段）→ 同一 job 段级命中两表
+        srcs = [{"schema": "ods", "table": self.USER_TABLE},
+                {"schema": "ods", "table": "expense_claim_rta_9804"}]
+        matched, unmatched, st = match_schedules(si, srcs)
+        assert st == "ok" and not matched
+        assert len(unmatched) == 1 and "一对多" in unmatched[0]["remark"]

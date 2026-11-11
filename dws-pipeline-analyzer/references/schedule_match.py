@@ -41,6 +41,39 @@ def _norm(s: str) -> str:
     return re.sub(r"[_\-]", "", s)
 
 
+def _segments(s: str) -> list:
+    """归一化分段：同 _norm 前三步，但按 _/- 切段保留段结构（段级匹配用）。"""
+    s = (s or "").strip().lower()
+    for p in _STRIP_PREFIXES:
+        if s.startswith(p):
+            s = s[len(p):]
+            break
+    if "." in s:
+        s = s.split(".")[-1]
+    return [seg for seg in re.split(r"[_\-]+", s) if seg]
+
+
+def _seg_hit(key: str, table: str) -> bool:
+    """二级段级包含（2026-11-11 用户案例定稿）：表名每段都在 job 名段集有着落。
+
+    用户案例：表 see_expense_claim_rta_9804 ↔ job Pjob_EXT_9804_see_expense_
+    claim_rtansfer_t_d2s——整串包含因段序（9804 前置）与拼接变形（rta→
+    rtansfer）断链，人眼段级判断可匹配。
+
+    段归属 = 精确相等，或 job 段**包含**表段（拼接容错，方向固定：表段是
+    被包含方）；包含守卫：表段长度 ≥3 或纯数字（防 t ⊂ ext 弱段误配）。
+    全部段有着落才命中（表多一段没着落即不中）。
+    """
+    jsegs = _segments(key)
+    for tseg in _segments(table):
+        if any(j == tseg
+               or ((len(tseg) >= 3 or tseg.isdigit()) and tseg in j)
+               for j in jsegs):
+            continue
+        return False
+    return True
+
+
 # ════════════════════════════════════════════════════════════
 # 依赖候选提取（2026-11-02 实测修订⑧：只放「依赖的」job，不放资产自身 job）
 # ════════════════════════════════════════════════════════════
@@ -106,16 +139,22 @@ def dependency_candidates(schedule_info) -> tuple:
 
 
 def _hit(key: str, table: str) -> bool:
-    """命中判定（用户口径）：归一化后 job 名包含表名（含相等）。"""
+    """命中判定（2026-11-11 两级）：整串包含（快路径）→ 段级包含（顺序无关
+    + 拼接容错）。歧义保护不变：多对一/一对多经 1:1 双射门退列举。"""
     nk, nt = _norm(key), _norm(table)
-    return bool(nk and nt and nt in nk)
+    if not (nk and nt):
+        return False
+    return nt in nk or _seg_hit(key, table)
 
 
 def _hit_label(key: str, table: str) -> str:
-    """命中方式的备注标注：等值=精确，包含=含表名。"""
-    if _norm(key) == _norm(table):
+    """命中方式的备注标注：等值=精确；整串包含=含表名；段级=分段含全部段。"""
+    nk, nt = _norm(key), _norm(table)
+    if nk == nt:
         return "按job名精确匹配（含表名）"
-    return "匹配（job名含表名），请人工核对"
+    if nt in nk:
+        return "匹配（job名含表名），请人工核对"
+    return "匹配（job名分段含表名全部段、序无关），请人工核对"
 
 
 def _upstream_row(cand: dict) -> dict:
