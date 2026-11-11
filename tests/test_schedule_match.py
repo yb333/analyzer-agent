@@ -165,10 +165,11 @@ class TestMatchSchedules:
 # ════════════════════════════════════════════════════════════
 
 class TestJobSidePointing:
-    """歧义判定从表侧（候选数）改为 job 侧（指向表数）。
+    """1:1 双射落行（2026-11-11 用户口径定稿）。
 
-    用户场景：同一上游任务的多个依赖 job（雪花依赖）指向同一张源表——
-    表侧判唯一会把整组退到尾部列举；job 侧口径：指向恰好 1 张 → 落行。
+    正常现象 = 一个 job 对应一个表 → 落行；异常（多对一 / 一对多 / 零指向）
+    全部尾部列举。此前表侧判唯一会漏掉一对多（一个 job 填多张表行），
+    首版 job 侧又误把多对一（同任务多 job）合并填行——均按定稿口径纠正。
     """
 
     @staticmethod
@@ -186,15 +187,15 @@ class TestJobSidePointing:
               "_all_raw_tasks": [f] + extra_tasks}
         return match_schedules(si, srcs)
 
-    def test_same_task_multi_jobs_fills_row(self):
-        """同任务多 job 指向同一表：落行 + 备注标注依赖次数（用户场景）。"""
+    def test_same_task_multi_jobs_listed(self):
+        """多 job → 一表（即使同一上游任务）：异常形态，列举不落行
+        （2026-11-11 口径定稿：1:1 双射才落行，N:1/1:N/0:N 全列举）。"""
         m, u, st = self._run(
             ["Pjob_b_tbl", "Pjob_b_tbl"], [self._task("TASK_B_TBL", [])],
             [{"schema": "dwrdim", "table": "b_tbl"}])
-        assert st == "ok" and not u
-        row = m["dwrdim.b_tbl"]
-        assert row["task_name"] == "TASK_B_TBL"
-        assert "2 个依赖job指向同一上游任务" in row["remark"]
+        assert st == "ok" and not m
+        assert len(u) == 2
+        assert all("多对一" in x["remark"] for x in u)
 
     def test_conflicting_tasks_still_listed(self):
         """同表不同上游任务（真冲突）：不落行，列举。"""
