@@ -211,3 +211,78 @@ LEFT JOIN fin.b_tbl b3 ON d.k = b3.k"""
             key = (a["table"].split("、")[0].strip().lower(),
                    (a["alias"] or "").split("、")[0].strip().lower())
             assert key in ent, f"属性级别名断链: {key}"
+
+
+class TestInstanceMultiplicity:
+    """参与实例（2026-11-11 定稿）：同一步骤内同表多别名 = 多个设计实例。
+
+    用户真实结构：t1/t2/t3 是同一张 tab 表的三个别名（s 用不同字段各关联
+    一次），每次 tab 参与再各挂一个 emp（emp1/2/3 同表 e、字段逻辑相同
+    upper(tN.no)=empN.no）——三个 emp 是并存实例（设计多重性），拆三行；
+    与「跨步骤对同一关系的重复书写=实现重复（合一行）」相对照。
+    """
+
+    SQL = """select s.a, t1.c1, emp1.e1, t2.c2, emp2.e2, t3.c3, emp3.e3
+from dwr.t s
+left join dwr.tab t1 on s.f1 = t1.f1 and t1.xx = ${p_cycle}
+left join dwr.e emp1 on upper(t1.no) = emp1.no
+left join dwr.tab t2 on s.f2 = t2.f2 and t2.xx = ${p_cycle}
+left join dwr.e emp2 on upper(t2.no) = emp2.no
+left join dwr.tab t3 on s.f3 = t3.f3 and t3.xx = ${p_cycle}
+left join dwr.e emp3 on upper(t3.no) = emp3.no"""
+
+    def _knowledge(self):
+        from engine import RawRule, analyze_pipeline, detect_dialect
+        rules = [RawRule(rule_code="R1", rule_name="s", rule_type=1, exec_sequence=1,
+                         target_schema="dws", target_table="f_x", delete_mode="1",
+                         query_sql=self.SQL)]
+        knowledge, _ = analyze_pipeline(rules, {}, {}, detect_dialect([self.SQL]),
+                                        source_file="x.xlsx")
+        return knowledge
+
+    def test_emp_instances_not_merged(self):
+        """emp 三次参与（同表同字段逻辑、挂不同 tab 实例）：三行不合并。"""
+        from spec_export import build_spec_model
+        model = build_spec_model(self._knowledge(), {})
+        e_rows = [r for r in model["sheet3"] if r[3] == "e"]
+        assert len(e_rows) == 3, f"e 应三行（三个并存实例），实际 {len(e_rows)}"
+        assert [r[4] for r in e_rows] == ["emp1", "emp2", "emp3"]
+        conds = {r[6] for r in e_rows}
+        assert conds == {"UPPER(t1.no) = emp1.no", "UPPER(t2.no) = emp2.no",
+                         "UPPER(t3.no) = emp3.no"}, conds
+        # tab 三次参与（不同字段）同样三行
+        tab_rows = [r for r in model["sheet3"] if r[3] == "tab"]
+        assert len(tab_rows) == 3
+
+    def test_mapping_three_rows_closed(self):
+        """mapping：e/tab 各三行，属性级引用闭合。"""
+        from mapping_export import build_mapping_model
+        m = build_mapping_model(self._knowledge(), {})
+        assert sum(1 for e in m["entity"] if e["table"] == "e") == 3
+        assert sum(1 for e in m["entity"] if e["table"] == "tab") == 3
+        ent = {(e["table"].lower(), (e["alias"] or "").lower()) for e in m["entity"]}
+        for a in m["attribute"]:
+            if not a["table"]:
+                continue
+            key = (a["table"].split("、")[0].strip().lower(),
+                   (a["alias"] or "").split("、")[0].strip().lower())
+            assert key in ent, f"属性级别名断链: {key}"
+
+    def test_same_step_same_cond_selfjoin_splits(self):
+        """同步骤同表多别名、条件全同（仅别名不同）的自关联：也拆（行为变化，
+        2026-11-11 定稿——并存实例是设计多重性）。"""
+        from engine import RawRule, analyze_pipeline, detect_dialect
+        from spec_export import build_spec_model
+        sql = """select a.x, t1.v AS v1, t2.v AS v2
+from ods.a a
+left join ods.b t1 on a.k = t1.k
+left join ods.b t2 on a.k = t2.k"""
+        rules = [RawRule(rule_code="R1", rule_name="s", rule_type=1, exec_sequence=1,
+                         target_schema="dws", target_table="f_d", delete_mode="1",
+                         query_sql=sql)]
+        knowledge, _ = analyze_pipeline(rules, {}, {}, detect_dialect([sql]),
+                                        source_file="x.xlsx")
+        model = build_spec_model(knowledge, {})
+        b_rows = [r for r in model["sheet3"] if r[3] == "b"]
+        assert len(b_rows) == 2, f"同步骤同条件自关联应拆两行，实际 {len(b_rows)}"
+        assert {r[4] for r in b_rows} == {"t1", "t2"}

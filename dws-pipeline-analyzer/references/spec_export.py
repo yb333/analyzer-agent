@@ -778,16 +778,18 @@ def _norm_seg(seg: str, resolve: dict | None = None) -> str:
 
 
 def _build_alias_resolve(ctx) -> dict:
-    """别名 → 逻辑表（短名）解析表（语义去重键的数据源，2026-11-11）。
+    """别名 → 逻辑身份解析表（语义去重键的数据源，2026-11-11 定稿）。
 
-    - tmp 链锚别名（终表 SQL 里引用中间表的别名）→ 该链驱动物理表
-      （物化无关：t 与 a 是同一设计身份）；
-    - 其余 join 别名 → 物理表短名（全局首现，冲突时不同键→不合并，
-      保守方向安全）。
+    参与实例规则（用户案例定稿：同表三别名各挂一次 emp，emp 拆三行）：
+    - **同一步骤内**同表多别名 = 多个设计实例 → 解析保留实例标识
+      `表:别名`（tab:t1 / e:emp1）——并存实例是设计多重性，不合并；
+    - 步骤内唯一别名 → 裸表短名（跨步骤对同一关系的重复书写 = 实现重复，
+      仍合并）；中间表别名经 tmp 链驱动表解析（t 与 a 同一设计身份）。
+    全局首现（别名跨步骤冲突时不同键 → 不合并，保守方向安全）。
     """
     from engine import _is_intermediate_table
-    resolve: dict = {}
-    # tmp 链锚别名优先（更specific）
+    # tmp 链：终表 SQL 引用中间表的别名 → 链驱动物理表
+    tmp_alias_to_drive = {}
     for sid, info in _tmp_chain_index(ctx).items():
         drive_tbl, _ = info.get("driving", ("", ""))
         if not drive_tbl:
@@ -797,14 +799,28 @@ def _build_alias_resolve(ctx) -> dict:
             st = j.get("source_table") or ""
             al = (j.get("alias") or "").lower()
             if al and st and _is_intermediate_table(st):
-                resolve.setdefault(al, d_short)
+                tmp_alias_to_drive.setdefault(al, d_short)
+
+    resolve: dict = {}
     for s in ctx.steps_list:
+        # 本步骤 别名 → 逻辑表（中间表经链驱动解析）
+        step_map = {}
         for j in ctx.df_step(s.get("step_id", "")).get("joins") or []:
             st = j.get("source_table") or ""
             al = (j.get("alias") or "").lower()
-            if al and st and not st.startswith("(subquery:"):
-                _, short = split_schema_table(st)
-                resolve.setdefault(al, short)
+            if not al or not st or st.startswith("(subquery:"):
+                continue
+            if _is_intermediate_table(st):
+                step_map[al] = tmp_alias_to_drive.get(al) or split_schema_table(st)[1]
+            else:
+                step_map[al] = split_schema_table(st)[1]
+        # 步骤内多别名表 → 实例标识；唯一别名 → 裸表
+        by_table: dict = {}
+        for al, logical in step_map.items():
+            by_table.setdefault(logical, []).append(al)
+        for al, logical in step_map.items():
+            key = f"{logical}:{al}" if len(by_table[logical]) >= 2 else logical
+            resolve.setdefault(al, key)
     return resolve
 
 
