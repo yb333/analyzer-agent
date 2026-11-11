@@ -325,3 +325,53 @@ class TestUnnamedViewBodyE2E:
         assert d["meta"]["target"]["i_view"]["table"] == "dwb_cust_asset_i"
         assert not any(w["type"] == "ddl_view_without_name"
                        for w in d["_reverse"]["warnings"])
+
+
+# ── 9. dq 段（消费方 15 章 R2：存量 DQ 明细零翻译投影）──────────────
+
+class TestDqSection:
+    DQ_ROWS = [
+        ["R001", "1", "新增", "主键非空", "主键非空校验", "空值检查",
+         "zhangsan", "dws", "dwb_cust_asset_f", "T001",
+         "SELECT COUNT(*) FROM dws.dwb_cust_asset_f WHERE cust_id IS NULL", "严重"],
+        ["R002", "2", "新增", "金额非负", "金额为负即违规", "值域检查",
+         "lisi", "dws", "dwb_cust_asset_f", "T001",
+         "SELECT 1 FROM dws.dwb_cust_asset_f WHERE asset_amt < 0", "警告"],
+        ["", "", "", "尾部统计行", "无编号不是规则", "", "", "", "", "", "", ""],
+    ]
+
+    def test_dq_section_verbatim(self, tmp_path):
+        """带 DQ 制品：dq 段条数=有效行（有 Number），9 字段零翻译、sql 逐字、
+        rule_number 身份键原样（不重编）。"""
+        from test_dq_excel import _write_dq_excel
+        bag = tmp_path / "bag"
+        bag.mkdir()
+        shutil.copy(ET_XLSX, bag / "et.xlsx")
+        _write_dq_excel(bag / "dq.xlsx", self.DQ_ROWS)
+        out = tmp_path / "ts.json"
+        stdout, _, code = TestFactsFormatE2E()._run(["--dir", str(bag), "--output", str(out)])
+        assert code == 0, stdout
+        d = json.loads(out.read_text(encoding="utf-8"))
+        dq = d["dq"]
+        assert len(dq) == 2                                    # 尾部无编号行不计
+        assert [r["rule_number"] for r in dq] == ["R001", "R002"]  # 身份键原序原样
+        assert set(dq[0].keys()) == {
+            "rule_number", "rule_name", "rule_desc", "check_type", "alert_level",
+            "sql", "target_table", "target_schema", "owner"}       # 恰 9 字段（dq_file 不进）
+        assert dq[0]["sql"] == \
+            "SELECT COUNT(*) FROM dws.dwb_cust_asset_f WHERE cust_id IS NULL"  # 逐字
+        assert dq[0]["target_schema"] == "dws" and dq[0]["owner"] == "zhangsan"
+        assert validate_ts_draft(d) == []                       # 过 vendor schema（含 dq 段）
+        assert d["meta"]["dq_required"] == 1
+
+    def test_no_dq_no_section(self, tmp_path):
+        """无 DQ 制品：无 dq 段（键不存在，非空数组）——dq_not_detected 披露语义不变。"""
+        bag = tmp_path / "bag"
+        bag.mkdir()
+        shutil.copy(ET_XLSX, bag / "et.xlsx")
+        out = tmp_path / "ts.json"
+        TestFactsFormatE2E()._run(["--dir", str(bag), "--output", str(out)])
+        d = json.loads(out.read_text(encoding="utf-8"))
+        assert "dq" not in d
+        assert d["meta"]["dq_required"] == 0
+        assert any(w["type"] == "dq_not_detected" for w in d["_reverse"]["warnings"])

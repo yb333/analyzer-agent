@@ -141,6 +141,7 @@ def run_facts(dir_path, output_path) -> Path:
         out = export_ts_draft(knowledge, engine_ctx, output_path,
                               schedule_rec=schedule_rec,
                               dq_detected=bool(dq_rules),
+                              dq_rules=dq_rules,
                               provenance=export_ctx["provenance"],
                               extra_warnings=extra_warnings)
     except TsDraftError as e:

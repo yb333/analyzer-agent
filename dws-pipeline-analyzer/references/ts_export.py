@@ -670,12 +670,29 @@ def _ts_reverse(knowledge: dict, ctx, topo: dict, plans: dict, wp_warnings: list
 
 
 # ═══════════════════════════════════════════════════════════════
+# dq 段（存量 DQ 规则明细——消费方 15 章 R2）
+# ═══════════════════════════════════════════════════════════════
+
+def _ts_dq(dq_rules: list | None) -> list:
+    """存量 DQ 规则明细（read_dq_excel / DQ yml 双源产出同名同构零翻译投影）。
+
+    rule_number=平台编码=条目身份键（消费方变更对照[重做/新增/取消]以此对齐，
+    任何情况下不重编号）；sql=检查 SQL 全文逐字（与 query_sql 同款保真纪律）。
+    dq_file 是本仓内部路径（provenance 已带制品路径），不进契约。
+    """
+    keys = ("rule_number", "rule_name", "rule_desc", "check_type",
+            "alert_level", "sql", "target_table", "target_schema", "owner")
+    return [{k: str(r.get(k) or "") for k in keys} for r in (dq_rules or [])]
+
+
+# ═══════════════════════════════════════════════════════════════
 # 总装 / 校验 / 落盘
 # ═══════════════════════════════════════════════════════════════
 
 def render_ts_draft(knowledge: dict, engine_ctx: dict, *,
                     schedule_rec: dict | None = None,
                     dq_detected: bool = False,
+                    dq_rules: list | None = None,
                     provenance: list | None = None,
                     extra_warnings: list | None = None) -> dict:
     """knowledge + engine_ctx（+ 调度还原/分拣披露）→ ts 草稿 dict（未校验）。"""
@@ -687,7 +704,7 @@ def render_ts_draft(knowledge: dict, engine_ctx: dict, *,
     schedule, sched_warnings = _ts_schedule(schedule_rec)
     extra = list(extra_warnings or []) + sched_warnings
     meta = _ts_meta(ctx, knowledge, engine_ctx, tables, topo, schedule, dq_detected)
-    return {
+    data = {
         "version": TS_VERSION,
         "spec_type": "ts",
         "generated_at": str(knowledge.get("meta", {}).get("analysis_time") or ""),
@@ -699,6 +716,10 @@ def render_ts_draft(knowledge: dict, engine_ctx: dict, *,
         "_baseline": {"source": "reverse", "provenance": [dict(p) for p in (provenance or [])]},
         "_reverse": _ts_reverse(knowledge, ctx, topo, plans, wp_warnings, extra, schedule_rec),
     }
+    # dq 段：有 DQ 制品才有（无该段 = dq_not_detected 披露语义，消费方 15 章 R2）
+    if dq_rules:
+        data["dq"] = _ts_dq(dq_rules)
+    return data
 
 
 def validate_ts_draft(data: dict, schema: dict | None = None) -> list:
