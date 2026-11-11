@@ -206,13 +206,13 @@ class TestJobSidePointing:
         assert not m and len(u) == 2
 
     def test_job_pointing_two_tables_listed(self):
-        """job 名包含两张源表（job 侧歧义）：不落行，列举。"""
+        """job 名包含两张源表（job 侧一对多）：不落行，列举。"""
         m, u, st = self._run(
             ["Pjob_acct_f"], [self._task("TASK_ACCT_F", [])],
             [{"schema": "ods", "table": "acct_f"}, {"schema": "ods", "table": "acct"}])
         # Pjob_acct_f 同时包含 acct_f（等值）与 acct（包含）→ 指向 2 张
         assert not m and len(u) == 1
-        assert "歧义" in u[0]["remark"]
+        assert "一对多" in u[0]["remark"]
 
     def test_single_job_single_table_unchanged(self):
         """单 job 单表（既有口径）：落行不回归。"""

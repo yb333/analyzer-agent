@@ -82,9 +82,21 @@ python {skill_dir}/run.py analyze --input {input_xlsx} --output ./output/ [--ddl
 
 ### Step 2（可选精修）: AI 补充业务理解后覆盖视图
 
-**AI 只读 `_internal/knowledge_summary.md`（2-4KB 摘要），不读 34KB 的 JSON。**
+**契约（渐进式披露）**：AI 从 `_internal/knowledge_summary.md` 起步——摘要已**自足**
+承载本步任务的 80%（目标字段清单+DDL注释、每步字段名、WHERE/GROUP BY 原文、
+加工列表达式、逻辑块的 ON 条件与带出字段）。需要更多细节时用 `run.py inspect`
+定向下钻；**不要自己写 python/jq 读 `_internal/knowledge_draft.json`**
+（Windows PowerShell 编码/引号不稳，且容易读错结构）：
 
-AI 基于摘要，按模板格式输出自然语言，保存为 `_internal/knowledge_ai.md`：
+```bash
+python {skill_dir}/run.py inspect --draft {output_dir}/_internal/knowledge_draft.json --step step_1 --part sql
+# --part: sql|blocks|fields|where|joins|ctes|summary（默认 summary）
+# 其他选择器: --field 字段名（血缘+表达式+物理源）/ --table 表名（使用位置）/
+#            --search 关键字（SQL/表达式/条件全文搜索）/ --schema（draft 结构字典）
+# 纯 stdlib 只读、无副作用；--json 可叠加拿原始切片
+```
+
+AI 基于摘要（+按需 inspect），按模板格式输出自然语言，保存为 `_internal/knowledge_ai.md`：
 
 ```markdown
 # 整体描述
@@ -179,7 +191,23 @@ python {skill_dir}/run.py facts --dir {制品目录} --output {ts_draft.json 绝
 | `--ai-input` | 否 | knowledge_ai.md 路径（AI 增强结果，可选） |
 | `--views` | 否 | mapping/asset/techspec，默认 all |
 
+### inspect（别名 draft_inspect）
+
+只读探查入口（AI 定向下钻 knowledge_draft.json，纯 stdlib 无需分析依赖，
+无副作用，markdown 到 stdout / `--json` 原始切片，退出码 0=查到 / 1=未查到）：
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `--draft` | 是 | knowledge_draft.json 路径 |
+| `--step` | 否 | 步骤 step_id 或 rule_code，配 `--part`（summary/sql/blocks/fields/where/joins/ctes） |
+| `--field` | 否 | 字段名：血缘链+表达式+物理源 |
+| `--table` | 否 | 表名：哪些步骤/逻辑块/CTE/字段用到它 |
+| `--search` | 否 | 关键字：SQL/表达式/条件/DQ 全文搜索（带上下文片段） |
+| `--schema` | 否 | 打印 draft 结构字典（键名不用猜，测试双锁防腐烂） |
+| `--json` | 否 | 叠加任意选择器，输出原始 JSON 切片 |
+
 ## 禁止事项
 
 - 修改 L1-L3 的任何事实数据（脚本产出）
 - 跳过脚本直接用 AI 分析 SQL
+- AI 增强时自己写 python/jq 读 knowledge_draft.json（用 `run.py inspect`）

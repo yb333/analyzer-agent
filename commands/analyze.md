@@ -88,8 +88,18 @@ python {skill_dir}/run.py analyze --input {input} --output ./output/
 
 ### Step 2（可选精修）: AI 补充业务理解后覆盖视图
 
-AI 读 `{output_dir}/_internal/knowledge_summary.md`（2-4KB 摘要，不读大 JSON），
-按以下格式输出自然语言，保存为 `{output_dir}/_internal/knowledge_ai.md`：
+**契约（渐进式披露）**：AI 从 `{output_dir}/_internal/knowledge_summary.md` 起步
+（摘要自足：目标字段清单+DDL注释、每步字段名、WHERE/GROUP BY 原文、加工列
+表达式、逻辑块 ON 条件与带出字段）。需要更多细节（某步完整 SQL/某字段血缘/
+某表达式）用只读探查入口定向下钻，**不要自己写 python/jq 读大 JSON**：
+
+```bash
+python {skill_dir}/run.py inspect --draft {output_dir}/_internal/knowledge_draft.json --step step_1 --part sql
+# 选择器: --step X --part sql|blocks|fields|where|joins|ctes | --field 名 | --table 名 | --search 关键字 | --schema
+```
+
+AI 基于摘要（+按需 inspect），按以下格式输出自然语言，
+保存为 `{output_dir}/_internal/knowledge_ai.md`：
 
 ```markdown
 # 整体描述

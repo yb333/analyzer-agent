@@ -7,6 +7,9 @@ Usage:
 Examples:
     python run.py analyze --input {制品目录} --output output/    # 三形态自识别（推荐）
     python run.py analyzer --input execution_tasks.xlsx --output output/
+    python run.py inspect --draft knowledge_draft.json --step step_1 --part sql
+      （inspect = 只读探查入口：AI 定向下钻 draft，纯 stdlib 无需分析依赖，
+        选择器 --step/--field/--table/--search/--schema，详见 draft_inspect.py）
     python run.py view_generator --input knowledge_draft.json --output output/
     python run.py facts --dir {制品目录} --output {asset_facts.json 绝对路径}
       （facts = 面向 agent 的存量资产事实包入口：目录直入、一次调用一次交卷，
@@ -21,7 +24,13 @@ from pathlib import Path
 ALIAS_MAP = {
     "analyze": "analyzer",     # analyze → analyzer.py
     "view": "view_generator",  # view → view_generator.py
+    # inspect → draft_inspect.py（不直接叫 inspect.py：避免遮蔽标准库 inspect，
+    # 被 sqlglot/openpyxl 等传递 import 时拿错模块）
+    "inspect": "draft_inspect",
 }
+
+# 纯 stdlib 子命令（跳过 openpyxl/sqlglot 依赖自检——只读探查不该被分析依赖挡住）
+NO_DEP_SCRIPTS = {"inspect"}
 
 
 # sqlglot 版本敏感常量（嵌套子查询 AST 结构跨版本有差异，
@@ -56,7 +65,9 @@ def check_dependencies():
 
 
 def main():
-    check_dependencies()
+    # 纯 stdlib 子命令跳过依赖自检（inspect 只读 JSON，不需要 openpyxl/sqlglot）
+    if len(sys.argv) < 2 or sys.argv[1] not in NO_DEP_SCRIPTS:
+        check_dependencies()
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         references_dir = Path(__file__).resolve().parent / "references"
         print("Usage: python run.py <script_name> [script_args...]")
