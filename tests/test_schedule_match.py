@@ -125,7 +125,8 @@ class TestMatchSchedules:
         assert r2["pjob"] == "Pjob_x_ods_cust_info_di"      # 工程前缀段命中
         assert "job名含表名" in r2["remark"]
         assert len(unmatched) == 1                          # ods_order_di 列举
-        assert "未唯一匹配" in unmatched[0]["remark"]
+        # 2026-11-11 job 侧口径措辞：零命中列举（原"未唯一匹配到"）
+        assert "未指向任何本资产源表" in unmatched[0]["remark"]
 
     def test_task_name_key_also_hits(self):
         """匹配键含上游任务名：job 名不含但任务名含表名也命中。"""
@@ -157,3 +158,64 @@ class TestMatchSchedules:
         assert len(unmatched) == 1
         assert unmatched[0]["unresolved"] is True
         assert "未找到对应上游任务" in unmatched[0]["remark"]
+
+
+# ════════════════════════════════════════════════════════════
+# job 侧指向判定（2026-11-11 用户口径：能指向就直接放）
+# ════════════════════════════════════════════════════════════
+
+class TestJobSidePointing:
+    """歧义判定从表侧（候选数）改为 job 侧（指向表数）。
+
+    用户场景：同一上游任务的多个依赖 job（雪花依赖）指向同一张源表——
+    表侧判唯一会把整组退到尾部列举；job 侧口径：指向恰好 1 张 → 落行。
+    """
+
+    @staticmethod
+    def _task(name, deps):
+        jobs = [{"name": "start_1", "type": "start"}]
+        jobs += [{"name": d, "type": "tskdep"} for d in deps]
+        jobs.append({"name": f"Pjob_{name.lower()}", "type": "database"})
+        return {"task_name": name, "task_type": "批处理", "schedule_cron": "0 2 * * *",
+                "project": "P", "task_group": "G", "jobs": jobs, "params": []}
+
+    def _run(self, dep_jobs, extra_tasks, srcs):
+        from schedule_match import match_schedules
+        f = self._task("TGT_F", dep_jobs)
+        si = {"f_tasks": [f], "i_tasks": [], "other_tasks": [],
+              "_all_raw_tasks": [f] + extra_tasks}
+        return match_schedules(si, srcs)
+
+    def test_same_task_multi_jobs_fills_row(self):
+        """同任务多 job 指向同一表：落行 + 备注标注依赖次数（用户场景）。"""
+        m, u, st = self._run(
+            ["Pjob_b_tbl", "Pjob_b_tbl"], [self._task("TASK_B_TBL", [])],
+            [{"schema": "dwrdim", "table": "b_tbl"}])
+        assert st == "ok" and not u
+        row = m["dwrdim.b_tbl"]
+        assert row["task_name"] == "TASK_B_TBL"
+        assert "2 个依赖job指向同一上游任务" in row["remark"]
+
+    def test_conflicting_tasks_still_listed(self):
+        """同表不同上游任务（真冲突）：不落行，列举。"""
+        m, u, st = self._run(
+            ["Pjob_b_tbl", "Pjob_b_tbl_v2"],
+            [self._task("TASK_B_TBL", []), self._task("TASK_B_TBL_V2", [])],
+            [{"schema": "dwrdim", "table": "b_tbl"}])
+        assert not m and len(u) == 2
+
+    def test_job_pointing_two_tables_listed(self):
+        """job 名包含两张源表（job 侧歧义）：不落行，列举。"""
+        m, u, st = self._run(
+            ["Pjob_acct_f"], [self._task("TASK_ACCT_F", [])],
+            [{"schema": "ods", "table": "acct_f"}, {"schema": "ods", "table": "acct"}])
+        # Pjob_acct_f 同时包含 acct_f（等值）与 acct（包含）→ 指向 2 张
+        assert not m and len(u) == 1
+        assert "歧义" in u[0]["remark"]
+
+    def test_single_job_single_table_unchanged(self):
+        """单 job 单表（既有口径）：落行不回归。"""
+        m, u, st = self._run(
+            ["Pjob_b_tbl"], [self._task("TASK_B_TBL", [])],
+            [{"schema": "dwrdim", "table": "b_tbl"}])
+        assert m["dwrdim.b_tbl"]["task_name"] == "TASK_B_TBL" and not u

@@ -330,7 +330,8 @@ class TestLtsScheduleMatching:
         assert all("LTS制品未提供" not in (r[12] or "") for r in src)  # 两态不混淆
         um = [r for r in rows if not r[2]]
         assert len(um) == 1 and um[0][5] == "task_ods_order_di"
-        assert "未唯一匹配到本资产源表" in (um[0][12] or "")
+        # 2026-11-11 job 侧口径措辞
+        assert "未指向任何本资产源表" in (um[0][12] or "")
 
     def test_lts_provided_but_zero_match_disclosure(self, tmp_path):
         """两态之「给了没匹配上」：全未命中 → 调度列空 + 披露（区别于没给）。"""

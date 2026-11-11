@@ -177,21 +177,43 @@ def match_schedules(schedule_info, source_tables: list) -> tuple:
                 return k
         return hit_keys[0]
 
-    matched = {}
-    used = set()
-    for schema, table in tables:
-        hits = []
-        for c in usable:
+    # ── job 侧指向判定（2026-11-11 用户口径）──
+    # 此前表侧判唯一：一张表被 2+ 候选命中（典型=同一上游任务的多个依赖 job，
+    # 雪花依赖形态）→ 整组退尾部列举。用户口径：**能指向就直接放**——
+    #   job 指向 = 它命中的源表集合（包含式）；
+    #   恰好 1 张 → 明确指向，直接落该表行（同表多 job 解析到同一上游任务
+    #   → 合并填一次，remark 标注依赖次数）；
+    #   指向 0 张 / ≥2 张（job 侧歧义），或同表多个不同上游任务（冲突）→
+    #   尾部列举供人工核对。
+    job_hits: dict = {}      # id(cand) -> [(schema, table, key)]
+    for c in usable:
+        tgts = []
+        for schema, table in tables:
             k = _cand_hits(c, table)
             if k is not None:
-                hits.append((c, k))
-        if len(hits) != 1:
-            # 零命中（源表侧无事发生）或多命中（歧义，候选留待列举）
-            continue
-        cand, key = hits[0]
+                tgts.append((schema, table, k))
+        job_hits[id(c)] = tgts
+
+    by_table: dict = {}      # (schema, table) -> [(cand, key)]
+    for c in usable:
+        tgts = job_hits[id(c)]
+        if len(tgts) == 1:
+            schema, table, key = tgts[0]
+            by_table.setdefault((schema, table), []).append((c, key))
+
+    matched = {}
+    used = set()
+    for (schema, table), lst in by_table.items():
+        tasks_of = {(c["up_task"] or {}).get("task_name", "") for c, _ in lst}
+        if len(tasks_of) > 1:
+            continue    # 同表不同上游任务 → 冲突，留列举
+        cand, key = lst[0]
         row = _upstream_row(cand)
         row["remark"] = _hit_label(key, table)
-        used.add(id(cand))
+        if len(lst) > 1:
+            row["remark"] += f"；{len(lst)} 个依赖job指向同一上游任务"
+        for c, _ in lst:
+            used.add(id(c))
         if schema:
             matched[f"{schema}.{table}".lower()] = row
             matched[table.lower()] = row
@@ -207,8 +229,10 @@ def match_schedules(schedule_info, source_tables: list) -> tuple:
             row["remark"] = (f"依赖job（tskdep）指向 {c['job']}，制品内未找到"
                              f"对应上游任务，请人工核对")
         else:
-            row["remark"] = (f"依赖job（tskdep）指向表 {c['table_key']}，"
-                             f"未唯一匹配到本资产源表（零命中或歧义），仅列举供人工核对")
+            n = len(job_hits.get(id(c), []))
+            reason = (f"指向 {n} 张本资产源表（job 侧歧义，无法唯一落行）" if n >= 2
+                      else "未指向任何本资产源表")
+            row["remark"] = (f"依赖job（tskdep）{reason}，仅列举供人工核对")
         unmatched.append(row)
 
     return matched, unmatched, "ok"
