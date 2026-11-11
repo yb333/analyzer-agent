@@ -158,3 +158,56 @@ LEFT JOIN ods.b t2 ON a.id = t2.id AND t2.tp = '2'"""
         m = build_mapping_model(knowledge, {})
         b_rows = [e for e in m["entity"] if e["table"] == "b"]
         assert len(b_rows) == 2, "不同条件不合并"
+
+
+class TestSnowflakeMultiJoin:
+    """雪花模型（2026-11-11 用户场景）：主表 t 各关联 a/c/d，a/c/d 又各关联 b
+    （b 多次参与、别名 b1/b2/b3、b 侧关联键相同）——三个设计关系，三行。
+
+    回归背景：语义去重早期"剥别名前缀"归一把三键全变 k=k（左列同驱动 t、
+    右表同 b）→ 误合一行（b1、b2、b3 别名顿号合并），c-b/d-b 两关系丢失。
+    修复 = 别名前缀**解析到表**（a.k=b1.k → a_tbl.k=b_tbl.k），表身份保留。
+    """
+
+    SQL = """SELECT t.id, a.v1, c.v2, d.v3, b1.bv AS bv1, b2.bv AS bv2, b3.bv AS bv3
+FROM fin.t_tbl t
+LEFT JOIN fin.a_tbl a ON t.x = a.x
+LEFT JOIN fin.c_tbl c ON t.y = c.y
+LEFT JOIN fin.d_tbl d ON t.z = d.z
+LEFT JOIN fin.b_tbl b1 ON a.k = b1.k
+LEFT JOIN fin.b_tbl b2 ON c.k = b2.k
+LEFT JOIN fin.b_tbl b3 ON d.k = b3.k"""
+
+    def _knowledge(self):
+        from engine import RawRule, analyze_pipeline, detect_dialect
+        rules = [RawRule(rule_code="R1", rule_name="s", rule_type=1, exec_sequence=1,
+                         target_schema="fin", target_table="f_x", delete_mode="1",
+                         query_sql=self.SQL)]
+        knowledge, _ = analyze_pipeline(rules, {}, {}, detect_dialect([self.SQL]),
+                                        source_file="x.xlsx")
+        return knowledge
+
+    def test_sheet3_three_b_relations(self):
+        """Sheet3：b_tbl 三行（b1/b2/b3 各带各的条件），关系不丢。"""
+        from spec_export import build_spec_model
+        model = build_spec_model(self._knowledge(), {})
+        rows = [r for r in model["sheet3"] if r[3] == "b_tbl"]
+        assert len(rows) == 3, f"b 应三行，实际 {len(rows)}"
+        conds = {r[6] for r in rows}
+        assert conds == {"a.k = b1.k", "c.k = b2.k", "d.k = b3.k"}, conds
+        assert [r[4] for r in rows] == ["b1", "b2", "b3"]
+
+    def test_mapping_entity_three_rows_closed(self):
+        """mapping 实体级：b_tbl 三行；属性级别名与实体行闭合。"""
+        from mapping_export import build_mapping_model
+        m = build_mapping_model(self._knowledge(), {})
+        b_rows = [e for e in m["entity"] if e["table"] == "b_tbl"]
+        assert len(b_rows) == 3
+        assert {e["alias"] for e in b_rows} == {"b1", "b2", "b3"}
+        ent = {(e["table"].lower(), (e["alias"] or "").lower()) for e in m["entity"]}
+        for a in m["attribute"]:
+            if not a["table"]:
+                continue
+            key = (a["table"].split("、")[0].strip().lower(),
+                   (a["alias"] or "").split("、")[0].strip().lower())
+            assert key in ent, f"属性级别名断链: {key}"

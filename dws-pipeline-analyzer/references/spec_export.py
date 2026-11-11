@@ -251,9 +251,10 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
     # ── Sheet3 表关联：行集语义段式重组 + E1 单表行（§三，口径在 spec_extract）──
     sheet3 = build_sheet3_rows(
         ctx, sq_sqls=(engine_ctx or {}).get("subquery_sqls") or {})
-    # 同语义关联去重（2026-11-10 拍板：一行——行身份 = 左表×右表×类型×归一化
-    # 条件，别名降级为引用名；SPEC/mapping 同源出口统一收口）
-    sheet3 = _semantic_dedup(sheet3)
+    # 同语义关联去重（2026-11-10 拍板：一行——行身份 = 左表×右表×类型×
+    # 归一化条件；2026-11-11 修订：别名解析到表（雪花模型 a/c/d 各关联 b
+    # 三个关系不误合，跨步同语义经 tmp 链驱动解析仍合并）
+    sheet3 = _semantic_dedup(sheet3, _build_alias_resolve(ctx))
     # 双链差分标注（2026-11-10，共底座方案）：增量链独有谓词 →「增量链限制」段
     sheet3 = _attach_incremental_segments(sheet3, ctx.chains)
 
@@ -756,22 +757,58 @@ def _cond_core(g: str) -> str:
     return _BLK_PREFIX_RE.sub("", core)
 
 
-def _norm_cond(core: str) -> str:
-    """条件核心归一：去 别名. 前缀 + 空白 + 小写。
+def _norm_cond(core: str, resolve: dict | None = None) -> str:
+    """条件核心归一：别名. 前缀**解析到表** + 空白 + 小写（2026-11-11 修订）。
 
-    比语义不比字面：t.cust_id = s.cust_id 与 a.cust_id = s.cust_id 逻辑同一
-    （t 是 a 经 tmp 链的物化载体，锚穿透后同一设计关系）。
+    比语义不比字面，但**保留表身份**：t.cust_id = s.cust_id 与 a.cust_id =
+    s.cust_id 经别名解析（t→tmp 链驱动 a_tbl）后同一——跨步同语义可合并；
+    而雪花模型的 a.k=b1.k / c.k=b2.k / d.k=b3.k 解析后表身份不同——
+    三个设计关系不误合（此前"剥前缀"把它们全变成 k=k 导致丢失两行）。
     """
-    return re.sub(r"\s+", "", re.sub(r"\w+\.", "", core)).lower()
+    def _sub(m):
+        al = m.group(1).lower()
+        return f"{(resolve or {}).get(al, al)}."
+    return re.sub(r"\s+", "", re.sub(r"(\w+)\.", _sub, core)).lower()
 
 
-def _norm_seg(seg: str) -> str:
+def _norm_seg(seg: str, resolve: dict | None = None) -> str:
     """单个段文本归一（段级比对用）：先剥【x 内】块前缀再归一——
     同 ON 核心在不同块语境下不构成"独有段"。"""
-    return _norm_cond(_BLK_PREFIX_RE.sub("", seg))
+    return _norm_cond(_BLK_PREFIX_RE.sub("", seg), resolve)
 
 
-def _semantic_dedup(rows: list) -> list:
+def _build_alias_resolve(ctx) -> dict:
+    """别名 → 逻辑表（短名）解析表（语义去重键的数据源，2026-11-11）。
+
+    - tmp 链锚别名（终表 SQL 里引用中间表的别名）→ 该链驱动物理表
+      （物化无关：t 与 a 是同一设计身份）；
+    - 其余 join 别名 → 物理表短名（全局首现，冲突时不同键→不合并，
+      保守方向安全）。
+    """
+    from engine import _is_intermediate_table
+    resolve: dict = {}
+    # tmp 链锚别名优先（更specific）
+    for sid, info in _tmp_chain_index(ctx).items():
+        drive_tbl, _ = info.get("driving", ("", ""))
+        if not drive_tbl:
+            continue
+        _, d_short = split_schema_table(drive_tbl)
+        for j in ctx.df_step(sid).get("joins") or []:
+            st = j.get("source_table") or ""
+            al = (j.get("alias") or "").lower()
+            if al and st and _is_intermediate_table(st):
+                resolve.setdefault(al, d_short)
+    for s in ctx.steps_list:
+        for j in ctx.df_step(s.get("step_id", "")).get("joins") or []:
+            st = j.get("source_table") or ""
+            al = (j.get("alias") or "").lower()
+            if al and st and not st.startswith("(subquery:"):
+                _, short = split_schema_table(st)
+                resolve.setdefault(al, short)
+    return resolve
+
+
+def _semantic_dedup(rows: list, resolve: dict | None = None) -> list:
     """同语义关联去重：同一从表多次参与、条件逻辑相同 → 一行。
 
     行身份 = （左表短名 × 右表 × 关联类型 × 归一化条件）——别名是引用名不是
@@ -791,16 +828,16 @@ def _semantic_dedup(rows: list) -> list:
             out.append(r)
             continue
         key = ((r[1] or "").split(".")[-1].lower(), (r[3] or "").lower(),
-               (r[5] or ""), _norm_cond(_cond_core(r[6] or "")))
+               (r[5] or ""), _norm_cond(_cond_core(r[6] or ""), resolve))
         if key in seen:
             first = seen[key]
             aliases = [a for a in str(first[4] or "").split("、") if a]
             if r[4] and r[4] not in aliases:
                 first[4] = "、".join(aliases + [r[4]])
             # 后行独有段并入（归一化段级比对，同 ON 核心不重复并入）
-            have = {_norm_seg(x) for x in (first[6] or "").split("；")}
+            have = {_norm_seg(x, resolve) for x in (first[6] or "").split("；")}
             extras = [x.strip() for x in (r[6] or "").split("；")
-                      if x.strip() and _norm_seg(x) not in have]
+                      if x.strip() and _norm_seg(x, resolve) not in have]
             if extras:
                 first[6] = (first[6] + "；" + "；".join(extras)) if first[6] \
                     else "；".join(extras)
