@@ -25,7 +25,7 @@ DOCS = PROJECT_ROOT / "docs"
 sys.path.insert(0, str(ANALYZER_REF))
 
 from ts_export import (LOAD_MODE_BY_KIND, TsDraftError, export_ts_draft,
-                       render_ts_draft, validate_ts_draft)
+                       render_ts_draft, validate_ts_draft, _resolve_business_key)
 
 ET_XLSX = DOCS / "术加制品参考案例" / "execution_tasks_DWB_CUST_ASSET_F.xlsx"
 GOLDEN = PROJECT_ROOT / "tests" / "golden" / "snapshots"
@@ -375,3 +375,133 @@ class TestDqSection:
         assert "dq" not in d
         assert d["meta"]["dq_required"] == 0
         assert any(w["type"] == "dq_not_detected" for w in d["_reverse"]["warnings"])
+
+
+# ── 10. business_key 多源合成（2026-11-12 用户拍板：宁缺毋滥）──────────
+
+class TestBusinessKey:
+    """强证据（dq_unique_check / merge_on）全一致才回填；分布键仅 evidence 随行；
+    冲突留空+披露；定位命中但确认失败 noise 披露。"""
+
+    @staticmethod
+    def _dq(rows):
+        from test_dq_excel import _write_dq_excel
+        import tempfile
+        p = Path(tempfile.mkdtemp()) / "dq.xlsx"
+        _write_dq_excel(p, rows)
+        from inputs import read_dq_excel
+        return read_dq_excel(str(p))
+
+    ECTX = {"final_target_schema": "dws", "final_target_table": "dwb_x_f",
+            "table_catalog": {"dws.dwb_x_f": {
+                "cust_id": {"type": "INT", "is_distribute_key": True},
+                "acct_no": {"type": "TEXT"}, "seq_no": {"type": "INT"}}}}
+
+    def _tables_ctx(self):
+        return {"dwb_x_f": {"fields": [
+            {"target_field": f, "field_type": "", "field_comment": ""}
+            for f in ("cust_id", "acct_no", "seq_no")]}}
+
+    def _run(self, dq_rows=None, plans=None):
+        dq = self._dq(dq_rows) if dq_rows else None
+        return _resolve_business_key(dq, plans or {}, self.ECTX, self._tables_ctx(), {})
+
+    def test_dq_groupby_having_confirmed(self):
+        """形态A：GROUP BY 裸列+HAVING → 回填 + 双证据（dq+分布键）。"""
+        bk, ev, w = self._run([["R001", "1", "新增", "主键唯一检查", "主键唯一",
+                                "唯一性检查", "zhangsan", "dws", "dwb_x_f", "T",
+                                "SELECT cust_id FROM dws.dwb_x_f GROUP BY cust_id "
+                                "HAVING COUNT(*) > 1", "严重"]])
+        assert bk == ["cust_id"]
+        assert [e["source"] for e in ev] == ["dq_pk_check"]  # 分布键不进 bk 证据（tables[].distribution_key 已随行）
+        assert not any(x["type"] == "business_key_conflict" for x in w)
+
+    def test_dq_composite_key(self):
+        """复合主键：GROUP BY 两列 → 全收。"""
+        bk, _, w = self._run([["R001", "1", "新增", "唯一检查", "复合键唯一", "唯一性",
+                               "a", "dws", "dwb_x_f", "T",
+                               "SELECT cust_id, acct_no FROM dws.dwb_x_f "
+                               "GROUP BY cust_id, acct_no HAVING COUNT(*) > 1", "警告"]])
+        assert bk == ["cust_id", "acct_no"]
+
+    def test_dq_count_distinct_form(self):
+        """形态B：COUNT(DISTINCT col) → DISTINCT 列。"""
+        bk, _, _ = self._run([["R001", "1", "新增", "主键检查", "主键", "唯一性检查",
+                               "a", "dws", "dwb_x_f", "T",
+                               "SELECT COUNT(*) - COUNT(DISTINCT cust_id) FROM dws.dwb_x_f",
+                               "严重"]])
+        assert bk == ["cust_id"]
+
+    def test_dq_plain_query_unconfirmed(self):
+        """普通查询形态（无 GROUP BY/无 DISTINCT 聚合）→ 不写本体 + noise 披露。"""
+        bk, ev, w = self._run([["R001", "1", "新增", "主键唯一检查", "主键唯一", "唯一性",
+                                "a", "dws", "dwb_x_f", "T",
+                                "SELECT * FROM dws.dwb_x_f", "严重"]])
+        assert bk == []
+        assert any(x["type"] == "dq_pk_unconfirmed" for x in w)
+        assert not any(e["source"] == "dq_pk_check" for e in ev)
+
+    def test_dq_column_not_in_table_unconfirmed(self):
+        """检查列不在 F 表字段清单 → 确认失败（不猜测）。"""
+        bk, _, w = self._run([["R001", "1", "新增", "主键唯一检查", "主键唯一", "唯一性",
+                                "a", "dws", "dwb_x_f", "T",
+                                "SELECT ghost_id FROM dws.dwb_x_f GROUP BY ghost_id "
+                                "HAVING COUNT(*) > 1", "严重"]])
+        assert bk == [] and any(x["type"] == "dq_pk_unconfirmed" for x in w)
+
+    def test_dq_other_table_skipped_silently(self):
+        """别表的唯一检查 → 与本资产无关，静默跳过（非确认失败）。"""
+        bk, ev, w = self._run([["R001", "1", "新增", "主键唯一检查", "主键唯一", "唯一性",
+                                "a", "dws", "dwb_other_f", "T",
+                                "SELECT x FROM dws.dwb_other_f GROUP BY x "
+                                "HAVING COUNT(*) > 1", "严重"]])
+        assert bk == [] and w == []
+        assert not any(e["source"] == "dq_pk_check" for e in ev)
+
+    def test_merge_on_alone_and_conflict(self):
+        """仅 merge_on → 单独强证据回填；与 DQ 不一致 → 冲突留空+structural。"""
+        plans = {"R1": {"kind": "merge_upsert", "condition_expr": "t.cust_id = s.cust_id",
+                        "condition_columns": ["t.cust_id", "s.cust_id"]}}
+        bk, ev, _ = self._run(None, plans)
+        assert bk == ["cust_id"]   # 剥别名前缀，去重后单列
+        assert any(e["source"] == "merge_on" and e["columns"] == ["cust_id"] for e in ev)
+        # 冲突：DQ 说 acct_no，merge_on 说 cust_id
+        dq_rows = [["R001", "1", "新增", "主键唯一检查", "主键唯一", "唯一性",
+                    "a", "dws", "dwb_x_f", "T",
+                    "SELECT acct_no FROM dws.dwb_x_f GROUP BY acct_no "
+                    "HAVING COUNT(*) > 1", "严重"]]
+        bk2, _, w2 = self._run(dq_rows, plans)
+        assert bk2 == []
+        assert any(x["type"] == "business_key_conflict" for x in w2)
+
+    def test_no_sources_empty(self):
+        """无强源 → 本体空（既有行为）；分布键仅 evidence 随行不回填。"""
+        bk, ev, w = self._run()
+        assert bk == [] and w == [] and ev == []
+
+    def test_e2e_backfill_placements(self, tmp_path):
+        """端到端：术加+DQ 主键检查+DDL 分布键 → meta/tables 回填、dq_pk_check
+        证据随行（expr=检查 SQL 逐字）、分布键仍以 tables[].distribution_key 参考。"""
+        from test_dq_excel import _write_dq_excel
+        bag = tmp_path / "bag"
+        bag.mkdir()
+        shutil.copy(ET_XLSX, bag / "et.xlsx")
+        _write_dq_excel(bag / "dq.xlsx", [
+            ["R001", "1", "新增", "主键唯一检查", "cust_id 唯一", "唯一性检查",
+             "zhangsan", "dws", "dwb_cust_asset_f", "T",
+             "SELECT cust_id FROM dws.dwb_cust_asset_f GROUP BY cust_id "
+             "HAVING COUNT(*) > 1", "严重"]])
+        (bag / "f.sql").write_text(
+            "CREATE TABLE dws.dwb_cust_asset_f (cust_id INT NOT NULL, asset_amt DECIMAL(18,2))"
+            " DISTRIBUTE BY HASH (cust_id) TO GROUP LC_DW1;", encoding="utf-8")
+        out = tmp_path / "ts.json"
+        stdout, _, code = TestFactsFormatE2E()._run(["--dir", str(bag), "--output", str(out)])
+        assert code == 0, stdout
+        d = json.loads(out.read_text(encoding="utf-8"))
+        assert d["meta"]["business_key"] == ["cust_id"]
+        assert d["tables"]["dwb_cust_asset_f"]["business_key"] == ["cust_id"]
+        assert d["tables"]["dwb_cust_asset_f"]["distribution_key"] == ["cust_id"]  # 参考随行
+        ev = d["_reverse"]["evidence"]["business_key"]
+        assert ev[0]["source"] == "dq_pk_check" and ev[0]["origin"] == "R001"
+        assert ev[0]["expr"].startswith("SELECT cust_id FROM")   # 检查 SQL 逐字
+        assert validate_ts_draft(d) == []                        # vendor schema 过验

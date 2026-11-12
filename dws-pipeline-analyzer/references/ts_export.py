@@ -76,6 +76,9 @@ _SEVERITY_BY_TYPE = {
     "lts_not_detected": "structural",
     # 视图体缺定义壳（纯 SELECT 无 CREATE VIEW，视图名无从恢复）→ 待审补料
     "ddl_view_without_name": "structural",
+    # 业务主键强证据不一致 → 本体留空待人工裁决；定位命中但确认失败 → 人扫
+    "business_key_conflict": "structural",
+    "dq_pk_unconfirmed": "noise",
     # 一致性交叉（crosscheck 模块产出）
     "dq_target_mismatch": "structural",
     "ddl_target_missing": "structural",
@@ -311,6 +314,135 @@ def _topology(knowledge: dict) -> dict:
         d["role"] = "intermediate" if d["target_full"].lower() in read_tables else "target"
     info["_written"] = written
     return info
+
+
+# ═══════════════════════════════════════════════════════════════
+# business_key 多源合成（2026-11-12 用户拍板：宁缺毋滥——只有确定才写，不猜测）
+# ═══════════════════════════════════════════════════════════════
+
+# DQ 主键唯一检查定位词表（rule_name 含即候选；确认链兜误报）
+_PK_NAME_HINTS = ("主键", "唯一")
+
+
+def _dq_unique_columns(sql_text: str) -> list | None:
+    """从 DQ 检查 SQL 提取唯一性检查列（引擎 AST，确定才返回；不确定 None）。
+
+    可确认形态：
+      A. GROUP BY 裸列 [+ HAVING / 投影含聚合] → GROUP BY 列（HAVING COUNT(*)>1 类）
+      B. COUNT(DISTINCT col) 聚合 → DISTINCT 列
+    其余形态（普通查询/子查询包裹/多列集不一致）一律 None——不猜测。
+    """
+    if not sql_text:
+        return None
+    try:
+        import sqlglot
+        from sqlglot import exp
+        tree = sqlglot.parse_one(sql_text)
+    except Exception:
+        return None
+    sel = tree.find(exp.Select)
+    if sel is None:
+        return None
+    # 形态 A：GROUP BY 全裸列 +（HAVING 存在 或 投影含聚合）
+    group = sel.args.get("group")
+    if group is not None:
+        cols = [c for c in group.expressions if isinstance(c, exp.Column)]
+        if cols and len(cols) == len(group.expressions):
+            has_having = sel.args.get("having") is not None
+            has_agg = any(not isinstance(p, exp.Column) and p.find(exp.AggFunc)
+                          for p in sel.expressions)
+            if has_having or has_agg:
+                return [c.name for c in cols]
+        return None  # GROUP BY 含表达式（非裸列）——不确定
+    # 形态 B：DISTINCT 聚合（COUNT(DISTINCT col)——sqlglot 里 Distinct 在聚合的
+    # this 位置：Count(this=Distinct(expressions=[Column]))）
+    dist_cols: list = []
+    for agg in sel.find_all(exp.AggFunc):
+        dist = agg.this if isinstance(agg.this, exp.Distinct) else None
+        if dist is None:
+            continue
+        these = [c.name for c in dist.find_all(exp.Column)]
+        if not these:
+            continue
+        if dist_cols and these != dist_cols:
+            return None  # 多个 DISTINCT 聚合列集不一致——不确定
+        dist_cols = these
+    return dist_cols or None
+
+
+def _resolve_business_key(dq_rules, plans: dict, engine_ctx: dict,
+                          tables: dict, topo: dict) -> tuple[list, list, list]:
+    """业务主键多源合成 → (business_key, evidence, warnings)。
+
+    证据分级（用户拍板 2026-11-12）：
+      强（可回填本体）：dq_pk_check（rule_name 含主键/唯一 → 引擎确认检查列 →
+        目标表镜像对齐本资产 F 表 + 检查列存在于 F 表字段）；merge_on（write_plan
+        merge_upsert 的 condition_columns=物理更新身份）
+      弱（不进 business_key 证据）：DDL 分布键仅参考——材料已在
+        tables[].distribution_key（R 标）随行，不参与回填判定
+    合成纪律（宁缺毋滥）：强证据列集全部一致 → 回填；冲突 → 本体留空 +
+      business_key_conflict（structural）；定位命中但确认失败 →
+      dq_pk_unconfirmed（noise，人扫确认）。
+    """
+    evidence, warnings = [], []
+    f_table = str(engine_ctx.get("final_target_table") or "")
+    f_short = _short(f_table)
+    f_fields_l = {str(f.get("target_field") or "").lower()
+                  for f in (tables.get(f_short, {}).get("fields") or [])}
+    strong_sets: list[tuple[str, list]] = []   # [(源标签, 列集)]——全一致才回填
+
+    # 强源 1：DQ 主键唯一检查（schema 枚举名 dq_pk_check——15 章前预留的口径）
+    from crosscheck import _norm_mirror
+    for r in dq_rules or []:
+        name = str(r.get("rule_number") or "")
+        if not any(h in str(r.get("rule_name") or "") for h in _PK_NAME_HINTS):
+            continue  # 定位：标题词表（用户：DQ 无固定套路，唯一可靠入口是标题）
+        if _norm_mirror(str(r.get("target_table") or "")) != _norm_mirror(f_table):
+            continue  # 别表的唯一检查——与本资产无关
+        cols = _dq_unique_columns(str(r.get("sql") or ""))
+        ok = bool(cols) and all(c.lower() in f_fields_l for c in cols)
+        if ok:
+            strong_sets.append((f"dq:{name}", cols))
+            evidence.append({"source": "dq_pk_check",
+                             "expr": str(r.get("sql") or ""),  # 检查 SQL 全文逐字
+                             "origin": name,                   # schema：出处=规则码
+                             "columns": list(cols)})
+        else:
+            why = "SQL 无法确认检查列" if not cols else "检查列不在 F 表字段清单内"
+            warnings.append({
+                "type": "dq_pk_unconfirmed",
+                "title": f"DQ 规则 {name}（{r.get('rule_name')}）疑似主键唯一检查"
+                         f"但{why}——business_key 不猜测，请人工确认",
+            })
+
+    # 强源 2：merge_on（write_plan merge_upsert 的 ON 列，剥别名前缀、保序去重）
+    merge_cols: list = []
+    for code, plan in plans.items():
+        if plan.get("kind") != "merge_upsert":
+            continue
+        cols = list(dict.fromkeys(str(c).split(".")[-1]
+                                  for c in (plan.get("condition_columns") or [])))
+        if not cols:
+            continue
+        strong_sets.append((f"merge_on:{code}", cols))
+        evidence.append({"source": "merge_on", "origin": code,
+                         "expr": str(plan.get("condition_expr") or ""),
+                         "columns": cols})
+        merge_cols = cols
+
+    # 合成：强证据全一致才回填（宁缺毋滥）
+    business_key: list = []
+    if strong_sets:
+        sets = [tuple(sorted(c, key=str.lower)) for _, c in strong_sets]
+        if all(s == sets[0] for s in sets):
+            business_key = strong_sets[0][1]
+        else:
+            detail = "；".join(f"{tag}={cols}" for tag, cols in strong_sets)
+            warnings.append({
+                "type": "business_key_conflict",
+                "title": f"业务主键强证据不一致（{detail}）——本体留空（宁缺毋滥），请人工裁决",
+            })
+    return business_key, evidence, warnings
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -564,7 +696,7 @@ def _ts_schedule(rec: dict | None) -> tuple[dict, list]:
 
 
 def _ts_meta(ctx, knowledge: dict, engine_ctx: dict, tables: dict, topo: dict,
-             schedule: dict, dq_detected: bool) -> dict:
+             schedule: dict, dq_detected: bool, business_key: list = None) -> dict:
     meta = knowledge.get("meta", {})
     catalog = engine_ctx.get("table_catalog") or {}
     f_schema = str(engine_ctx.get("final_target_schema") or "")
@@ -598,7 +730,7 @@ def _ts_meta(ctx, knowledge: dict, engine_ctx: dict, tables: dict, topo: dict,
                    "i_view": i_view},
         "dq_required": 1 if dq_detected else 0,                           # R
         "grain": "",                                                       # E
-        "business_key": [],                                                # E（dq_pk_check 后续 P）
+        "business_key": list(business_key or []),                          # P（多源合成：dq_unique_check/merge_on，全一致才回填）
         "load_strategy": {"strategy": str(ls.get("strategy") or ""),      # R（本仓标准枚举）
                           "label": str(ls.get("label") or ""),
                           "delete_mode": str(ls.get("delete_mode") or "")},
@@ -632,10 +764,10 @@ def _ts_data_flow(knowledge: dict, topo: dict) -> dict:
 
 
 def _ts_reverse(knowledge: dict, ctx, topo: dict, plans: dict, wp_warnings: list,
-                extra_warnings: list, schedule_rec: dict | None) -> dict:
+                extra_warnings: list, schedule_rec: dict | None,
+                bk_evidence: list = None) -> dict:
     warnings_out = _project_warnings(knowledge, wp_warnings, extra_warnings)
     write_plan = []
-    bk_evidence = []
     for code, plan in plans.items():
         info = topo.get(code) or {}
         write_plan.append({
@@ -646,9 +778,6 @@ def _ts_reverse(knowledge: dict, ctx, topo: dict, plans: dict, wp_warnings: list
             "condition_source": plan.get("condition_source"),
             "where_clause": ctx.step_where(info.get("step_id", "")) if info else "",
         })
-        if plan.get("kind") == "merge_upsert" and plan.get("condition_expr"):
-            bk_evidence.append({"source": "merge_on", "expr": str(plan["condition_expr"]),
-                                "origin": code})
     # TargetFields 制品原貌（按规则分组、制品原序原量随行）——与 field_targets
     # （query_sql SELECT 列序）是两个独立事实：术加制品里二者顺序/数量本就可能
     # 不一致，各归各位不加判断（消费方对照用，交叉差异另有 warnings 披露）
@@ -664,7 +793,7 @@ def _ts_reverse(knowledge: dict, ctx, topo: dict, plans: dict, wp_warnings: list
         "warnings": warnings_out,
         "write_plan": write_plan,
         "schedule_evidence": list((schedule_rec or {}).get("evidence") or []),
-        "evidence": {"business_key": bk_evidence},
+        "evidence": {"business_key": list(bk_evidence or [])},
         "target_fields_by_rule": tf_by_rule,
     }
 
@@ -701,9 +830,17 @@ def render_ts_draft(knowledge: dict, engine_ctx: dict, *,
     plans, wp_warnings = _write_plans(knowledge, ctx)
     rules = _ts_rules(ctx, knowledge, topo, plans)
     tables = _ts_tables(knowledge, engine_ctx, topo, rules)
+    # 业务主键多源合成（tables 先建：F 表字段清单是存在性校验输入）→ 回填 F 表 + meta
+    business_key, bk_evidence, bk_warnings = _resolve_business_key(
+        dq_rules, plans, engine_ctx, tables, topo)
+    if business_key:
+        _f_short = _short(str(engine_ctx.get("final_target_table") or ""))
+        if _f_short in tables:
+            tables[_f_short]["business_key"] = list(business_key)
     schedule, sched_warnings = _ts_schedule(schedule_rec)
-    extra = list(extra_warnings or []) + sched_warnings
-    meta = _ts_meta(ctx, knowledge, engine_ctx, tables, topo, schedule, dq_detected)
+    extra = list(extra_warnings or []) + sched_warnings + bk_warnings
+    meta = _ts_meta(ctx, knowledge, engine_ctx, tables, topo, schedule, dq_detected,
+                    business_key=business_key)
     data = {
         "version": TS_VERSION,
         "spec_type": "ts",
@@ -714,7 +851,8 @@ def render_ts_draft(knowledge: dict, engine_ctx: dict, *,
         "rules": rules,
         "data_flow": _ts_data_flow(knowledge, topo),
         "_baseline": {"source": "reverse", "provenance": [dict(p) for p in (provenance or [])]},
-        "_reverse": _ts_reverse(knowledge, ctx, topo, plans, wp_warnings, extra, schedule_rec),
+        "_reverse": _ts_reverse(knowledge, ctx, topo, plans, wp_warnings, extra, schedule_rec,
+                                bk_evidence=bk_evidence),
     }
     # dq 段：有 DQ 制品才有（无该段 = dq_not_detected 披露语义，消费方 15 章 R2）
     if dq_rules:
