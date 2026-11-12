@@ -53,10 +53,12 @@ class TestTemplateFingerprint:
         assert any("4需求字段" in d for d in diffs), f"应检出列头篡改，实际 {diffs}"
 
     def test_header_constant_shapes(self):
-        """常量形态自查：5 sheet、列数与模板一致（13/13/7）。"""
+        """常量形态自查：5 sheet、列数与模板一致（13/14/8，分组列垫尾）。"""
         assert list(SPEC_TEMPLATE_HEADERS.keys()) == [
             "1业务背景", "2数据源清单", "3表关联", "4需求字段", "5业务样例数据"]
         assert len(SPEC_TEMPLATE_HEADERS["2数据源清单"]) == 13
-        assert len(SPEC_TEMPLATE_HEADERS["4需求字段"]) == 13
-        assert len(SPEC_TEMPLATE_HEADERS["3表关联"]) == 7
+        assert len(SPEC_TEMPLATE_HEADERS["4需求字段"]) == 14
+        assert len(SPEC_TEMPLATE_HEADERS["3表关联"]) == 8
+        assert SPEC_TEMPLATE_HEADERS["3表关联"][-1] == "分组"
+        assert SPEC_TEMPLATE_HEADERS["4需求字段"][-1] == "分组"
         assert SPEC_TEMPLATE_HEADERS["5业务样例数据"] == []

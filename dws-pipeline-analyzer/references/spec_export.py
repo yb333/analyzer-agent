@@ -45,13 +45,14 @@ SPEC_TEMPLATE_HEADERS = {
     ],
     "3表关联": [
         "记录ID", "*左表", "左表别名", "*右表", "右表别名", "*关联方式",
-        "*关联条件&限制条件",
+        "*关联条件&限制条件", "分组",
     ],
     "4需求字段": [
         "记录ID", "*业务需求字段(源表字段)", "*源表", "源表别名", "*源表字段",
         "*类型(直接复制/数据加工/赋值/序列)", "非直取字段加工逻辑",
         "*资产设计参考_新增优化判断",
         "*资产表名(schema.表名)", "*资产中文名称", "*资产字段", "*资产字段中文名称", "*备注",
+        "分组",
     ],
     "5业务样例数据": [],
 }
@@ -59,8 +60,8 @@ SPEC_TEMPLATE_HEADERS = {
 # 列宽（可读性；不构成契约）
 _SHEET_WIDTHS = {
     "2数据源清单": [8, 10, 24, 20, 12, 24, 12, 14, 12, 24, 10, 14, 60],
-    "3表关联": [8, 22, 10, 22, 10, 12, 60],
-    "4需求字段": [8, 16, 22, 10, 14, 12, 70, 14, 22, 18, 14, 16, 60],
+    "3表关联": [8, 22, 10, 22, 10, 12, 60, 12],
+    "4需求字段": [8, 16, 22, 10, 14, 12, 70, 14, 22, 18, 14, 16, 60, 12],
 }
 
 
@@ -251,6 +252,9 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
     # ── Sheet3 表关联：行集语义段式重组 + E1 单表行（§三，口径在 spec_extract）──
     sheet3 = build_sheet3_rows(
         ctx, sq_sqls=(engine_ctx or {}).get("subquery_sqls") or {})
+    if not ctx.union_source_info():
+        # 标准资产补分组列（多来源路径自带 8 列；分组维度见 docs/17 §十四）
+        sheet3 = [r + ["默认"] for r in sheet3]
     # 同语义关联去重（2026-11-10 拍板：一行——行身份 = 左表×右表×类型×
     # 归一化条件；2026-11-11 修订：别名解析到表（雪花模型 a/c/d 各关联 b
     # 三个关系不误合，跨步同语义经 tmp 链驱动解析仍合并）
@@ -276,7 +280,7 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
             t = str(tbl_cell or "").strip()
             a = str(alias_cell or "").strip()
             if t and a and " " not in t and "（" not in t and "—" not in t \
-                    and not t.startswith("虚拟"):
+                    and not t.startswith("虚拟") and t != "合并集":
                 alias_pairs.append((split_schema_table(t)[1].lower(), a))
     physical_alias_set = {a for _, a in alias_pairs if a not in anchor_names}
     alias_registry: dict = {}
@@ -367,10 +371,124 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
         m = re.match(r"场景\d+\s*\(分区:\s*(.+?)\)", name)
         return m.group(1) if m else ""
 
+    # ── 多来源分组上下文（docs/17 §十四）────────────────────
+    usi = ctx.union_source_info()
+    _branch_tables_norm = (
+        {norm_name(split_schema_table(g["driving"][0])[1])
+         for g in usi["groups"] if g["driving"][0]} if usi else set())
+    _union_tgt_norm = (
+        norm_name(split_schema_table(
+            ctx.topo_step(usi["step_id"]).get("target_table", ""))[1])
+        if usi else "")
+    _union_anchor = (usi.get("anchor_alias", "") or "").lower() if usi else ""
+
+    def _is_union_fed_source(p: dict) -> bool:
+        """物理来源项是否 union 供数：合并步骤产出 / 分支表 / 合并结果下游
+        承载（表或别名经步骤别名表解析到合并目标 tmp，如 t→tmp_union4）。"""
+        if p.get("step_id") == (usi or {}).get("step_id"):
+            return True
+        names = {norm_name(split_schema_table(p.get("table", "") or "")[1])}
+        al = norm_name(split_schema_table(p.get("alias", "") or "")[1])
+        if al:
+            names.add(al)
+        for s in ctx.steps_list:
+            amap = ctx.step_alias_map(s.get("step_id", ""))
+            for n in list(names):
+                t = amap.get(n.upper(), "") if n else ""
+                if t:
+                    names.add(norm_name(split_schema_table(t)[1]))
+        if names & _branch_tables_norm:
+            return True
+        if _union_tgt_norm and _union_tgt_norm in names:
+            return True
+        return False
+
+    def _branch_type_label(c: dict) -> str:
+        return {"direct": "直接复制", "value": "赋值"}.get(
+            c.get("transform", ""), "数据加工")
+
+    def _branch_expr(c: dict) -> str:
+        """分支表达式 → 展示式：去 AS 尾巴；direct 直取不带表达式。"""
+        expr = re.sub(r"(?i)\s+as\s+[A-Za-z_]\w*\s*$",
+                      "", c.get("expression", "") or "").strip()
+        return "" if c.get("transform") == "direct" else expr
+
+    def _variant_key(c: dict):
+        """变体归一比较键：别名是引用名不参与（表/字段/类型/表达式）。"""
+        tbl = norm_name(split_schema_table(c.get("table", "") or "")[1])
+        expr = re.sub(r"\b\w+\.", "", _branch_expr(c)).strip().lower()
+        return (tbl, (c.get("field", "") or "").lower(),
+                c.get("transform", "") or "", expr)
+
+    def _union_field_rows(f: dict, fname: str, cols: dict) -> list | None:
+        """union 供数字段 → 按组行/公共行（8→14 列 sheet4 行，分组垫尾）。
+
+        返回 None = 分支列残缺（无变体）→ 回退既有合并行。
+        """
+        variants = [(g, cols[g["branch"]]) for g in usi["groups"]
+                    if g["branch"] in cols]
+        if not variants:
+            return None
+        # 公共字段行备注：经合并集直取/加工（物理别名并集保证实体闭合）
+        if len({_variant_key(c) for _, c in variants}) == 1:
+            tables, aliases = [], []
+            for g, c in variants:
+                t = split_schema_table(c.get("table", "") or "")[1]
+                if t and t not in tables:
+                    tables.append(t)
+                al = (c.get("alias", "") or "").lower()
+                if al and al not in aliases:
+                    aliases.append(al)
+            c0 = variants[0][1]
+            field_cell = c0.get("field", "") or ""
+            expr = _branch_expr(c0)
+            logic = f"{expr}（经合并集{'直取' if c0.get('transform') == 'direct' else '加工'}）" \
+                if expr else ""
+            return [[None, field_cell or None,
+                     "、".join(tables) if tables else None,
+                     "、".join(aliases) if aliases else None,
+                     field_cell or None,
+                     _branch_type_label(c0), logic,
+                     None, ctx.target_table_full, ctx.target_cn,
+                     fname, _field_cn(fname), "", "公共"]]
+        rows = []
+        for g, c in variants:
+            t = split_schema_table(c.get("table", "") or "")[1]
+            al = (c.get("alias", "") or "").lower()
+            if not t:      # 常量列：源表回填组驱动表（组行与实体行闭合）
+                t = split_schema_table(g["driving"][0] or "")[1] or None
+                al = (g["driving"][1] or "").lower() or None
+            field_cell = c.get("field", "") or ""
+            expr = _branch_expr(c)
+            logic = f"{expr}（经合并集直取）" if expr else ""
+            rows.append([None, field_cell or None, t,
+                         al or None,
+                         field_cell or None,
+                         _branch_type_label(c), logic,
+                         None, ctx.target_table_full, ctx.target_cn,
+                         fname, _field_cn(fname), "", g["label"]])
+        return rows
+
     for f in ctx.final_fields(group_by_scenario=False):
         tt = f.get("transform_type", "expression")
         fname = f.get("target_field", "")
         phys = ctx.resolve_field_sources(f)
+
+        # ── 多来源分组（docs/17 §十四）：union 供数字段按组展开 ──
+        # 判定：字段名命中合并步骤分支列 且 物理来源纯落在合并步骤/分支表
+        # → 变体逐组比较：全组同文（表/字段/类型/表达式，别名不参与）→ 公共
+        # 一行；有差异 → 按组拆行（来源N）。混合形态（合并层表达式含非分支
+        # 表）不展开 → 走既有合并行（公共）。
+        _expanded = None
+        if usi is not None:
+            _cols = usi["columns"].get(fname.lower())
+            if _cols:
+                _pure = (not phys) or all(_is_union_fed_source(p) for p in phys)
+                if _pure:
+                    _expanded = _union_field_rows(f, fname, _cols)
+        if _expanded is not None:
+            sheet4.extend(_expanded)
+            continue
         common_tail = [None,                      # *资产设计参考（E 留空，154c435）
                        ctx.target_table_full,     # *资产表名(schema.表名)
                        ctx.target_cn,             # *资产中文名称
@@ -549,6 +667,7 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
             type_label, logic,
             *common_tail,
             remark_out,
+            "公共" if usi is not None else "默认",   # 分组（docs/17 §十四）
         ])
 
     # ── 记录ID（2026-11-02 实测修订：生成，每 sheet 顺序编号 1..n）──
@@ -843,8 +962,11 @@ def _semantic_dedup(rows: list, resolve: dict | None = None) -> list:
                 or (r[3] or "").startswith("—")):
             out.append(r)
             continue
+        # 分组参与行身份（docs/17 §十四）：同关系在不同来源组 = 不同行路径
+        # 语境（条件键异名/驱动不同），跨组不合并；同组内同语义照旧合并
+        grp = r[7] if len(r) > 7 else ""
         key = ((r[1] or "").split(".")[-1].lower(), (r[3] or "").lower(),
-               (r[5] or ""), _norm_cond(_cond_core(r[6] or ""), resolve))
+               (r[5] or ""), _norm_cond(_cond_core(r[6] or ""), resolve), grp)
         if key in seen:
             first = seen[key]
             aliases = [a for a in str(first[4] or "").split("、") if a]

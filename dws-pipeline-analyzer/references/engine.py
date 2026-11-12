@@ -1116,20 +1116,27 @@ def _parse_set_operation(tree, sqlglot_dialect: str, comment_alias_map: dict, ra
     # 合并所有分支的 source_tables（保留原有行为，兼容下游）
     all_joins = []
     # 同时记录每个分支独立的 source_tables + columns（分支=步骤内场景）
+    # + 分支级 where（2026-11-12 多来源分组：合并文本丢分支归属，行路径判定
+    #   需要每分支各自的行筛选；合并 where_clause 保留兼容旧消费方）
     union_branches = []
+    branch_wheres = []
     for idx, branch in enumerate(branches):
         if not isinstance(branch, exp.Select):
             continue
         branch_joins = _extract_joins(branch, branch)
         all_joins.extend(branch_joins)
         branch_columns = _extract_select_columns(branch, comment_alias_map)
-        # 为每个分支构建 join_paths（主表→从表关联路径），避免 UNION 场景丢失关联信息
+        # 为每个分支构建 join_paths（主表→从表关联路径），避免 UNION 场景丢关联信息
         branch_join_paths = _build_join_paths(branch_joins)
+        _bw = branch.args.get("where")
+        branch_wheres.append(
+            _bw.sql(dialect=sqlglot_dialect) if _bw else "")
         union_branches.append({
             "branch_index": idx + 1,
             "source_tables": branch_joins,
             "columns": branch_columns,
             "join_paths": branch_join_paths,
+            "where": branch_wheres[-1],
         })
 
     # 去重（同名同别名）
@@ -1151,15 +1158,12 @@ def _parse_set_operation(tree, sqlglot_dialect: str, comment_alias_map: dict, ra
     if isinstance(first_branch, exp.Select):
         result.select_columns = _extract_select_columns(first_branch, comment_alias_map)
 
-        # WHERE: 合并所有分支的条件
+        # WHERE: 合并所有分支的条件（兼容文本；分支级原文在 union_branches[].where）
         where_parts = []
-        for i, branch in enumerate(branches):
-            if not isinstance(branch, exp.Select):
-                continue
-            where_node = branch.args.get("where")
-            if where_node:
+        for i, bw in enumerate(branch_wheres):
+            if bw:
                 prefix = f"分支{i+1}" if i > 0 else ""
-                where_parts.append(f"{prefix}: {where_node.sql(dialect=sqlglot_dialect)}")
+                where_parts.append(f"{prefix}: {bw}")
         if where_parts:
             result.where_clause = f"{op_label} | " + " AND ".join(where_parts)
 
@@ -4790,6 +4794,7 @@ def build_data_flow(
                         for c in b["columns"]
                     ],
                     "join_paths": b.get("join_paths", {}),
+                    "where": b.get("where", ""),
                 }
                 for b in parsed.union_branches
             ] if parsed.union_branches else [],

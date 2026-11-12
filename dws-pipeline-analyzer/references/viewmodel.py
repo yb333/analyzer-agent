@@ -339,6 +339,8 @@ class ViewContext:
 
         # 实体级源表清单（懒构建）
         self._entity_sources = None
+        # 多来源分组模型（懒构建，docs/17 §十四 行路径判定）
+        self._union_info = ...
 
     # ── 步骤查询 ──────────────────────────────────────────
 
@@ -367,6 +369,106 @@ class ViewContext:
         import re as _re
         return _re.sub(r"^WHERE\s+", "",
                        (self.df_step(step_id).get("where_clause", "") or ""))
+
+    # ── 多来源分组（行路径判定，docs/17 §十四）─────────────
+
+    def union_source_info(self):
+        """多来源资产的结构化分组模型（非多来源资产返回 None）。
+
+        分组 = 行的产出路径：UNION 每分支一条行路径 → 来源N；公共加工
+        （合并集上的关联/字段加工）不在此列——由消费方从合并层 join 取。
+        双链资产取全量侧分支（增量差异走「增量链限制」段，不构成行路径）。
+
+        Returns: {
+            "step_id": 合并步骤 id,
+            "anchor_alias": 合并行集引用别名（FROM (…) u 的 u；顶层 UNION 无锚 = ""）,
+            "groups": [{"label", "branch", "driving": (表全名, 别名), "where",
+                        "joins": [{"table","alias","on","join_type"}]}],
+            "columns": {field_lower: {branch_index: {"table","field","alias",
+                                                     "expression","transform"}}},
+        }
+        """
+        if self._union_info is not ...:
+            return self._union_info
+        import re as _re
+
+        def _incr_codes():
+            if not self.chains.get("has_dual_chain"):
+                return set()
+            return {c for ch in self.chains.get("chains", [])
+                    if ch.get("kind") == "incremental"
+                    for c in ch.get("rule_codes", [])}
+
+        incr = _incr_codes()
+        cand = []
+        for s in self.steps_list:
+            sid = s.get("step_id", "")
+            ubs = self.df_step(sid).get("union_branches") or []
+            if not ubs:
+                continue
+            cand.append((s.get("rule_code", "") in incr,
+                         s.get("exec_sequence", 0) or 0, sid, ubs))
+        if not cand:
+            self._union_info = None
+            return None
+        cand.sort(key=lambda x: (x[0], x[1]))
+        _, _, sid, ubs = cand[0]
+
+        # 合并行集锚：FROM 子查询包装（顶层 UNION 无锚）
+        anchor = ""
+        for j in self.df_step(sid).get("joins", []):
+            if (j.get("source_table", "") or "").startswith("(subquery:"):
+                anchor = j.get("alias", "") or ""
+                break
+
+        groups, columns = [], {}
+        for gi, b in enumerate(ubs, 1):
+            sts = b.get("source_tables", []) or []
+            driving = ("", "")
+            joins = []
+            for st in sts:
+                tbl, al = st.get("source_table", ""), st.get("alias", "")
+                jt = (st.get("join_type", "") or "FROM").strip().upper()
+                if (jt in ("FROM", "") and not driving[0]
+                        and not tbl.startswith("(subquery:")):
+                    driving = (tbl, al)
+                elif not tbl.startswith("(subquery:"):
+                    joins.append({"table": tbl, "alias": al,
+                                  "on": st.get("join_condition", ""),
+                                  "join_type": jt})
+            if not driving[0]:
+                # 分支驱动是子查询 → 从分支列物理溯源兜底（首列首源）
+                for col in b.get("columns", []):
+                    for ps in col.get("physical_sources", []) or []:
+                        if ps.get("table"):
+                            driving = (ps["table"], ps.get("alias", ""))
+                            break
+                    if driving[0]:
+                        break
+            groups.append({
+                "label": f"来源{gi}",
+                "branch": b.get("branch_index", gi),
+                "driving": driving,
+                "where": _re.sub(r"^WHERE\s+", "", b.get("where", "") or ""),
+                "joins": joins,
+            })
+            bidx = b.get("branch_index", gi)
+            for col in b.get("columns", []):
+                key = (col.get("alias", "") or "").lower()
+                if not key:
+                    continue
+                ps_list = col.get("physical_sources", []) or []
+                ps = ps_list[0] if ps_list else {}
+                columns.setdefault(key, {})[bidx] = {
+                    "table": ps.get("table", ""),
+                    "field": ps.get("field", ""),
+                    "alias": ps.get("alias", ""),
+                    "expression": col.get("expression", ""),
+                    "transform": col.get("transform_type", ""),
+                }
+        self._union_info = {"step_id": sid, "anchor_alias": anchor,
+                            "groups": groups, "columns": columns}
+        return self._union_info
 
     # ── 字段来源解析（统一优先级）─────────────────────────
 

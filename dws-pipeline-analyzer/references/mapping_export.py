@@ -220,8 +220,23 @@ def build_mapping_model(knowledge: dict, engine_ctx: dict) -> dict:
     }
 
 
+def _compose_group(base: str, src_cell) -> str:
+    """SPEC 分组格（r[-1]：默认/来源N/公共）与场景标签组合。
+
+    标准资产 src=默认 → 场景标签/default（既有行为）；多来源 src=来源N/公共
+    → 单场景直接用 src，多场景组合「场景·来源」（docs/17 §十四）。
+    """
+    src = (str(src_cell).strip() if src_cell is not None else "")
+    if not src or src == "默认":
+        return base
+    if base and base != "default":
+        return f"{base}·{src}"
+    return src
+
+
 def _to_attr_row(r, group: str, ctx, catalog_idx: dict, tgt_meta: dict | None) -> dict:
     """SPEC Sheet4 行 → mapping 属性级行（模板 v2 15 列）。"""
+    group = _compose_group(group, r[13] if len(r) > 13 else "")
     target_types = ctx.meta.get("target_field_types", {}) or {}
     target_comments = ctx.meta.get("target_field_comments", {}) or {}
     fname = r[10] or ""
@@ -318,9 +333,9 @@ def _to_entity_rows(sheet3: list, ctx, catalog_idx: dict) -> list:
     by_key = {}
     order = []
 
-    def _register(table, alias, on_cell, main=False):
-        """按（表小写, 别名小写）注册一行；重复注册时虚拟段并入（信息不丢）。"""
-        if not table or table.startswith("虚拟逻辑表"):
+    def _register(table, alias, on_cell, main=False, group=""):
+        """按（表小写, 别名小写）注册一行；重复注册时虚拟段/分组并入（信息不丢）。"""
+        if not table or table.startswith("虚拟逻辑表") or table == "合并集":
             return
         key = (table.lower(), (alias or "").lower())
         row = by_key.get(key)
@@ -328,6 +343,10 @@ def _to_entity_rows(sheet3: list, ctx, catalog_idx: dict) -> list:
             if on_cell:  # 虚拟段/补挂限制并入该别名行
                 row["on_condition"] = (row["on_condition"] + "；" + on_cell
                                        if row["on_condition"] else on_cell)
+            if group and group not in ("默认", "") and \
+                    group not in (row.get("group") or "").split("、"):
+                row["group"] = "、".join(
+                    x for x in [row.get("group") or "", group] if x)
             return
         schema = schema_of.get(table.lower(), "")
         meta = _table_meta(catalog_idx, schema, table)
@@ -335,6 +354,7 @@ def _to_entity_rows(sheet3: list, ctx, catalog_idx: dict) -> list:
             "schema": schema,
             "table_cn": (meta or {}).get("comment", ""),
             "table": table, "alias": alias,
+            "group": "" if group == "默认" else group,
             "target_schema": ctx.target_schema,
             "target_cn": ctx.target_cn,
             "target_table": ctx.target_table,
@@ -345,28 +365,40 @@ def _to_entity_rows(sheet3: list, ctx, catalog_idx: dict) -> list:
         }
         order.append(key)
 
+    def _r_group(r):
+        return (r[7] or "") if len(r) > 7 else ""
+
     for r in sheet3:
-        if r[5] == "主表":
+        if r[5] == "多来源(UNION ALL)":
+            # 多来源驱动行（docs/17 §十四）：分支驱动表，分组=来源N，
+            # 行筛选在限制段；不占主表位（多来源没有单一主表）
+            _register(r[1] or "", r[2] or "", r[6] or "", group=_r_group(r))
+        elif r[5] == "主表":
             # tmp 链主表行：r[2]=表名、r[3]=别名（SPEC 特有布局）
-            _register(r[2] or "", r[3] or "", r[6] or "", main=True)
+            _register(r[2] or "", r[3] or "", r[6] or "", main=True,
+                      group=_r_group(r))
         elif (r[3] or "").startswith("—"):
             # E1 单表行：r[1]=表名、r[2]=别名（右表是占位符）
-            _register(r[1] or "", r[2] or "", r[6] or "", main=True)
+            _register(r[1] or "", r[2] or "", r[6] or "", main=True,
+                      group=_r_group(r))
         elif (r[3] or "").startswith("虚拟逻辑表"):
             continue  # 预扫已归集，段随后并入驱动表主表行
         else:
             # 标准关联行：左表首引用 → 先注册主表行（按表×别名）。
             # 【b 内】标记 = 子查询块内行：其左表是块内驱动表，不是目标表主表
             # ——main=False（块内语义在该块首行 ON 上，备注不占主表位）。
+            # 合并集 = 多来源合并行集呈现名（docs/17 §十四），不是物理表不注册
             left_tbl = (r[1] or "").split(".")[-1]
             m_block = re.match(r"【(\w+)\s+内】", r[6] or "")
             if m_block:
-                _register(left_tbl, r[2] or "", f"【{m_block.group(1)} 内】")
+                _register(left_tbl, r[2] or "", f"【{m_block.group(1)} 内】",
+                          group=_r_group(r))
             else:
-                _register(left_tbl, r[2] or "", "", main=True)
+                _register(left_tbl, r[2] or "", "", main=True, group=_r_group(r))
             kind = r[5] or ""
             _register(r[3] or "", r[4] or "",
-                      f"{kind}: {r[6] or ''}" if r[6] else kind)
+                      f"{kind}: {r[6] or ''}" if r[6] else kind,
+                      group=_r_group(r))
 
     # 虚拟逻辑表段并入驱动表行（驱动表未注册过则此时补注册为主表）；
     # 纯交叉引用段（"【x 内】关联见上"，SPEC 行间导航语）不进 mapping
@@ -398,10 +430,10 @@ def render_mapping_xlsx(model: dict, output_path, template_path=None) -> Path:
             + "\n".join(diffs))
 
     entity_rows = [
-        [str(i), "default", e["schema"], e["table_cn"],
+        [str(i), e.get("group") or "default", e["schema"], e["table_cn"],
          e["table"], e["alias"], e["target_schema"], e["target_cn"], e["target_table"],
          e["rule"], e["on_condition"], e["remark"], e["db_type"]]
-        # 分组列固定 default——表关联结构跨场景不变（属性级才分场景）
+        # 分组列：多来源资产=来源N/公共（docs/17 §十四）；标准资产 default
         for i, e in enumerate(model["entity"], 1)
     ]
     attr_rows = [
