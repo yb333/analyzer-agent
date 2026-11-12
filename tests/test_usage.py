@@ -568,3 +568,15 @@ class TestCaller:
         monkeypatch.setenv("ANALYZER_CALLER", "agent")
         record({"command": "analyze", "caller": "ci"})
         assert self._extra_of(fake_post_ok[0])["caller"] == "ci"
+
+    def test_facts_defaults_agent(self, isolated_usage, fake_post_ok):
+        """facts 是 agent 专属入口（消费方 agent 走 docs/14 合同，旧提示词
+        不带标识）：未显式设置时默认按 agent 记，避免占比失真。"""
+        record({"command": "facts"})
+        assert self._extra_of(fake_post_ok[0])["caller"] == "agent"
+
+    def test_facts_explicit_human_wins(self, isolated_usage, monkeypatch, fake_post_ok):
+        """开发测试 facts 想标人工：显式 ANALYZER_CALLER=human 优先于默认。"""
+        monkeypatch.setenv("ANALYZER_CALLER", "human")
+        record({"command": "facts"})
+        assert self._extra_of(fake_post_ok[0])["caller"] == "human"

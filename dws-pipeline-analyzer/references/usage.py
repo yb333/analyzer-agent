@@ -223,15 +223,19 @@ def _save_last_ok(endpoint: str) -> None:
         pass
 
 
-def _detect_caller() -> str:
-    """调用方识别（SKILL.md 全局约定：agent 调用任何命令统一带
-    ANALYZER_CALLER=agent 前缀；人工调用不带）。存进 extra.caller，
-    看板按它统计 agent 采纳率。识别不到一律按人工。"""
+def _detect_caller(command: str = "") -> str:
+    """调用方识别（SKILL.md/docs14 约定：agent 调用统一带 ANALYZER_CALLER=agent
+    前缀；人工不带默认 human）。例外兜底：facts 是 agent 专属入口（消费方
+    agent 走 docs/14 合同，旧版提示词不带标识），未显式设置时默认按 agent
+    记——人工直调 facts 基本只有开发测试（显式设 ANALYZER_CALLER=human
+    可覆盖）。存进 extra.caller，看板按它统计 agent 采纳率。"""
     try:
         v = (os.environ.get("ANALYZER_CALLER") or "").strip().lower()
-        return v or "human"
+        if v:
+            return v
     except Exception:
-        return "human"
+        pass
+    return "agent" if command == "facts" else "human"
 
 
 # ── 错误分类 ─────────────────────────────────────────────────────────────
@@ -463,7 +467,7 @@ def record(data: dict) -> None:
         row["os"] = _get_os()
         # 调用方标识（agent / human）—— 运营核心维度，进 extra 不动 schema
         # （必须在 row["extra"] 序列化之前注入）
-        extra.setdefault("caller", _detect_caller())
+        extra.setdefault("caller", _detect_caller(str(data.get("command") or "")))
         row["extra"] = json.dumps(extra, ensure_ascii=False) if extra else ""
         # elapsed_detail 序列化为 JSON 字符串（CSV 存文本，服务端存 TEXT）
         detail = row.get("elapsed_detail")

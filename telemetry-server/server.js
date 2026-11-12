@@ -366,6 +366,39 @@ function handleStats() {
     : null;
   result.elapsed_pct = { p50: pct(0.50), p90: pct(0.90), p99: pct(0.99), n: elapsed.length };
 
+  // 11. 错误归类（error_type 分布；各命令错误路径均有埋点，数据到来即显色）
+  result.error_types = db.prepare(`
+    SELECT COALESCE(NULLIF(error_type, ''), '(未分类)') AS error_type,
+           COUNT(*) AS count,
+           MAX(timestamp) AS last_seen
+    FROM usage_records
+    WHERE status = 'error'
+    GROUP BY error_type ORDER BY count DESC
+  `).all();
+
+  // 12. 慢任务 Top10（性能优化指引：哪个资产/命令最慢）
+  result.slowest_tasks = db.prepare(`
+    SELECT command,
+           COALESCE(NULLIF(target_table, ''), NULLIF(asset, ''), '(未知)') AS asset_name,
+           ROUND(elapsed_sec, 2) AS elapsed_sec,
+           timestamp, user_name
+    FROM usage_records
+    WHERE elapsed_sec IS NOT NULL
+    ORDER BY elapsed_sec DESC LIMIT 10
+  `).all();
+
+  // 13. 阶段耗时分解（analyze 五阶段平均耗时——看瓶颈在哪一环）
+  result.stage_breakdown = db.prepare(`
+    SELECT
+      ROUND(AVG(json_extract(elapsed_detail, '$.parse')), 3) AS parse,
+      ROUND(AVG(json_extract(elapsed_detail, '$.ddl_discovery')), 3) AS ddl_discovery,
+      ROUND(AVG(json_extract(elapsed_detail, '$.lts_discovery')), 3) AS lts_discovery,
+      ROUND(AVG(json_extract(elapsed_detail, '$.write_json_and_summary')), 3) AS write_out,
+      ROUND(AVG(json_extract(elapsed_detail, '$.view_generation')), 3) AS view_gen
+    FROM usage_records
+    WHERE elapsed_detail IS NOT NULL AND elapsed_detail != ''
+  `).get();
+
   statsCache = { at: Date.now(), data: result };
   return result;
 }
@@ -458,6 +491,22 @@ function buildDashboardHtml() {
       <h2>版本分布</h2>
       <div id="versionChart" class="chart" style="height:260px"></div>
     </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="section">
+      <h2>慢任务 Top10</h2>
+      <table><thead><tr><th>命令</th><th>资产</th><th>耗时</th><th>时间</th><th>用户</th></tr></thead><tbody id="slowTable"></tbody></table>
+    </div>
+    <div class="section">
+      <h2>错误归类</h2>
+      <table><thead><tr><th>类型</th><th>次数</th><th>最后出现</th></tr></thead><tbody id="errorTypeTable"></tbody></table>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>阶段耗时分解（analyze 平均）</h2>
+    <div id="stageChart" class="chart" style="height:260px"></div>
   </div>
 
   <div class="section">
@@ -633,6 +682,38 @@ function renderUserActivity(instances) {
   }, true);
 }
 
+// analyze 五阶段中文名（阶段耗时分解用；键对齐服务端 stage_breakdown）
+var STAGE_NAMES = {
+  parse: 'SQL 解析',
+  ddl_discovery: 'DDL 发现',
+  lts_discovery: 'LTS 发现',
+  write_out: 'JSON/摘要落盘',
+  view_gen: '视图生成'
+};
+
+function renderStageBreakdown(sb) {
+  var chart = getChart('stageChart');
+  if (!chart) return;
+  var keys = ['parse', 'ddl_discovery', 'lts_discovery', 'write_out', 'view_gen'];
+  var names = [], vals = [];
+  // 倒序填充：横条 category 轴自下而上，倒序后 parse 显示在最上（符合流程序）
+  for (var i = keys.length - 1; i >= 0; i--) {
+    var v = sb[keys[i]];
+    names.push(STAGE_NAMES[keys[i]]);
+    vals.push(v == null ? 0 : v);
+  }
+  chart.setOption({
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: function(p) { return p[0].name + ': ' + p[0].value + 's'; } },
+    grid: { left: 110, right: 60, top: 20, bottom: 30 },
+    xAxis: { type: 'value', axisLabel: { formatter: '{value}s' } },
+    yAxis: { type: 'category', data: names, axisLabel: { fontSize: 12 } },
+    series: [{ type: 'bar', data: vals, barMaxWidth: 22,
+      itemStyle: { color: '#1a73e8' },
+      label: { show: true, position: 'right', formatter: '{c}s', fontSize: 11 } }]
+  }, true);
+}
+
 function render(data) {
   lastStats = data;
   renderOverview(data.overview || {}, data.elapsed_pct || {});
@@ -650,6 +731,14 @@ function render(data) {
     return [r.asset_name, r.issues, r.analyses];
   });
   renderPie('versionChart', data.versions || [], function(v){ return v; });
+  renderTable('slowTable', data.slowest_tasks || [], function(r) {
+    return [cmdLabel(r.command), r.asset_name, (r.elapsed_sec || 0) + 's',
+            fmtTime(r.timestamp).substring(0, 16), r.user_name || '-'];
+  });
+  renderTable('errorTypeTable', data.error_types || [], function(r) {
+    return [r.error_type, r.count, fmtTime(r.last_seen).substring(0, 16)];
+  });
+  renderStageBreakdown(data.stage_breakdown || {});
   renderTable('errorDetailTable', data.error_details || [], function(r) {
     return [
       fmtTime(r.timestamp).substring(0, 16),
