@@ -919,7 +919,7 @@
     "",
     "dwb_eb_account_d",
     "",
-    "限制：1 = 1 AND NOT b.is_datacom_flag IS NULL；t2.delete_flag = 'N'；限定：s.rn = 1（开窗收敛，窗口定义见原文）；【s 内】关联见上",
+    "限制：1 = 1 AND NOT b.is_datacom_flag IS NULL；限定：s.rn = 1（开窗收敛，窗口定义见原文）；【s 内】关联见上",
     "主表",
     "DWS"
    ],
@@ -934,7 +934,7 @@
     "",
     "dwb_eb_account_d",
     "",
-    "LEFT JOIN: t1.account_id = b.account_id；【逻辑从表 b · 定义】(SELECT tt.account_id, CASE WHEN SUM(tt.is_datacom_flag) > 0 THEN 'Y' ELSE 'N' END AS is_datacom_flag FROM (SELECT t2.account_id, CASE WHEN t3.tag_id = '1122334455' THEN '1' ELSE '0' END AS is_datacom_flag FROM sdi.eb_account_tag_t t2 LEFT JOIN sdi.eb_account_common_tag_t t3 ON t2.tag_id = t3.tag_id AND NOT t2.account_id IS NULL WHERE t2.delete_flag = 'N') tt GROUP BY account_id) b",
+    "LEFT JOIN: t1.account_id = b.account_id；【逻辑从表 b · 定义】(SELECT tt.account_id, CASE WHEN SUM(tt.is_datacom_flag) > 0 THEN 'Y' ELSE 'N' END AS is_datacom_flag FROM (SELECT t2.account_id, CASE WHEN t3.tag_id = '1122334455' THEN '1' ELSE '0' END AS is_datacom_flag FROM sdi.eb_account_tag_t t2 LEFT JOIN sdi.eb_account_common_tag_t t3 ON t2.tag_id = t3.tag_id AND NOT t2.account_id IS NULL WHERE t2.delete_flag = 'N') tt GROUP BY account_id) b；限定：t2.delete_flag = 'N'",
     "",
     "DWS"
    ],

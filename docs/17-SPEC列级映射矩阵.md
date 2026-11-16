@@ -538,3 +538,25 @@ UNION/分支内关联/键异名三合一）入 golden；tests/test_multi_source.
 
 回归：TestCommaJoinQuality（3 断言：外层检出/子查询内检出/ANSI 不误报）
 + 根行 E1 化断言更新；case_38 快照 = 新质量 issue 预期出现；911 全绿。
+
+### 嵌套窗口字典：谓词原子归位（2026-11-16 用户案例定稿）
+
+案例：`t_main left join (select … from (select …, row_number() over(…) rn
+from a, b where a.type='x' and a.id=b.id) t where rn=1) sub1 on upper(s.col1)=
+sub1.k2`——三层嵌套（JOIN 子查询 → FROM 子查询开窗 → 逗号 join）。空壳行
+已在复测三修过滤；本刀解决**嵌套块谓词归位**（此前 rn=1 张冠李戴挂 b 行、
+a.id=b.id 与 a.type='x' 丢失）：
+
+- **消费制**：各层子查询块 WHERE 按顶层 AND 拆原子（谓词守恒同款），按
+  引用别名分类——双别名原子（a.id=b.id）→ 无 ON secondary 行的关联条件
+  （INNER JOIN 等价）；自身单别名原子（g.status='A'）→ 该行限制段；
+  **未消费原子**（内层主表过滤 a.type='x' / 开窗收敛 rn=1）→ 锚行限定段，
+  rn 类沿用「（开窗收敛，窗口定义见定义原文）」标注。
+- **窗口呈现**（拍板）：沿用定义原文机制——【逻辑从表 · 定义】逐字承载
+  窗口 SQL，不做引擎窗口结构化。
+- 后置去重收窄到「虚拟逻辑表」包裹残余行（错位副本唯一来源），防误删
+  _slave_rows 正确落位的原子。
+
+回归：TestNestedWindowDict 3 断言 + case_39_nested_window_dict 入 golden；
+case_27/28/32 快照 = 谓词从定义原文/错位处提升到离表近的行（预期改进）；
+914 全绿。

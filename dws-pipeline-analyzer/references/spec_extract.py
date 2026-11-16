@@ -131,6 +131,16 @@ def _descend_main(block) -> tuple:
     return "", ""
 
 
+def _where_atoms(where: str) -> list:
+    """块 WHERE → 顶层 AND 原子（谓词守恒同款拆法，零 SQL 解析）。"""
+    return [a.strip() for a in re.split(r"(?i)\band\b", where or "") if a.strip()]
+
+
+def _atom_aliases(atom: str) -> set:
+    """原子引用的 别名. 前缀集合（小写）。"""
+    return {m.group(1).lower() for m in re.finditer(r"\b([A-Za-z_]\w*)\.", atom)}
+
+
 def _slave_rows(anchor_block, left_tbl: str, left_alias: str,
                 frag: str, anchor: str, real_jt: str = "",
                 attached: list = None) -> list:
@@ -138,9 +148,13 @@ def _slave_rows(anchor_block, left_tbl: str, left_alias: str,
     docs/14 §四整块不拆层：嵌套子查询定义留在渲染 SQL 内）。
 
     real_jt = 引擎 real_join_type（块缺 join_type 时锚行的真实类型兜底）。
-    逗号 join 子查询（Oracle 旧式 from a,b where …）：secondary 无 ON、
-    关联条件在块 where → 首个无 ON secondary 行承载（INNER JOIN 等价改写，
-    where 原文整段挂条件位不拆原子），并记入 attached（防错位进包裹限制段）。
+    嵌套块谓词归位（2026-11-16 拍板，"离谓词的表近"）：
+    - 各层子查询块的 WHERE 按顶层 AND 拆原子，按引用别名数分类——
+      双别名原子（如逗号 join 的 a.id=b.id）→ 无 ON secondary 行的关联条件
+      （INNER JOIN 等价改写）；引用自身别名的单别名原子 → 该行限制段；
+      其余（引用内层主表 / 无前缀如 rn=1）→ 锚行限定段（开窗收敛沿用
+      「窗口定义见原文」标注先例，定义片段逐字承载窗口 SQL）。
+    - 记入 attached（整段 + 原子双形态，防错位副本残留在包裹限制段）。
     """
     rows = []
     drv_tbl, drv_alias = _descend_main(anchor_block)
@@ -148,35 +162,78 @@ def _slave_rows(anchor_block, left_tbl: str, left_alias: str,
         return rows
     _, l_short = split_schema_table(left_tbl)
     _, d_short = split_schema_table(drv_tbl)
+
+    # ── 收集 (secondary 块, 其最近祖先子查询块的 WHERE 原子) ──
+    # 消费制：secondary 行按归属吃原子（双别名→ON / 自身单别名→行限制），
+    # 未被消费的原子（内层主表过滤 / rn=1 类收敛）一律归锚行限定段
+    sec_atoms: list = []       # [(secondary_blk, atoms)]
+    all_atoms: list = []       # [(atom, 所属块)]，锚行兜底用
+
+    def _walk(block, atoms):
+        for a in atoms:
+            all_atoms.append((a, block))
+        for c in block.get("children") or []:
+            ctype = c.get("type", "")
+            if ctype == "inner_secondary" and c.get("table"):
+                sec_atoms.append((c, atoms))
+            elif ctype == "subquery":
+                _walk(c, _where_atoms(c.get("where_clause", "") or ""))
+
+    _walk(anchor_block, _where_atoms(anchor_block.get("where_clause", "") or ""))
+    consumed_atoms: set = set()
+
+    # ── secondary 行：自身 ON / 双别名原子补 ON（逗号 join）+ 自身限制段 ──
+    # （先渲染供锚行消费结算，行序保持锚行在前）
+    sec_rows = []
+    for blk, atoms in sec_atoms:
+        _, b_short = split_schema_table(blk["table"])
+        al = (blk.get("alias") or "").lower()
+        on_c = blk.get("on_condition", "")
+        kind = _join_kind(blk.get("join_type", ""))
+        if not on_c:
+            join_a = [a for a in atoms
+                      if len(_atom_aliases(a)) >= 2 and al in _atom_aliases(a)]
+            if join_a:
+                on_c = " AND ".join(join_a)
+                kind = "INNER JOIN"        # 逗号 join 等价改写
+                consumed_atoms.update(join_a)
+        limits = [a for a in atoms if _atom_aliases(a) == {al}]
+        if limits:
+            consumed_atoms.update(limits)
+        g = ((f"【{anchor} 内】{on_c}；") if on_c else "") + \
+            ((f"限制：{'；'.join(limits)}；") if limits else "") + \
+            f"参与逻辑从表 {anchor}，定义见 {d_short} 行"
+        sec_rows.append([None, d_short, drv_alias, b_short,
+                         blk.get("alias", ""), kind, g])
+
+    # ── 锚行：ON + 定义原文（窗口 SQL 逐字承载，2026-11-16 拍板）+ 限定段
+    #    （未消费原子：内层主表过滤 / 开窗收敛 rn=1 类）──
+    orphan_atoms = [a for a, _blk in all_atoms if a not in consumed_atoms]
     parts = ([anchor_block.get("on_condition", "")]
              if anchor_block.get("on_condition") else [])
     if frag:
         parts.append(f"【逻辑从表 {anchor} · 定义】{frag}")
+    if orphan_atoms:
+        orphan_txt = "；".join(
+            (a + "（开窗收敛，窗口定义见定义原文）"
+             if re.search(r"\brn\s*=", a, re.I) else a)
+            for a in orphan_atoms)
+        parts.append(f"限定：{orphan_txt}")
     rows.append([None, l_short, left_alias, d_short, anchor,
                  _join_kind(anchor_block.get("join_type", "") or real_jt),
                  "；".join(parts)])
-    blk_where = (anchor_block.get("where_clause", "") or "").strip()
-    where_used = False
-    for blk in _iter_blocks(anchor_block.get("children") or []):
-        if blk.get("type") == "inner_secondary" and blk.get("table"):
-            _, b_short = split_schema_table(blk["table"])
-            on_c = blk.get("on_condition", "")
-            kind = _join_kind(blk.get("join_type", ""))
-            if not on_c and blk_where and not where_used:
-                # 逗号 join：块 where 即该表与内层主表的关联（等价 INNER JOIN）
-                on_c, kind, where_used = blk_where, "INNER JOIN", True
-                if attached is not None and blk_where not in attached:
-                    attached.append(blk_where)
-            g = ((f"【{anchor} 内】{on_c}；")
-                 if on_c else "") +                 f"参与逻辑从表 {anchor}，定义见 {d_short} 行"
-            rows.append([None, d_short, drv_alias, b_short,
-                         blk.get("alias", ""), kind, g])
-    if blk_where and not where_used and not frag and attached is not None \
-            and blk_where not in attached:
-        # 无 secondary 承载且无定义原文（单表子查询过滤）→ 锚行限定段；
-        # 有 frag（【逻辑从表 · 定义】逐字）时谓词已在原文里，不重复挂
-        rows[0][6] = (rows[0][6] + "；" if rows[0][6] else "") + f"限制：{blk_where}"
-        attached.append(blk_where)
+    rows.extend(sec_rows)
+
+    if attached is not None:
+        for w in [anchor_block.get("where_clause", "") or ""]:
+            atoms = _where_atoms(w)
+            for a in atoms + ([w.strip()] if w.strip() else []):
+                if a and a not in attached:
+                    attached.append(a)
+        for blk, atoms in sec_atoms:
+            for a in atoms:
+                if a and a not in attached:
+                    attached.append(a)
     return rows
 
 
@@ -927,11 +984,15 @@ def _build_sheet3_rows_std(ctx, sq_sqls: dict = None) -> list:
             last_pos_by_step[sid] = len(rows) - 1
 
     # 块 where 后置去重：attached 发生在 s/sub1 等分支渲染之后，早渲染分支
-    # 的限制段可能已带错位副本（如逗号 join 条件挤进包裹限制段）→ 剔除
+    # 的限制段可能已带错位副本（如逗号 join 条件挤进包裹限制段）→ 剔除。
+    # 只清「虚拟逻辑表」包裹残余行——错位副本只来自包裹分支的 where_usage
+    # 收集；_slave_rows 正确落位的原子不能误删
     _new_attached = [w for w in attached_wheres if w not in _attached_pre]
     if _new_attached:
         _drop = {_squeeze(w) for w in _new_attached}
         for r in rows:
+            if not str(r[3] or "").startswith("虚拟逻辑表"):
+                continue
             segs = (r[6] or "").split("；")
             kept = [x for x in segs if _squeeze(x) not in _drop]
             if len(kept) != len(segs):

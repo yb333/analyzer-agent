@@ -744,7 +744,7 @@
     "",
     "dwb_cust_pay_profile_d",
     "",
-    "LEFT JOIN: a.cust_id = b.cust_id；【逻辑从表 b · 定义】(SELECT e.cust_id, SUM(e.pay_amt) AS total_amt FROM ods.ods_order_pay e INNER JOIN ods.ods_pay_channel g ON e.channel_id = g.channel_id WHERE e.del_flag = 'N' AND g.channel_status = 'A' GROUP BY e.cust_id) b；限制：a.stat_date = '20261031'",
+    "LEFT JOIN: a.cust_id = b.cust_id；【逻辑从表 b · 定义】(SELECT e.cust_id, SUM(e.pay_amt) AS total_amt FROM ods.ods_order_pay e INNER JOIN ods.ods_pay_channel g ON e.channel_id = g.channel_id WHERE e.del_flag = 'N' AND g.channel_status = 'A' GROUP BY e.cust_id) b；限定：e.del_flag = 'N'；限制：a.stat_date = '20261031'",
     "",
     "DWS"
    ],
@@ -774,7 +774,7 @@
     "",
     "dwb_cust_pay_profile_d",
     "",
-    "INNER JOIN: 【b 内】e.channel_id = g.channel_id；参与逻辑从表 b，定义见 ods_order_pay 行",
+    "INNER JOIN: 【b 内】e.channel_id = g.channel_id；限制：g.channel_status = 'A'；参与逻辑从表 b，定义见 ods_order_pay 行",
     "",
     "DWS"
    ]

@@ -428,5 +428,50 @@ class TestCommaJoinQuality:
         assert not any("缺少 ON" in i["title"] for i in iss)
 
 
+# ════════════════════════════════════════════════════════════
+# 嵌套窗口字典（2026-11-16 用户案例）：JOIN 子查询(嵌套 FROM 子查询开窗
+# + 逗号 join)——谓词原子按"离谓词的表近"归位
+# ════════════════════════════════════════════════════════════
+
+_NESTED_WINDOW_SQL = """SELECT s.col1, sub1.k1 FROM dwr.t_main s
+LEFT JOIN (SELECT t.k1, t.k2
+           FROM (SELECT b.k1, b.k2,
+                        ROW_NUMBER() OVER(PARTITION BY b.k2 ORDER BY b.dt) rn
+                 FROM dim.t_dim_a a, dim.t_dim_b b
+                 WHERE a.type = 'x' AND a.id = b.id) t
+           WHERE rn = 1) sub1
+  ON upper(s.col1) = sub1.k2"""
+
+
+class TestNestedWindowDict:
+    """三层嵌套字典：空壳行已修 + 嵌套块谓词归位（用户拍板）。
+
+    归位口径：双别名原子（a.id=b.id）→ 逗号关联行 ON；自身单别名 →
+    该行限制段；未消费原子（rn=1 收敛 / a.type='x' 主表过滤）→ 锚行
+    限定段，开窗沿用「窗口定义见定义原文」标注（定义片段逐字承载）。
+    """
+
+    def test_no_artifact_rows(self):
+        model = _model_of(_NESTED_WINDOW_SQL)
+        for r in model["sheet3"]:
+            assert "SUBQUERY" not in str(r[5]).upper(), r
+            assert not (not r[1] and not (r[6] or "").strip()), f"空壳行: {r}"
+
+    def test_anchor_row_carry_window_and_filter(self):
+        model = _model_of(_NESTED_WINDOW_SQL)
+        anchor = next(r for r in model["sheet3"] if r[3] == "t_dim_a")
+        g = anchor[6]
+        assert "UPPER(s.col1) = sub1.k2" in g
+        assert "rn = 1（开窗收敛，窗口定义见定义原文）" in g
+        assert "a.type = 'x'" in g, "内层主表过滤不再丢失"
+
+    def test_comma_join_atom_on_secondary(self):
+        model = _model_of(_NESTED_WINDOW_SQL)
+        b = next(r for r in model["sheet3"] if r[3] == "t_dim_b")
+        assert b[5] == "INNER JOIN"
+        assert "a.id = b.id" in (b[6] or ""), "逗号关联条件归位到 b 行"
+        assert "rn" not in (b[6] or ""), "开窗收敛条件不再张冠李戴到 b 行"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
