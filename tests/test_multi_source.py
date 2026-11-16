@@ -473,5 +473,73 @@ class TestNestedWindowDict:
         assert "rn" not in (b[6] or ""), "开窗收敛条件不再张冠李戴到 b 行"
 
 
+# ════════════════════════════════════════════════════════════
+# 多来源 × 嵌套子查询（2026-11-16 用户真实形态）：union 之后的公共规则
+# 里 LEFT JOIN 嵌套窗口字典——多来源路径复用标准路径的子查询承载
+# ════════════════════════════════════════════════════════════
+
+_MS_SUBQ_SQL1 = """SELECT a.bill_id, a.col1 FROM ods.src_a a WHERE a.dr = '0'
+UNION ALL
+SELECT b.bill_id, b.col1 FROM ods.src_b b WHERE b.status = '1'"""
+_MS_SUBQ_SQL2 = """SELECT t.bill_id, t.col1, sub1.k1, c.cust_name
+FROM fin.tmp_u t
+LEFT JOIN (SELECT tk.k1, tk.k2
+           FROM (SELECT b2.k1, b2.k2,
+                        ROW_NUMBER() OVER(PARTITION BY b2.k2 ORDER BY b2.dt) rn
+                 FROM dim.t_dim_a a2, dim.t_dim_b b2
+                 WHERE a2.type = 'x' AND a2.id = b2.id) tk
+           WHERE rn = 1) sub1
+  ON upper(t.col1) = sub1.k2
+LEFT JOIN dim.dim_cust c ON t.bill_id = c.bill_id"""
+
+
+def _ms_subq_model():
+    from spec_export import build_spec_model
+    rules = [
+        RawRule(rule_code="R1", rule_name="多来源", rule_type=1, exec_sequence=1,
+                target_schema="fin", target_table="tmp_u", delete_mode="1",
+                query_sql=_MS_SUBQ_SQL1),
+        RawRule(rule_code="R2", rule_name="公共字典关联", rule_type=1, exec_sequence=2,
+                target_schema="dwb", target_table="f_ms_sq", delete_mode="1",
+                query_sql=_MS_SUBQ_SQL2),
+    ]
+    knowledge, _ = analyze_pipeline(
+        rules, {}, {}, detect_dialect([_MS_SUBQ_SQL1, _MS_SUBQ_SQL2]),
+        source_file="x.xlsx")
+    return build_spec_model(knowledge, {})
+
+
+class TestMultiSourceWithSubquery:
+    """多来源路径的公共规则里 JOIN 子查询：空壳行不再漏出、关系与谓词
+    全量承载（标准路径同款块装配复用）、from_alias 不被子查询覆盖。"""
+
+    def test_no_artifact_and_from_alias_intact(self):
+        model = _ms_subq_model()
+        for r in model["sheet3"]:
+            assert "SUBQUERY" not in str(r[5]).upper(), f"空壳/伪型行: {r}"
+        # dim_cust 左表 = 合并集（from_alias 未被 (subquery:) 覆盖）
+        dim = next(r for r in model["sheet3"] if r[3] == "dim_cust")
+        assert dim[1] == "合并集" and dim[2] == "t"
+
+    def test_subq_carried_on_common_rows(self):
+        """sub1 字典：锚行（ON+开窗收敛+主表过滤）+ 逗号关联行，组=公共。"""
+        model = _ms_subq_model()
+        anchor = next(r for r in model["sheet3"] if r[3] == "t_dim_a")
+        assert anchor[7] == "公共" and anchor[5] == "LEFT JOIN"
+        g = anchor[6]
+        assert "UPPER(t.col1) = sub1.k2" in g
+        assert "rn = 1（开窗收敛，窗口定义见定义原文）" in g
+        assert "a2.type = 'x'" in g
+        b2 = next(r for r in model["sheet3"] if r[3] == "t_dim_b")
+        assert b2[5] == "INNER JOIN" and "a2.id = b2.id" in (b2[6] or "")
+        assert b2[7] == "公共"
+
+    def test_no_predicate_or_materialization_warnings(self):
+        model = _ms_subq_model()
+        types = [w["type"] for w in model["disclosures"]]
+        assert "predicate_missing_where" not in types
+        assert "materialization_trace" not in types
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -560,3 +560,20 @@ a.id=b.id 与 a.type='x' 丢失）：
 回归：TestNestedWindowDict 3 断言 + case_39_nested_window_dict 入 golden；
 case_27/28/32 快照 = 谓词从定义原文/错位处提升到离表近的行（预期改进）；
 914 全绿。
+
+### 多来源路径 × JOIN 子查询（2026-11-16 用户复测，f3296f3 遗漏面）
+
+用户指出：嵌套窗口字典的谓词归位只落在**标准路径**——多来源资产的公共
+规则（union 之后的下一步）里同样的子查询，在 `_multi_source_rows` 里
+JOIN_SUBQUERY_INNER 空壳行照漏、`(subquery:x)` 被当 FROM 跳过（关系丢失），
+且 from_alias 被子查询别名覆盖（后续关联左表错成 tmp 表名）。修复：
+
+- 多来源"其余步骤"循环补 JOIN 子查询承载：**块装配复用**（_slave_rows
+  同款，嵌套谓词归位/开窗标注自动生效，行组=公共），无块走 sq_index 兜底；
+  引擎展开条目（JOIN_SUBQUERY_INNER / FROM_SUBQUERY*）一并跳过；
+  `(subquery:x)` 仅 FROM 型才作 from_alias（覆盖 bug 修复）。
+- 守恒门 UNION 分支原子：剥 WHERE 前缀 + 首段冒号残留（来源行限制段是
+  裸条件形态，带前缀比对必失配）。
+
+回归：TestMultiSourceWithSubquery 3 断言（用户真实形态）+
+case_40_multi_source_subquery 入 golden；917 全绿，其余快照零 diff。

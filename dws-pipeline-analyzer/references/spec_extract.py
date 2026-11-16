@@ -653,10 +653,41 @@ def _multi_source_rows(ctx, usi) -> list:
             jst = j.get("source_table", "") or ""
             jt = (j.get("join_type", "") or "FROM").strip().upper()
             if jst.startswith("(subquery:"):
-                from_alias = j.get("alias", "") or from_alias
+                if jt in ("FROM", ""):
+                    from_alias = j.get("alias", "") or from_alias
+                    continue
+                # JOIN 子查询（多来源公共规则里，标准路径同款承载，2026-11-16）：
+                # 块装配（嵌套谓词归位见 _slave_rows）优先，无块走 sq_index 兜底；
+                # 引擎 JOIN_SUBQUERY_INNER 展开条目一并跳过（信息由块承载）
+                sub_al = j.get("alias", "")
+                lt, la = _downstream_left(j.get("join_condition", ""), pdf,
+                                          from_alias)
+                sb = next((b for b in _iter_blocks(pdf.get("data_blocks") or [])
+                           if b.get("alias") == sub_al
+                           and b.get("type") == "subquery"), None)
+                if sb is not None:
+                    step_rows.extend(
+                        r_ + ["公共"] for r_ in _slave_rows(
+                            sb, _MERGED_SET if lt == _MERGED_SET else (lt or ""),
+                            la or from_alias or "", "", sub_al,
+                            real_jt=j.get("real_join_type", ""), attached=[]))
+                    continue
+                sqi = _subquery_index(ctx).get(pid, {}).get(sub_al)
+                if sqi and sqi.get("main_table"):
+                    _, r_short = split_schema_table(sqi["main_table"])
+                    step_rows.append([None, lt or _MERGED_SET, la or from_alias,
+                                      r_short, sub_al,
+                                      _join_kind(j.get("real_join_type", "")),
+                                      sqi.get("on", ""), "公共"])
+                    for t_ in (sqi.get("table_list") or [])[1:]:
+                        _, t_short = split_schema_table(t_)
+                        step_rows.append([None, r_short, sqi.get("main_alias", ""),
+                                          t_short, "", "",
+                                          f"参与逻辑从表 {sub_al}，定义见 {r_short} 行",
+                                          "公共"])
                 continue
-            if jt.upper() == "FROM_SUBQUERY_MAIN":
-                continue
+            if "SUBQUERY" in jt:
+                continue    # 引擎展开条目（JOIN_SUBQUERY_INNER / FROM_SUBQUERY*）
             on = j.get("join_condition", "")
             if _is_intermediate_table(jst):
                 if idx == 0 or jt in ("FROM", ""):
@@ -722,7 +753,7 @@ def _cond_core_raw(cond: str) -> str:
 
 def _strip_merged_branch_marks(w: str) -> str:
     """合并 where 文本 → 可拆原子的谓词串（去 UNION ALL | / 分支N: 标记）。"""
-    out = re.sub(r"^[^|]*\|\s*", "", w or "")
+    out = re.sub(r"^[^|]*\|\s*[:\s]*", "", w or "")
     out = re.sub(r"(?i)分支\d+\s*:\s*", "", out)
     return out.strip()
 
@@ -1097,7 +1128,10 @@ def predicate_conservation(ctx, sheet3_rows: list, sheet4_rows: list) -> list:
                 _looks_union_merged_where(w):
             # 多来源合并文本（"UNION ALL | : …分支2: …"）：分支筛选已由
             # 来源行限制段逐分支承载 → 按分支原子校验，不比对合并整串
-            if not _atoms_conserved(_strip_merged_branch_marks(w)):
+            # （原子须剥 WHERE 前缀——来源行限制段是裸条件形态）
+            _w_atoms = re.sub(r"(?i)\bWHERE\s+", "",
+                              _strip_merged_branch_marks(w))
+            if not _atoms_conserved(_w_atoms):
                 warnings.append({
                     "type": "predicate_missing_where",
                     "title": f"谓词守恒：步骤 {label} 的 UNION 分支 WHERE "
