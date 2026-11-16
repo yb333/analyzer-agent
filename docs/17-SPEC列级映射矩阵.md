@@ -496,3 +496,28 @@ CTE/子查询的步骤切分是列加工载体，永不构成分组。
 UNION/分支内关联/键异名三合一）入 golden；tests/test_multi_source.py 15 断言
 （来源行/公共穿透/键同名公共/键异名展开/常量赋值/组合视图唯一/闭合/标准
 资产回归保护/引擎分支 where）。
+
+### 复测三修（2026-11-16，用户真实资产）
+
+1. **函数开头 ON 的左表解析**：`on upper(s.colx) = c1.code` 这类 ON，左表
+   提取用 `re.match` 只认开头 `别名.` → 失配解析为空。改 finditer 取**首个
+   可解析别名**（在本步骤别名表或合并集锚里有着落才算，函数名/包名不误配），
+   `_merged_left` / `_downstream_left` 双点修。
+2. **Oracle 旧式逗号 join 子查询**（`left join (select … from a ct, b mc
+   where ct.k=mc.k) sub1 on …`，存量不规范写法）：主查询 FROM 是子查询包裹
+   → 无 main 块 → sub1 关系整体丢失、逗号 join 条件错位挤进包裹限制段。
+   修复：① 引擎 `real_join_type`（子查询关联真实类型，join_type 伪型之外
+   的还原依据，加法字段）；② main 块缺失 → FROM 包裹主物理兜底；块未建 →
+   sq_index 兜底主关系行（关系不丢）；③ 逗号 join 条件（块 where）由首个
+   无 ON 的 secondary 行承载，INNER JOIN 等价改写，有定义原文时不重复挂
+   锚行；④ 块 where 落位后置去重（防错位副本残留在早渲染分支的限制段）；
+   ⑤ `JOIN_SUBQUERY_INNER` 空壳行（左表/条件全空）无条件过滤——其信息由
+   子查询块渲染承载。
+3. **多来源分支根行省略**（用户拍板：分组列已表达行路径，根行冗余）：
+   分支有关联行 → 根行不产出，驱动表由首关联行左表承载（实体注册），分支
+   行筛选并入其限制段；分支无关联行 → 根行保留（唯一承载位：实体注册 +
+   谓词守恒）。mapping 侧：来源组行的左表注册不标主表（多来源无单一主表）。
+
+回归：TestCommaJoinSubquery（4 断言）/ TestFunctionOnLeftResolution（2）/
+根行省略断言更新；case_38_comma_join_subquery 入 golden；case_27 只余引擎
+加法字段 diff、case_28 归零、case_37 为根行省略预期变化；908 全绿。

@@ -962,7 +962,7 @@
     "",
     "union_var_f",
     "",
-    "限制：a.dr = '0'",
+    "",
     "",
     "DWS"
    ],
@@ -977,7 +977,7 @@
     "",
     "union_var_f",
     "",
-    "LEFT JOIN: a.acct_no = c.cust_no",
+    "LEFT JOIN: a.acct_no = c.cust_no；限制：a.dr = '0'",
     "",
     "DWS"
    ],
@@ -992,7 +992,7 @@
     "",
     "union_var_f",
     "",
-    "限制：b.status = '1'",
+    "",
     "",
     "DWS"
    ],
@@ -1007,7 +1007,7 @@
     "",
     "union_var_f",
     "",
-    "LEFT JOIN: b.cust_no = c2.cust_no",
+    "LEFT JOIN: b.cust_no = c2.cust_no；限制：b.status = '1'",
     "",
     "DWS"
    ],
@@ -1022,7 +1022,7 @@
     "",
     "union_var_f",
     "",
-    "限制：d.tp = '9'",
+    "",
     "",
     "DWS"
    ],
@@ -1037,7 +1037,7 @@
     "",
     "union_var_f",
     "",
-    "LEFT JOIN: d.member_no = c3.cust_no",
+    "LEFT JOIN: d.member_no = c3.cust_no；限制：d.tp = '9'",
     "",
     "DWS"
    ]

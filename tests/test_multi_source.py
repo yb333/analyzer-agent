@@ -202,15 +202,23 @@ def _variant_model():
 
 
 class TestBranchJoinAndKeyVariant:
-    """分支内关联按组（形态2）+ 键异名展开（形态3）。"""
+    """分支内关联按组（形态2）+ 键异名展开（形态3）。
+
+    根行省略拍板（2026-11-16）：分支有关联行时根行不产出——分组列已表达
+    行路径，驱动表由首关联行左表承载，分支行筛选并入其限制段；无关联行
+    时根行保留（唯一承载位：实体注册 + 谓词守恒）。
+    """
 
     def test_branch_joins_labeled_by_group(self):
         model = _variant_model()
         dim_rows = [r for r in model["sheet3"] if r[3] == "dim_cust"]
         assert len(dim_rows) == 2, "dim_cust 两分支各关联一次，按组两行"
         assert {r[7] for r in dim_rows} == {"来源1", "来源2"}
-        assert dim_rows[0][6] == "a.acct_no = c.cust_no"
-        assert dim_rows[1][6] == "b.cust_no = c2.cust_no"
+        assert dim_rows[0][6] == "a.acct_no = c.cust_no；限制：a.dr = '0'"
+        assert dim_rows[1][6] == "b.cust_no = c2.cust_no；限制：b.status = '1'"
+        # 根行省略：无 多来源(UNION ALL) 行（分支都有关联行）
+        assert not [r for r in model["sheet3"]
+                    if r[5] == "多来源(UNION ALL)"]
 
     def test_key_field_per_group(self):
         """join_key 按组拆行（本地字段名不同=有信息）。"""
@@ -226,6 +234,12 @@ class TestBranchJoinAndKeyVariant:
             rows = [r for r in model["sheet4"] if r[10] == fld]
             assert len(rows) == 1 and rows[0][13] == "公共"
             assert rows[0][3] == "c、c2"
+
+    def test_root_row_kept_when_no_branch_join(self, user_model):
+        """分支无关联行（用户 10 来源案例形态）→ 根行保留：唯一承载位。"""
+        src_rows = [r for r in user_model["sheet3"]
+                    if r[5] == "多来源(UNION ALL)"]
+        assert len(src_rows) == 10
 
 
 # ════════════════════════════════════════════════════════════
@@ -274,6 +288,103 @@ SELECT b.x FROM ods.t2 b WHERE b.g = '2'"""
         ubs = knowledge["data_flow"]["steps"][0]["union_branches"]
         assert ubs[0]["where"] == "WHERE a.f = '1'", ubs[0].get("where")
         assert ubs[1]["where"] == "WHERE b.g = '2'", ubs[1].get("where")
+
+
+# ════════════════════════════════════════════════════════════
+# 用户复测三问题（2026-11-16）：函数开头 ON / 逗号 join 子查询 / 根行省略
+# ════════════════════════════════════════════════════════════
+
+_COMMA_SUBQ_SQL = """SELECT s.cust_id, sub1.type_name, sub1.mc_name
+FROM (SELECT t1.cust_id, t1.p FROM ods.t1 t1 WHERE t1.dr = '0') s
+LEFT JOIN (SELECT ct.type_name, mc.mc_name, ct.d
+           FROM dim.dim_type ct, dim.dim_mc mc
+           WHERE ct.mc_id = mc.mc_id) sub1
+  ON upper(s.p) = sub1.d"""
+
+
+def _model_of(sql):
+    from spec_export import build_spec_model
+    rules = [RawRule(rule_code="R1", rule_name="s", rule_type=1, exec_sequence=1,
+                     target_schema="dwb", target_table="f_x", delete_mode="1",
+                     query_sql=sql)]
+    knowledge, _ = analyze_pipeline(rules, {}, {}, detect_dialect([sql]),
+                                    source_file="x.xlsx")
+    return build_spec_model(knowledge, {})
+
+
+class TestCommaJoinSubquery:
+    """问题2（用户真实形态）：Oracle 旧式逗号 join 子查询。
+
+    此前缺陷：主查询 FROM 是子查询包裹 → 无 main 块 → sub1 关系整体丢失，
+    逗号 join 条件错位挤进包裹限制段；且 JOIN_SUBQUERY_INNER 空行可能漏出。
+    """
+
+    def test_subq_relation_rendered_with_real_type(self):
+        model = _model_of(_COMMA_SUBQ_SQL)
+        row = next(r for r in model["sheet3"] if r[3] == "dim_type")
+        assert row[5] == "LEFT JOIN", "真实类型（引擎 real_join_type），非空非伪型"
+        assert row[6] == "UPPER(s.p) = sub1.d"
+        assert row[1] == "t1", "左表 = FROM 包裹主物理（main 块缺失兜底）"
+
+    def test_comma_join_carried_as_inner_row(self):
+        """逗号 join（from a,b where …）→ 内层关联行：INNER JOIN + 块 where 条件。"""
+        model = _model_of(_COMMA_SUBQ_SQL)
+        mc = next(r for r in model["sheet3"] if r[3] == "dim_mc")
+        assert mc[5] == "INNER JOIN"
+        assert "ct.mc_id = mc.mc_id" in (mc[6] or "")
+
+    def test_no_subquery_artifact_rows(self):
+        """JOIN_SUBQUERY_INNER 空行（左表/条件全空）不存在——信息由块渲染承载。"""
+        model = _model_of(_COMMA_SUBQ_SQL)
+        for r in model["sheet3"]:
+            assert "SUBQUERY" not in str(r[5]).upper(), r
+            assert not (str(r[5]).upper().startswith("JOIN") and not (r[6] or "").strip()
+                        and not r[1]), f"空壳关联行: {r}"
+
+    def test_no_misplaced_where(self):
+        """逗号 join 条件不再错位进包裹（s）限制段。"""
+        model = _model_of(_COMMA_SUBQ_SQL)
+        s_row = next(r for r in model["sheet3"] if str(r[3]).startswith("虚拟逻辑表"))
+        assert "mc.mc_id" not in (s_row[6] or ""), s_row[6]
+
+
+_FUNC_ON_SQL = """SELECT u.bill_id, u.colx, c1.code_name
+FROM (SELECT a.bill_id, a.colx FROM ods.src_a a WHERE a.dr = '0'
+      UNION ALL
+      SELECT b.bill_id, b.colx FROM ods.src_b b WHERE b.status = '1') u
+LEFT JOIN dim.dim_a c1 ON upper(u.colx) = c1.code AND c1.type = 'xxx'"""
+
+
+class TestFunctionOnLeftResolution:
+    """问题1：ON 以函数开头（upper(s.colx)=c1.code）时左表解析不再为空。"""
+
+    def test_merged_left_with_func_on(self):
+        model = _model_of(_FUNC_ON_SQL)
+        dim = next(r for r in model["sheet3"] if r[3] == "dim_a")
+        assert dim[1] == "合并集", f"函数开头 ON 应仍解析出合并集左表，实际 {dim[1]!r}"
+        assert dim[6] == "UPPER(u.colx) = c1.code AND c1.type = 'xxx'"
+
+    def test_downstream_left_with_func_on(self):
+        """下游步骤（合并 tmp 承载别名）函数开头 ON：左表=合并集。"""
+        sql = """SELECT u.bill_id, u.colx FROM (SELECT a.bill_id, a.colx FROM ods.src_a a
+      UNION ALL SELECT b.bill_id, b.colx FROM ods.src_b b) u"""
+        sql5 = ("SELECT t.bill_id, t.colx, c1.code_name FROM fin.tmp_u t "
+                "LEFT JOIN dim.dim_a c1 ON upper(t.colx) = c1.code AND c1.type = 'xxx'")
+        from spec_export import build_spec_model
+        rules = [
+            RawRule(rule_code="R1", rule_name="s1", rule_type=1, exec_sequence=1,
+                    target_schema="fin", target_table="tmp_u", delete_mode="1",
+                    query_sql=sql),
+            RawRule(rule_code="R2", rule_name="s2", rule_type=1, exec_sequence=2,
+                    target_schema="dwb", target_table="f_f", delete_mode="1",
+                    query_sql=sql5),
+        ]
+        knowledge, _ = analyze_pipeline(
+            rules, {}, {}, detect_dialect([sql, sql5]), source_file="x.xlsx")
+        model = build_spec_model(knowledge, {})
+        dim = next(r for r in model["sheet3"] if r[3] == "dim_a")
+        assert dim[1] == "合并集", f"实际左表 {dim[1]!r}"
+        assert dim[2] == "t"
 
 
 if __name__ == "__main__":

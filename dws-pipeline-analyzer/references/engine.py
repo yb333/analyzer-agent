@@ -269,6 +269,7 @@ class ParsedJoin:
     subquery_sql: str = ""  # 子查询的完整 SQL（仅子查询类型）
     subquery_tables: list = field(default_factory=list)
     subquery_role: str = ""  # 主表(FROM) 或 从表(JOIN)
+    real_join_type: str = ""  # 子查询关联的真实类型（LEFT/INNER…；join_type 是伪型时兜底用）
 
 
 @dataclass
@@ -1475,6 +1476,12 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
             join_condition = on_node.sql(dialect="oracle") if on_node else ""
             sub_sql2 = join_expr.sql(dialect="oracle")
             sub_tables2 = _extract_subquery_tables(join_expr)
+            # 真实关联类型（join_type 伪型 JOIN_SUBQUERY 之外的还原依据，
+            # 与普通 JOIN 分支同口径）
+            _jk = join_node.args.get("kind", "")
+            _js = join_node.args.get("side", "")
+            _real_jt = (f"{_js} JOIN".upper() if _js else
+                        f"{_jk} JOIN".upper() if _jk else "INNER JOIN")
             joins.append(ParsedJoin(
                 source_table=f"(subquery:{sub_alias})",
                 alias=sub_alias or "sub",
@@ -1483,6 +1490,7 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
                 subquery_sql=sub_sql2,
                 subquery_tables=sub_tables2,
                 subquery_role="从表",
+                real_join_type=_real_jt,
             ))
             # 透传规则：子查询是从表 → 内部所有表都是从表(JOIN_SUBQUERY_INNER)
             for inner_table_name, inner_alias, _inner_role in sub_tables2:
@@ -2304,6 +2312,8 @@ def _build_join_paths(joins: list) -> dict:
                 "subquery_sql": j.subquery_sql,
                 "subquery_tables": j.subquery_tables,
                 "subquery_role": j.subquery_role,
+                **({"real_join_type": j.real_join_type}
+                   if j.real_join_type else {}),
             }
         elif j.join_type != "FROM":
             # 普通 JOIN
@@ -2391,6 +2401,8 @@ def _build_join_paths(joins: list) -> dict:
             "subquery_tables": info.get("subquery_tables", []),
             "subquery_role": info.get("subquery_role", ""),
             "path": path,
+            **({"real_join_type": info["real_join_type"]}
+               if info.get("real_join_type") else {}),
         }
 
     # 子查询内部表也加入（无路径）
@@ -4755,6 +4767,8 @@ def build_data_flow(
                     "alias": j.alias,
                     "join_type": j.join_type,
                     "join_condition": j.join_condition,
+                    **({"real_join_type": j.real_join_type}
+                       if j.real_join_type else {}),
                 }
                 for j in parsed.source_tables
             ],

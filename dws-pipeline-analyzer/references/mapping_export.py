@@ -387,18 +387,22 @@ def _to_entity_rows(sheet3: list, ctx, catalog_idx: dict) -> list:
             # 标准关联行：左表首引用 → 先注册主表行（按表×别名）。
             # 【b 内】标记 = 子查询块内行：其左表是块内驱动表，不是目标表主表
             # ——main=False（块内语义在该块首行 ON 上，备注不占主表位）。
-            # 合并集 = 多来源合并行集呈现名（docs/17 §十四），不是物理表不注册
+            # 合并集 = 多来源合并行集呈现名（docs/17 §十四），不是物理表不注册；
+            # 来源组行的左表（分支驱动表）不标主表（根行省略后由此承载注册）
             left_tbl = (r[1] or "").split(".")[-1]
             m_block = re.match(r"【(\w+)\s+内】", r[6] or "")
+            _grp = _r_group(r)
+            _is_src_grp = _grp not in ("", "默认", "公共", None)
             if m_block:
                 _register(left_tbl, r[2] or "", f"【{m_block.group(1)} 内】",
-                          group=_r_group(r))
+                          group=_grp)
             else:
-                _register(left_tbl, r[2] or "", "", main=True, group=_r_group(r))
+                _register(left_tbl, r[2] or "", "", main=not _is_src_grp,
+                          group=_grp)
             kind = r[5] or ""
             _register(r[3] or "", r[4] or "",
                       f"{kind}: {r[6] or ''}" if r[6] else kind,
-                      group=_r_group(r))
+                      group=_grp)
 
     # 虚拟逻辑表段并入驱动表行（驱动表未注册过则此时补注册为主表）；
     # 纯交叉引用段（"【x 内】关联见上"，SPEC 行间导航语）不进 mapping
