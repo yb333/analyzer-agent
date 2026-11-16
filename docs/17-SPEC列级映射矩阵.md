@@ -521,3 +521,20 @@ UNION/分支内关联/键异名三合一）入 golden；tests/test_multi_source.
 回归：TestCommaJoinSubquery（4 断言）/ TestFunctionOnLeftResolution（2）/
 根行省略断言更新；case_38_comma_join_subquery 入 golden；case_27 只余引擎
 加法字段 diff、case_28 归零、case_37 为根行省略预期变化；908 全绿。
+
+### 复测三修·续（2026-11-16 用户两点）
+
+1. **无关联分支与单一场景同构（E1 化）**：「多来源(UNION ALL)」关联方式
+   标签退役——分支无关联行时驱动表走 E1 式表行（右表=占位、关联方式空、
+   分组=来源N、限制段=分支行筛选），行路径由分组列唯一表达；有关联行时
+   根行省略（上条已落）。mapping：来源组行不标主表（E1 注册路径同判）。
+2. **逗号 join 进质量评估**（质量问题需体现并提醒优化）：引擎 AST 全层级
+   （外层/子查询/CTE/UNION 分支）扫描旧式 `from a, b where …`（sqlglot 渲染
+   逗号前缀 Join 节点）→ `ParsedSQL.comma_join_tables` → quality 新 issue
+   （severity medium / category code_quality，与 (+) 语法检测同族）：
+   「非标准关联写法：逗号 join——建议改为 ANSI JOIN」，html/tech_design
+   质量部分自动渲染；同时**「JOIN 缺少 ON 条件」对逗号表不再误报**
+   （关联条件在 WHERE 里，不是缺条件）。
+
+回归：TestCommaJoinQuality（3 断言：外层检出/子查询内检出/ANSI 不误报）
++ 根行 E1 化断言更新；case_38 快照 = 新质量 issue 预期出现；911 全绿。

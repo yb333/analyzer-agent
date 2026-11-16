@@ -72,11 +72,13 @@ class TestUserCaseSheet3:
     """表关联：来源组行 + 公共行（8 列，分组垫尾）。"""
 
     def test_source_rows_with_branch_filters(self, user_model):
-        """10 张来源表各一行：多来源(UNION ALL) + 分支行筛选限制段 + 来源N。
+        """10 张来源表各一行：与单一场景无关联表同构（E1 式，关联方式空，
+        2026-11-16 拍板——「多来源(UNION ALL)」标签退役，行路径归分组列）。
         布局 = E1 式（驱动表在左位 r[1]，右位占位符）。"""
         src_rows = [r for r in user_model["sheet3"]
-                    if r[5] == "多来源(UNION ALL)"]
+                    if r[7] and r[7].startswith("来源") and (r[3] or "").startswith("—")]
         assert len(src_rows) == 10, f"应 10 来源行，实际 {len(src_rows)}"
+        assert all(r[5] == "" for r in src_rows), "E1 同构：关联方式列空"
         assert [r[1] for r in src_rows] == [f"src_{c}" for c in "abcdefghij"]
         assert [r[7] for r in src_rows] == [f"来源{i}" for i in range(1, 11)]
         assert all("dr = '0'" in (r[6] or "") for r in src_rows)
@@ -236,9 +238,10 @@ class TestBranchJoinAndKeyVariant:
             assert rows[0][3] == "c、c2"
 
     def test_root_row_kept_when_no_branch_join(self, user_model):
-        """分支无关联行（用户 10 来源案例形态）→ 根行保留：唯一承载位。"""
+        """分支无关联行（用户 10 来源案例形态）→ E1 式表行保留：
+        实体注册 + 谓词守恒唯一承载位（关联方式空，分组=来源N）。"""
         src_rows = [r for r in user_model["sheet3"]
-                    if r[5] == "多来源(UNION ALL)"]
+                    if r[7] and r[7].startswith("来源") and (r[3] or "").startswith("—")]
         assert len(src_rows) == 10
 
 
@@ -385,6 +388,44 @@ class TestFunctionOnLeftResolution:
         dim = next(r for r in model["sheet3"] if r[3] == "dim_a")
         assert dim[1] == "合并集", f"实际左表 {dim[1]!r}"
         assert dim[2] == "t"
+
+
+class TestCommaJoinQuality:
+    """逗号 join 质量提示（2026-11-16 用户需求）：旧式写法是质量问题，
+    质量评估须体现并提醒优化；对逗号表不再误报「JOIN 缺少 ON 条件」。"""
+
+    def _quality(self, sql):
+        rules = [RawRule(rule_code="R1", rule_name="s", rule_type=1, exec_sequence=1,
+                         target_schema="dwb", target_table="f_cj", delete_mode="1",
+                         query_sql=sql)]
+        knowledge, _ = analyze_pipeline(rules, {}, {}, detect_dialect([sql]),
+                                        source_file="x.xlsx")
+        return knowledge["quality"]["issues"]
+
+    def test_top_level_comma_join_flagged(self):
+        iss = self._quality(
+            "SELECT x.cust_id, y.tag FROM ods.t1 x, ods.t2 y "
+            "WHERE x.k = y.k AND x.dr = '0'")
+        cj = [i for i in iss if "逗号 join" in i["title"]]
+        assert len(cj) == 1
+        assert cj[0]["severity"] == "medium"
+        assert cj[0]["category"] == "code_quality"
+        assert "ANSI JOIN" in cj[0]["title"]
+        assert "ods.t2" in (cj[0].get("description") or "")
+        assert not any("缺少 ON" in i["title"] for i in iss), "逗号表不误报缺 ON"
+
+    def test_subquery_comma_join_flagged(self):
+        iss = self._quality(
+            "SELECT s.cust_id, sub1.type_name FROM (SELECT t1.cust_id, t1.p FROM ods.t1 t1) s "
+            "LEFT JOIN (SELECT ct.type_name, ct.d FROM dim.dim_type ct, dim.dim_mc mc "
+            "WHERE ct.mc_id = mc.mc_id) sub1 ON upper(s.p) = sub1.d")
+        assert any("逗号 join" in i["title"] for i in iss)
+
+    def test_ansi_join_not_flagged(self):
+        iss = self._quality(
+            "SELECT a.cust_id, b.tag FROM ods.t1 a LEFT JOIN ods.t2 b ON a.k = b.k")
+        assert not any("逗号 join" in i["title"] for i in iss)
+        assert not any("缺少 ON" in i["title"] for i in iss)
 
 
 if __name__ == "__main__":

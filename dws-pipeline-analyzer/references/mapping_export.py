@@ -369,17 +369,16 @@ def _to_entity_rows(sheet3: list, ctx, catalog_idx: dict) -> list:
         return (r[7] or "") if len(r) > 7 else ""
 
     for r in sheet3:
-        if r[5] == "多来源(UNION ALL)":
-            # 多来源驱动行（docs/17 §十四）：分支驱动表，分组=来源N，
-            # 行筛选在限制段；不占主表位（多来源没有单一主表）
-            _register(r[1] or "", r[2] or "", r[6] or "", group=_r_group(r))
-        elif r[5] == "主表":
+        if r[5] == "主表":
             # tmp 链主表行：r[2]=表名、r[3]=别名（SPEC 特有布局）
             _register(r[2] or "", r[3] or "", r[6] or "", main=True,
                       group=_r_group(r))
         elif (r[3] or "").startswith("—"):
-            # E1 单表行：r[1]=表名、r[2]=别名（右表是占位符）
-            _register(r[1] or "", r[2] or "", r[6] or "", main=True,
+            # E1 单表行（含多来源无关联分支——与单一场景同构，分组列=
+            # 来源N 表达行路径）：r[1]=表名、r[2]=别名（右表是占位符）；
+            # 来源组行不标主表（多来源没有单一主表）
+            _register(r[1] or "", r[2] or "", r[6] or "",
+                      main=_r_group(r) in ("", "默认", "公共"),
                       group=_r_group(r))
         elif (r[3] or "").startswith("虚拟逻辑表"):
             continue  # 预扫已归集，段随后并入驱动表主表行

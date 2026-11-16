@@ -270,6 +270,7 @@ class ParsedJoin:
     subquery_tables: list = field(default_factory=list)
     subquery_role: str = ""  # 主表(FROM) 或 从表(JOIN)
     real_join_type: str = ""  # 子查询关联的真实类型（LEFT/INNER…；join_type 是伪型时兜底用）
+    via_comma: bool = False  # 逗号 join（Oracle 旧式 from a, b）——关联条件在 WHERE
 
 
 @dataclass
@@ -306,6 +307,9 @@ class ParsedSQL:
     #               "source_tables": [ParsedJoin...], "columns": [ParsedColumn...],
     #               "alias_table_map": {ALIAS(UPPER): physical_table}}
     union_branches: list = field(default_factory=list)
+    # 逗号 join（Oracle 旧式 from a, b where …）涉及的表——AST 全层级扫描
+    # （外层/子查询/CTE/UNION 分支），质量评估 code_quality 提示用
+    comma_join_tables: list = field(default_factory=list)
     # 字段使用信息（关联/过滤/分组）
     join_usage: list = field(default_factory=list)
     where_usage: list = field(default_factory=list)
@@ -986,11 +990,26 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
         return result
 
     try:
+        # ── 逗号 join 表清单（AST 全层级：外层/子查询/CTE/UNION 分支；
+        #    sqlglot 对旧式 from a, b 生成无 kind/side/on、渲染带逗号前缀的
+        #    Join 节点）——质量评估 code_quality 提示（analyze_quality 消费）──
+        _comma_tbls = []
+        try:
+            for _jn in tree.find_all(exp.Join):
+                if not _jn.sql(dialect=sqlglot_dialect).lstrip().startswith(","):
+                    continue
+                for _t in _jn.find_all(exp.Table):
+                    _comma_tbls.append(
+                        ".".join(_clean_name(p.name) for p in _t.parts))
+        except Exception:
+            pass
+
         # ── 检测 UNION/INTERSECT/EXCEPT（SetOperation）──
         if isinstance(tree, (exp.Union, exp.Intersect, exp.Except)):
             r = _parse_set_operation(tree, sqlglot_dialect, comment_alias_map, sql)
             r.has_star = result.has_star
             r.clean_sql = clean  # 传递 clean_sql
+            r.comma_join_tables = _comma_tbls
             # 用 QueryUnit 递归补充 JOIN/WHERE（顶层 UNION 分支的遗漏）
             _enhance_with_query_unit(r, tree, sqlglot_dialect, comment_alias_map)
             return r
@@ -1004,6 +1023,7 @@ def parse_single_sql(sql: str, dialect: str = "dws") -> ParsedSQL:
         r = _parse_select(tree, select_node, sqlglot_dialect, comment_alias_map, sql)
         r.has_star = result.has_star
         r.clean_sql = clean  # 传递 clean_sql
+        r.comma_join_tables = _comma_tbls
         # 用 QueryUnit 递归补充（CTE 内部结构、UNION 分支等遗漏）
         _enhance_with_query_unit(r, tree, sqlglot_dialect, comment_alias_map)
         return r
@@ -1528,11 +1548,17 @@ def _extract_joins(tree, select_node) -> list[ParsedJoin]:
         on_node = join_node.args.get("on")
         join_condition = on_node.sql(dialect=sqlglot_dialect) if on_node else ""
 
+        # 逗号 join（Oracle 旧式 from a, b）：sqlglot 的 Join 节点渲染以逗号
+        # 开头、无 kind/side/on——关联条件在 WHERE，质量评估另判（非缺 ON）
+        _via_comma = join_condition == "" and not join_kind and not join_side \
+            and join_node.sql(dialect=sqlglot_dialect).lstrip().startswith(",")
+
         joins.append(ParsedJoin(
             source_table=table_name,
             alias=alias or table_name.split(".")[-1],
             join_type=jt,
             join_condition=join_condition,
+            via_comma=_via_comma,
         ))
 
     return joins
@@ -4418,6 +4444,10 @@ def analyze_quality(
             # Oracle (+) 逗号关联的表（条件在 WHERE 里）
             if j.source_table in plus_join_tables:
                 continue
+            # 逗号 join（旧式 from a, b）：关联条件在 WHERE，不是缺 ON——
+            # 由 1c 按非标准写法提示，不按 critical 缺陷误报
+            if getattr(j, "via_comma", False):
+                continue
             # join_condition 可能为 USING 形式或 ON 形式，检查 SQL 里是否有 USING
             if not j.join_condition and raw_sql_check:
                 # 检查是不是 USING 语法（sqlglot 不设 join_condition 但 SQL 有 USING）
@@ -4447,6 +4477,27 @@ def analyze_quality(
                 "category": "code_quality",
                 "title": f"使用 Oracle (+) 外关联语法（{plus_count}处），建议改用标准 LEFT JOIN",
                 "description": "(+) 是 Oracle 老式外关联语法，DWS 虽兼容但可读性差、易出错，建议改用标准 JOIN ... LEFT OUTER JOIN ... ON 语法",
+                "rule_code": rc,
+                "step_id": step_id,
+            })
+
+        # 1b-2. 逗号 join 检测（旧式 from a, b where …，存量不规范写法）——
+        # 非标准关联写法，建议改 ANSI JOIN（2026-11-16 用户需求：质量问题
+        # 需在质量评估中体现并提醒优化；AST 全层级扫描，含子查询/CTE 内部）
+        if getattr(parsed, "comma_join_tables", None):
+            _cj_tbls = parsed.comma_join_tables
+            _cj_show = "、".join(dict.fromkeys(_cj_tbls))
+            issue_id += 1
+            issues.append({
+                "id": f"ISS_{issue_id:03d}",
+                "severity": "medium",
+                "category": "code_quality",
+                "title": (f"非标准关联写法：逗号 join（{len(_cj_tbls)} 处 FROM "
+                          f"逗号并列，关联条件写在 WHERE）——建议改为 ANSI JOIN"),
+                "description": (f"涉及表：{_cj_show}。逗号 join 是 Oracle 旧式写法，"
+                                "关联语义隐藏在 WHERE 中（漏写条件即变笛卡尔积），"
+                                "可读性与安全性差，建议改为标准 "
+                                "JOIN ... ON 写法"),
                 "rule_code": rc,
                 "step_id": step_id,
             })

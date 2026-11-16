@@ -358,7 +358,8 @@ def _chain_group_segments(ctx, exclude=None) -> list:
 # 多来源分组渲染（docs/17 §十四：分组 = 行的产出路径）
 # ════════════════════════════════════════════════════════════
 
-_MULTI_SOURCE_KIND = "多来源(UNION ALL)"
+# 「多来源(UNION ALL)」关联方式标签已退役（2026-11-16 用户拍板）：
+# 行路径由分组列（来源N/公共）表达，无关联分支与单一场景 E1 同构
 _MERGED_SET = "合并集"
 
 
@@ -389,7 +390,7 @@ def _multi_source_rows(ctx, usi) -> list:
         if g["joins"]:
             # 分支有关联行：根行省略（2026-11-16 用户拍板——分组列已表达行
             # 路径，驱动表由首关联行左表承载实体注册，分支行筛选并入其
-            # 限制段；无关联行时根行是唯一承载位，保留）
+            # 限制段）
             first = g["joins"][0]
             g_parts = [p for p in [first.get("on", ""),
                                    f"限制：{g['where']}" if g.get("where") else ""]
@@ -402,9 +403,11 @@ def _multi_source_rows(ctx, usi) -> list:
                              j["alias"], _join_kind(j["join_type"]),
                              j.get("on", ""), g["label"]])
             continue
+        # 分支无关联行：与单一场景无关联表同构（E1 式表行，关联方式空，
+        # 分组列=来源N 表达行路径——「多来源(UNION ALL)」标签退役）
         parts = [f"限制：{g['where']}"] if g.get("where") else []
         rows.append([None, _short(tbl_full), al, _NO_JOIN_PLACEHOLDER, None,
-                     _MULTI_SOURCE_KIND, "；".join(parts), g["label"]])
+                     "", "；".join(parts), g["label"]])
 
     # ── tmp 链素材（穿透）：驱动表 + 链限定 + 内联关联 + 深层链 ──
     consumed: set = set()
