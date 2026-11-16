@@ -272,13 +272,104 @@ def _producer_of(ctx, table_full: str):
     return hits[0]
 
 
-def _tmp_chain_index(ctx) -> dict:
+# ════════════════════════════════════════════════════════════
+# tmp 链结构唯一收集器（统一装配管线，2026-11-16 架构收敛）
+# ════════════════════════════════════════════════════════════
+
+def _chain_material(ctx, tmp_full, seen=None, consumer_alias="",
+                    exclude_steps=()):
+    """tmp 产消链 → 结构节点树（唯一收集器，两条渲染形态共用）。
+
+    节点 = 一个 tmp 的生产步素材：
+        {step_id, driving:(表,别名), inner:[{table,alias,on,join_type,layer}],
+         wheres:[该生产步 WHERE], deeper:[子链节点], mount:{anchor,sql}}
+    - driving：该生产步的物理驱动（FROM 首表）
+    - inner.layer：该表所在生产步的消费锚别名（标准链渲染【锚 内】用）
+    - deeper：生产步自消费的**全部** tmp（并列子链；标准链渲染只跟首条
+      ——_chain_first_path，行为与旧 visit 一致）
+    - mount：定义原文逐字（anchor=消费锚）；mounts 深层在前 = 后序遍历
+    - exclude_steps：豁免步骤（union 步——其内容由来源组段承载，不进链）
+    """
+    prod = _producer_of(ctx, tmp_full)
+    if prod is None:
+        return None
+    seen = seen if seen is not None else set()
+    pid = prod.get("step_id", "")
+    if pid in seen or pid in exclude_steps:
+        return None
+    seen.add(pid)
+    pdf = ctx.df_step(pid)
+    driving, inner, wheres = ("", ""), [], []
+    w = ctx.step_where(pid)
+    if w:
+        wheres.append(w)
+    deeper = []
+    for j in pdf.get("joins", []):
+        jst = j.get("source_table", "")
+        if not jst or jst.startswith("(subquery:"):
+            continue
+        if _is_intermediate_table(jst):
+            d = _chain_material(ctx, jst, seen, j.get("alias", ""),
+                                exclude_steps)
+            if d is not None:
+                deeper.append(d)
+            continue
+        jt_ = (j.get("join_type", "") or "FROM").strip().upper()
+        if jt_ in ("FROM", "") and not driving[0]:
+            driving = (jst, j.get("alias", ""))
+        else:
+            inner.append({"table": jst, "alias": j.get("alias", ""),
+                          "on": j.get("join_condition", ""),
+                          "join_type": j.get("join_type", ""),
+                          "layer": consumer_alias})
+    # 聚合中间层可无物理驱动（FROM tmp 单表聚合）——driving 由深层提供
+    # （旧 visit 的跨层继承语义），渲染侧后序取首个非空（_chain_walk /
+    # _chain_node_rows）；无任何物理驱动的链由调用侧丢弃
+    return {"step_id": pid, "driving": driving, "inner": inner,
+            "wheres": wheres, "deeper": deeper,
+            "mount": {"anchor": consumer_alias, "sql": pdf.get("raw_sql", "")}}
+
+
+def _chain_first_path(node: dict) -> dict:
+    """链节点树 → 首路径（每层只保留 deeper[0]，与旧 visit 语义一致）。"""
+    return {**node, "deeper": ([_chain_first_path(node["deeper"][0])]
+                               if node["deeper"] else [])}
+
+
+def _chain_walk(node: dict):
+    """链节点树（首路径）→ 旧索引形态 {driving, mounts, inner, producer_ids}。
+
+    mounts 深层在前（后序）；producer_ids 深度优先序；driving = 最深节点。
+    """
+    mounts, inner, ids = [], [], []
+    driving = node["driving"]
+
+    def _rec(n):
+        nonlocal driving
+        ids.append(n["step_id"])
+        inner.extend({**i, "anchor": i["layer"]} for i in n["inner"])
+        for d in n["deeper"]:
+            _rec(d)
+        mounts.append(n["mount"])
+        if n["driving"][0]:
+            driving = n["driving"]    # 后序：最深层非空驱动胜出（旧 visit 语义）
+
+    _rec(node)
+    return {"driving": driving, "mounts": mounts, "inner": inner,
+            "producer_ids": ids}
+
+
+def _tmp_chain_index(ctx, exclude_steps=()) -> dict:
     """跨规则 tmp 产消链 → 物化无关挂载模型（旗舰形态：终端步骤主 FROM 是 tmp）。
+
+    exclude_steps：豁免步骤（union 步——其输出是合并结果、由来源组段承载，
+    不作为链头挂载，2026-11-16 统一装配管线）。
 
     压平规则（内联等价）：tmp 链呈现为「逻辑从表」——锚 = 消费 SQL 引用它的别名
     （tmp 表名永不进登记值）；定义片段 = 各生产步 query_sql 逐字（多跳 = 嵌套锚，
     深层在前同挂载位）；驱动表 = 最深层生产步的首物理表（定义挂载行）；
     生产步内的物理 JOIN 表 → 每表一行素材（【锚 内】ON 原文 + 指回驱动表行）。
+    结构收集 = _chain_material（唯一收集器）；本函数只做终端选择与首路径投影。
 
     Returns: {终端step_id: {
         "driving": (表全名, 别名),            # 主表行（含定义挂载）
@@ -298,7 +389,7 @@ def _tmp_chain_index(ctx) -> dict:
         # 双链重复体（2026-11-10）：增量链终端与全量链共享全部结构，不重复
         # 挂载——其差异（增量谓词/字段差）由 chains 结构承载、经
         # 「增量链限制」段落位（共底座 + 差分标注）
-        if _incr_codes and s.get("rule_code") in _incr_codes:
+        if _incr_codes and s.get("rule_code", "") in _incr_codes:
             continue
         joins = ctx.df_step(sid).get("joins") or []
         if not joins:
@@ -308,44 +399,12 @@ def _tmp_chain_index(ctx) -> dict:
             continue
         if _producer_of(ctx, first) is None:
             continue
-        mounts, inner, producer_ids, seen = [], [], [], set()
-        driving = ["", ""]
-
-        def visit(tmp_full, consumer_alias):
-            prod = _producer_of(ctx, tmp_full)
-            if prod is None or prod.get("step_id") in seen:
-                return
-            seen.add(prod.get("step_id"))
-            producer_ids.append(prod.get("step_id"))
-            pdf = ctx.df_step(prod.get("step_id"))
-            pjoins = pdf.get("joins") or []
-            deeper = next((j for j in pjoins
-                           if j.get("source_table")
-                           and _is_intermediate_table(j["source_table"])), None)
-            if deeper is not None:
-                visit(deeper["source_table"], deeper.get("alias", ""))
-            # 深层已入列，自身片段随后（保证 mounts 深层在前）
-            mounts.append({"anchor": consumer_alias,
-                           "sql": pdf.get("raw_sql", "")})
-            for j in pjoins:
-                jst = j.get("source_table", "")
-                if (not jst or jst.startswith("(subquery:")
-                        or _is_intermediate_table(jst)):
-                    continue
-                if (j.get("join_type") or "FROM") == "FROM":
-                    if not driving[0]:
-                        driving[0], driving[1] = jst, j.get("alias", "")
-                else:
-                    inner.append({"table": jst, "alias": j.get("alias", ""),
-                                  "on": j.get("join_condition", ""),
-                                  "join_type": j.get("join_type", ""),
-                                  "anchor": consumer_alias})
-
-        visit(first, joins[0].get("alias", ""))
-        if not driving[0]:
+        node = _chain_material(ctx, first, None, joins[0].get("alias", ""),
+                               exclude_steps=exclude_steps)
+        if node is None:
             continue    # 链上无物理驱动表（异常形态）→ 走既有分支
-        out[sid] = {"driving": (driving[0], driving[1]), "mounts": mounts,
-                    "inner": inner, "producer_ids": producer_ids}
+        flat = _chain_walk(_chain_first_path(node))
+        out[sid] = flat
     return out
 
 
@@ -420,34 +479,135 @@ def _chain_group_segments(ctx, exclude=None) -> list:
 _MERGED_SET = "合并集"
 
 
-def _multi_source_rows(ctx, usi) -> list:
-    """多来源资产 Sheet3：来源组行 + 公共行（8 列，分组列垫尾）。
+def _material_rows(mat, left, on, jt, tmp_alias="", attached=None):
+    """链节点/链素材 → 行（消费语境左表 + ON 的 tmp 别名直代驱动别名 + 限定段）。
 
-    - 来源N：分支驱动表行（多来源(UNION ALL)，E1 式右占位布局；限制段 =
-      分支行筛选）+ 分支内关联行（左 = 分支驱动表）；
-    - 公共：合并集上的关联（左 = 合并集/锚），tmp 链穿透到物理驱动表
-      （链限定挂该行限制段，链内关联行随挂）；下游步骤的关联行
-      （左 = ON 首别名解析：锚→合并集，其余→物理表）。
-    渲染判据：逐字相同 → 公共；有差异（源表/条件/键）→ 按组展开
-    （来源驱动表必然按组；键异名时下游关联由调用侧展开，见 §十四）。
+    多来源合并语境的链渲染形态（docs/17 §十四）：left=(合并集, 锚) 之类；
+    嵌套谓词不在本函数（链节点 wheres → 限定段，与 _slave_rows 分工）。
     """
-    sid = usi["step_id"]
-    anchor = usi["anchor_alias"]
-    incr_codes = _chain_codes(ctx, "incremental")
+    out = []
+    drive_tbl, drive_al = mat["driving"]
+    rewritten = on
+    if on and tmp_alias and drive_al:
+        rewritten = re.sub(rf"\b{re.escape(tmp_alias)}\.", f"{drive_al}.", on)
+    parts = [rewritten] if rewritten else []
+    if mat.get("wheres"):
+        parts.append("限制：" + "；".join(mat["wheres"]))
+    lt, la = (left if isinstance(left, (tuple, list)) else (left, ""))
+    out.append([None, lt or None, la or None, split_schema_table(drive_tbl)[1],
+                drive_al, _join_kind(jt), "；".join(parts)])
+    for it in mat.get("inner", []):
+        out.append([None, split_schema_table(drive_tbl)[1], drive_al,
+                    split_schema_table(it["table"])[1], it["alias"],
+                    _join_kind(it.get("join_type", "")), it.get("on", "")])
+    for d in mat.get("deeper", []):
+        out.extend(_material_rows(d, (split_schema_table(d["driving"][0])[1],
+                                      d["driving"][1]), "", "FROM"))
+    if attached is not None:
+        for w in mat.get("wheres", []):
+            if w and w not in attached:
+                attached.append(w)
+    return out
+
+
+def _chain_node_fill_driving(node: dict) -> tuple:
+    """节点树后序取首个非空 driving（聚合中间层无驱动 → 深层提供）。"""
+    for d in node.get("deeper", []):
+        dv = _chain_node_fill_driving(d)
+        if dv[0]:
+            return dv
+    return node["driving"]
+
+
+def _chain_node_rows(node, left, on, jt, tmp_alias="", attached=None):
+    """链节点树（_chain_material 产物）→ 行（_material_rows 的节点版：
+    含并列 deeper 子链与各层 wheres 收集；driving 空由深层补）。"""
+    mat = {"driving": _chain_node_fill_driving(node) or node["driving"],
+           "inner": node["inner"],
+           "wheres": node["wheres"], "deeper": node["deeper"]}
+    return _material_rows(mat, left, on, jt, tmp_alias, attached)
+
+
+def _carrier_left(on, joins, carrier_alias):
+    """统一左表解析器：ON 首个可解析别名 == 合并结果承载别名 → 合并集；
+    否则该别名在 joins 里的物理表。finditer 容函数开头 ON（upper(s.x)=c.code），
+    只认有落点的别名（函数名/包名不误配）。"""
+    al = ""
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\.", on or ""):
+        cand = m.group(1)
+        if cand.lower() == (carrier_alias or "").lower() or any(
+                (j.get("alias", "") or "").lower() == cand.lower()
+                for j in joins):
+            al = cand
+            break
+    if not al:
+        return ("", "")
+    if al.lower() == (carrier_alias or "").lower():
+        return (_MERGED_SET, carrier_alias)
+    for j in joins:
+        if (j.get("alias", "") or "").lower() == al.lower():
+            return (split_schema_table(j.get("source_table", ""))[1], al)
+    return ("", "")
+
+
+def _expand_merged_on(on, merged_alias, usi):
+    """合并集 ON 的左键逐组解析（docs/17 §十四 键异名场景）。
+
+    ON 里的 合并集别名.字段 token 经分支列物理溯源回各组本地字段：
+    全组一致（同名直通）→ None（保持公共一行）；有差异 → 每组一行
+    （条件贴本地 别名.字段，左表 = 分支驱动表）。穿透不了 → None 不编造。
+    """
+    if not on or not merged_alias or not usi:
+        return None
+    tokens = set(re.findall(rf"\b{re.escape(merged_alias)}\.(\w+)", on))
+    if not tokens:
+        return None
+    by_field = {}
+    for fld in tokens:
+        cols = usi["columns"].get(fld.lower())
+        if not cols:
+            return None
+        variants = {}
+        for g in usi["groups"]:
+            c = cols.get(g["branch"])
+            if not c:
+                return None
+            variants[g["branch"]] = ((c.get("alias", "") or
+                                      g["driving"][1] or "").lower(),
+                                     (c.get("field", "") or "").lower())
+        by_field[fld] = variants
+    # 一致性只比字段名——别名是引用名不是信息（a.cust_id/b.cust_id 十路
+    # 同名 = 零信息 → 公共；acct_no/cust_no 异名 = 有信息 → 按组展开）
+    if all(len({fl for _, fl in v.values()}) == 1 for v in by_field.values()):
+        return None
+    out = []
+    for g in usi["groups"]:
+        rewritten = on
+        for fld, variants in by_field.items():
+            al, fl = variants[g["branch"]]
+            rewritten = re.sub(
+                rf"\b{re.escape(merged_alias)}\.{re.escape(fld)}\b",
+                f"{al}.{fl}", rewritten)
+        out.append((g["label"], g["driving"][0], g["driving"][1], rewritten))
+    return out
+
+
+def _union_group_rows(usi) -> list:
+    """来源组段（docs/17 §十四）：union 分支 → 组行（自带分组列，8 列）。
+
+    分支有关联行 → 根行省略（驱动表由首关联行左表承载，分支筛选并入其
+    限制段）；无关联行 → E1 同构表行（关联方式空，分组=来源N）。
+    """
     rows = []
 
     def _short(t):
         return split_schema_table(t)[1]
 
-    # ── 来源组行 ──
     for g in usi["groups"]:
         tbl_full, al = g["driving"]
         if not tbl_full:
             continue
         if g["joins"]:
-            # 分支有关联行：根行省略（2026-11-16 用户拍板——分组列已表达行
-            # 路径，驱动表由首关联行左表承载实体注册，分支行筛选并入其
-            # 限制段）
             first = g["joins"][0]
             g_parts = [p for p in [first.get("on", ""),
                                    f"限制：{g['where']}" if g.get("where") else ""]
@@ -460,283 +620,27 @@ def _multi_source_rows(ctx, usi) -> list:
                              j["alias"], _join_kind(j["join_type"]),
                              j.get("on", ""), g["label"]])
             continue
-        # 分支无关联行：与单一场景无关联表同构（E1 式表行，关联方式空，
-        # 分组列=来源N 表达行路径——「多来源(UNION ALL)」标签退役）
         parts = [f"限制：{g['where']}"] if g.get("where") else []
         rows.append([None, _short(tbl_full), al, _NO_JOIN_PLACEHOLDER, None,
                      "", "；".join(parts), g["label"]])
-
-    # ── tmp 链素材（穿透）：驱动表 + 链限定 + 内联关联 + 深层链 ──
-    consumed: set = set()
-
-    def _chain_material(tmp_full, seen=None):
-        prod = _producer_of(ctx, tmp_full)
-        if prod is None:
-            return None
-        seen = seen if seen is not None else set()
-        pid = prod.get("step_id", "")
-        if pid in seen or pid == sid:
-            return None
-        seen.add(pid)
-        pdf = ctx.df_step(pid)
-        driving, inner, wheres = ("", ""), [], []
-        w = ctx.step_where(pid)
-        if w:
-            wheres.append(w)
-        deeper = []
-        for j in pdf.get("joins", []):
-            jst = j.get("source_table", "")
-            if jst.startswith("(subquery:"):
-                continue
-            if _is_intermediate_table(jst):
-                d = _chain_material(jst, seen)
-                if d:
-                    deeper.append(d)
-                continue
-            jt_ = (j.get("join_type", "") or "FROM").strip().upper()
-            if jt_ in ("FROM", "") and not driving[0]:
-                driving = (jst, j.get("alias", ""))
-            else:
-                inner.append({"table": jst, "alias": j.get("alias", ""),
-                              "on": j.get("join_condition", ""),
-                              "join_type": j.get("join_type", "")})
-        if not driving[0]:
-            return None
-        return {"driving": driving, "inner": inner, "wheres": wheres,
-                "deeper": deeper, "producer_ids": seen}
-
-    def _material_rows(mat, left, on, jt, tmp_alias=""):
-        """链素材 → 公共行（首行 = 驱动表，ON 的 tmp 别名直代驱动别名）。"""
-        out = []
-        drive_tbl, drive_al = mat["driving"]
-        rewritten = on
-        if on and tmp_alias and drive_al:
-            # tmp 别名 → 链驱动表别名（物化无关：条件贴物理引用；
-            # jkl 按字段名索引在此形态会串到合并集来源，弃用直代）
-            rewritten = re.sub(rf"\b{re.escape(tmp_alias)}\.", f"{drive_al}.", on)
-        parts = [rewritten] if rewritten else []
-        if mat["wheres"]:
-            parts.append("限制：" + "；".join(mat["wheres"]))
-        out.append([None, left[0], left[1], _short(drive_tbl), drive_al,
-                    _join_kind(jt), "；".join(parts), "公共"])
-        for it in mat["inner"]:
-            out.append([None, _short(drive_tbl), drive_al, _short(it["table"]),
-                        it["alias"], _join_kind(it["join_type"]), it.get("on", ""),
-                        "公共"])
-        for d in mat["deeper"]:
-            out.extend(_material_rows(d, (_short(d["driving"][0]), d["driving"][1]),
-                                      "", "FROM"))
-        return out
-
-    # ── 公共行：合并步骤的外层关联（tmp 链穿透 / 物理直连）──
-    pre_write: list = []
-
-    def _merged_left(on):
-        """ON 首个可解析别名 → 左表呈现（锚→合并集；其余→步骤别名表解析）。
-
-        提取用 finditer 而非 match——ON 可函数开头（upper(s.colx) = c1.code），
-        match 失配会把左表解析成空。
-        """
-        al = ""
-        amap = ctx.step_alias_map(sid)
-        for m in re.finditer(r"\b([A-Za-z_]\w*)\.", on or ""):
-            cand = m.group(1)
-            if cand.lower() == (anchor or "").lower() or amap.get(cand.upper()):
-                al = cand
-                break
-        if not al:
-            return (_MERGED_SET, anchor)
-        if al.lower() == (anchor or "").lower():
-            return (_MERGED_SET, anchor)
-        tbl = amap.get(al.upper(), "")
-        return (_short(tbl) if tbl else "", al)
-
-    # 分支镜像（表×别名对）：顶层 UNION 形态下引擎把分支 join 合并进主 joins，
-    # 属于来源组语境不进公共通道（FROM 子查询形态则带 FROM_SUBQUERY_MAIN 型）
-    _branch_pairs = {(g["driving"][0].lower(), (g["driving"][1] or "").lower())
-                     for g in usi["groups"] if g["driving"][0]}
-    for g in usi["groups"]:
-        for j in g["joins"]:
-            _branch_pairs.add((j["table"].lower(), (j["alias"] or "").lower()))
-
-    def _expand_merged_on(on, merged_alias):
-        """合并集 ON 的左键逐组解析（docs/17 §十四 键异名场景）。
-
-        ON 里的 合并集别名.字段 token 经分支列物理溯源回各组本地字段：
-        全组一致（同名直通）→ None（保持公共一行）；有差异 → 每组一行
-        （条件贴本地 别名.字段，左表 = 分支驱动表）。穿透不了 → None 不编造。
-        """
-        if not on or not merged_alias:
-            return None
-        tokens = set(re.findall(rf"\b{re.escape(merged_alias)}\.(\w+)", on))
-        if not tokens:
-            return None
-        by_field = {}
-        for fld in tokens:
-            cols = usi["columns"].get(fld.lower())
-            if not cols:
-                return None
-            variants = {}
-            for g in usi["groups"]:
-                c = cols.get(g["branch"])
-                if not c:
-                    return None
-                variants[g["branch"]] = ((c.get("alias", "") or
-                                          g["driving"][1] or "").lower(),
-                                         (c.get("field", "") or "").lower())
-            by_field[fld] = variants
-        # 一致性只比字段名——别名是引用名不是信息（a.cust_id/b.cust_id 十路
-        # 同名 = 零信息 → 公共；acct_no/cust_no 异名 = 有信息 → 按组展开）
-        if all(len({fl for _, fl in v.values()}) == 1 for v in by_field.values()):
-            return None
-        out = []
-        for g in usi["groups"]:
-            rewritten = on
-            for fld, variants in by_field.items():
-                al, fl = variants[g["branch"]]
-                rewritten = re.sub(
-                    rf"\b{re.escape(merged_alias)}\.{re.escape(fld)}\b",
-                    f"{al}.{fl}", rewritten)
-            out.append((g["label"], g["driving"][0], g["driving"][1], rewritten))
-        return out
-
-    for j in ctx.df_step(sid).get("joins", []):
-        jst = j.get("source_table", "") or ""
-        jt = j.get("join_type", "") or ""
-        if jst.startswith("(subquery:") or jt.upper() == "FROM_SUBQUERY_MAIN":
-            continue
-        if (jst.lower(), (j.get("alias", "") or "").lower()) in _branch_pairs:
-            continue
-        if _is_intermediate_table(jst):
-            mat = _chain_material(jst)
-            if mat:
-                consumed.update(mat["producer_ids"])
-                rows.extend(_material_rows(
-                    mat, _merged_left(j.get("join_condition", "")),
-                    j.get("join_condition", ""), jt,
-                    tmp_alias=j.get("alias", "")))
-            continue
-        _on = j.get("join_condition", "") or ""
-        _exp = _expand_merged_on(_on, anchor)
-        if _exp:
-            for _lbl, _dt, _da, _rw in _exp:
-                rows.append([None, _short(_dt), _da, _short(jst),
-                             j.get("alias", ""), _join_kind(jt), _rw, _lbl])
-            continue
-        rows.append([None, _MERGED_SET, anchor, _short(jst), j.get("alias", ""),
-                     _join_kind(jt), _on, "公共"])
-
-    # ── 公共行：其余步骤（合并步骤与已穿透生产步之外）──
-    def _reaches_union(tmp_full, depth=0):
-        if depth > 8:
-            return False
-        prod = _producer_of(ctx, tmp_full)
-        if prod is None:
-            return False
-        if prod.get("step_id") == sid:
-            return True
-        for j in ctx.df_step(prod.get("step_id", "")).get("joins", []):
-            jst = j.get("source_table", "")
-            if jst and _is_intermediate_table(jst) and _reaches_union(jst, depth + 1):
-                return True
-        return False
-
-    for s in ctx.steps_list:
-        pid = s.get("step_id", "")
-        if (pid == sid or pid in consumed or ctx.is_view_step(pid)
-                or s.get("rule_code", "") in incr_codes):
-            continue
-        pdf = ctx.df_step(pid)
-        from_alias = ""
-        step_rows = []
-        for idx, j in enumerate(pdf.get("joins", [])):
-            jst = j.get("source_table", "") or ""
-            jt = (j.get("join_type", "") or "FROM").strip().upper()
-            if jst.startswith("(subquery:"):
-                if jt in ("FROM", ""):
-                    from_alias = j.get("alias", "") or from_alias
-                    continue
-                # JOIN 子查询（多来源公共规则里，标准路径同款承载，2026-11-16）：
-                # 块装配（嵌套谓词归位见 _slave_rows）优先，无块走 sq_index 兜底；
-                # 引擎 JOIN_SUBQUERY_INNER 展开条目一并跳过（信息由块承载）
-                sub_al = j.get("alias", "")
-                lt, la = _downstream_left(j.get("join_condition", ""), pdf,
-                                          from_alias)
-                sb = next((b for b in _iter_blocks(pdf.get("data_blocks") or [])
-                           if b.get("alias") == sub_al
-                           and b.get("type") == "subquery"), None)
-                if sb is not None:
-                    step_rows.extend(
-                        r_ + ["公共"] for r_ in _slave_rows(
-                            sb, _MERGED_SET if lt == _MERGED_SET else (lt or ""),
-                            la or from_alias or "", "", sub_al,
-                            real_jt=j.get("real_join_type", ""), attached=[]))
-                    continue
-                sqi = _subquery_index(ctx).get(pid, {}).get(sub_al)
-                if sqi and sqi.get("main_table"):
-                    _, r_short = split_schema_table(sqi["main_table"])
-                    step_rows.append([None, lt or _MERGED_SET, la or from_alias,
-                                      r_short, sub_al,
-                                      _join_kind(j.get("real_join_type", "")),
-                                      sqi.get("on", ""), "公共"])
-                    for t_ in (sqi.get("table_list") or [])[1:]:
-                        _, t_short = split_schema_table(t_)
-                        step_rows.append([None, r_short, sqi.get("main_alias", ""),
-                                          t_short, "", "",
-                                          f"参与逻辑从表 {sub_al}，定义见 {r_short} 行",
-                                          "公共"])
-                continue
-            if "SUBQUERY" in jt:
-                continue    # 引擎展开条目（JOIN_SUBQUERY_INNER / FROM_SUBQUERY*）
-            on = j.get("join_condition", "")
-            if _is_intermediate_table(jst):
-                if idx == 0 or jt in ("FROM", ""):
-                    if _reaches_union(jst):
-                        from_alias = j.get("alias", "")    # 合并结果的下游承载
-                    else:
-                        mat = _chain_material(jst)
-                        if mat:
-                            consumed.update(mat["producer_ids"])
-                            step_rows.extend(_material_rows(
-                                mat, (None, None), "", "FROM"))
-                else:
-                    mat = _chain_material(jst)
-                    if mat:
-                        consumed.update(mat["producer_ids"])
-                        left = _downstream_left(on, pdf, from_alias)
-                        step_rows.extend(_material_rows(
-                            mat, left, on, jt, tmp_alias=j.get("alias", "")))
-                continue
-            if idx == 0 or jt in ("FROM", ""):
-                from_alias = j.get("alias", "")
-                continue                        # 驱动 FROM 本身不单独成行
-            _exp = _expand_merged_on(on, from_alias)
-            if _exp:
-                for _lbl, _dt, _da, _rw in _exp:
-                    step_rows.append([None, _short(_dt), _da, _short(jst),
-                                      j.get("alias", ""), _join_kind(jt), _rw, _lbl])
-                continue
-            step_rows.append([None, *_downstream_left(on, pdf, from_alias),
-                              _short(jst), j.get("alias", ""),
-                              _join_kind(jt), on, "公共"])
-        rows.extend(step_rows)
-        w = ctx.step_where(pid)
-        if w:
-            pre_write.append(w)
-
-    # 合并层（外层查询/下游步骤）的行级 WHERE → 首个公共行「写入前限制」段
-    ow = ctx.step_where(sid)
-    if ow and not _looks_union_merged_where(ow):
-        pre_write.insert(0, ow)
-    if pre_write:
-        target = next((r for r in rows if r[7] == "公共"), None)
-        seg = "写入前限制：" + "；".join(pre_write)
-        if target is not None:
-            target[6] = "；".join(x for x in [target[6], seg] if x)
-        else:
-            rows.append([None, _MERGED_SET, anchor, _NO_JOIN_PLACEHOLDER, None,
-                         "", seg, "公共"])
     return rows
+
+
+def _reaches_union(ctx, tmp_full, union_sid, depth=0):
+    """tmp 链是否抵达 union 步（合并结果的下游承载判定）。"""
+    if depth > 8:
+        return False
+    prod = _producer_of(ctx, tmp_full)
+    if prod is None:
+        return False
+    if prod.get("step_id") == union_sid:
+        return True
+    for j in ctx.df_step(prod.get("step_id", "")).get("joins", []):
+        jst = j.get("source_table", "")
+        if jst and _is_intermediate_table(jst) and \
+                _reaches_union(ctx, jst, union_sid, depth + 1):
+            return True
+    return False
 
 
 def _looks_union_merged_where(w: str) -> bool:
@@ -758,56 +662,43 @@ def _strip_merged_branch_marks(w: str) -> str:
     return out.strip()
 
 
-def _downstream_left(on, pdf, from_alias):
-    """下游关联行左表：ON 首个可解析别名 == 合并结果承载别名 → 合并集；
-    否则该别名对应的物理表。finditer 容函数开头 ON（upper(s.x)=c.code），
-    只认本步骤别名表里存在的别名（函数名/包名不误配）。"""
-    al = ""
-    for m in re.finditer(r"\b([A-Za-z_]\w*)\.", on or ""):
-        cand = m.group(1)
-        if cand.lower() == (from_alias or "").lower() or any(
-                (j.get("alias", "") or "").lower() == cand.lower()
-                for j in pdf.get("joins", [])):
-            al = cand
-            break
-    if not al:
-        return ("", "")
-    if al.lower() == (from_alias or "").lower():
-        return (_MERGED_SET, from_alias)
-    for j in pdf.get("joins", []):
-        if (j.get("alias", "") or "").lower() == al.lower():
-            return (split_schema_table(j.get("source_table", ""))[1], al)
-    return ("", "")
-
-
 def build_sheet3_rows(ctx, sq_sqls: dict = None) -> list:
-    """ViewContext → Sheet3 行（多来源 8 列 / 标准 7 列模型）。
+    """ViewContext → Sheet3 行（统一装配管线，8 列模型，2026-11-16 架构收敛）。
 
-    多来源资产（union_branches 非空）走 _multi_source_rows：来源组行 +
-    公共行，分组列垫尾（docs/17 §十四）；标准资产走既有段式重组路径
-    （分组列由 build_spec_model 补「默认」）。
-    """
-    usi = ctx.union_source_info()
-    if usi:
-        return _multi_source_rows(ctx, usi)
-    return _build_sheet3_rows_std(ctx, sq_sqls)
-
-
-def _build_sheet3_rows_std(ctx, sq_sqls: dict = None) -> list:
-    """ViewContext → Sheet3 行（7 列模型）。
+    单管线承载全部形态（docs/17 §十四）：来源组段（多来源，分组=来源N）→
+    union 外层段（多来源）→ 主循环（关联行，统一左表解析：合并集/物理）→
+    tmp 链段（_chain_material 唯一收集器）→ 子查询段（块装配）→ 未附着
+    WHERE / E1 段。分组列 = 标签不是路径：组段行自带，其余统一补 公共/默认。
 
     段式 G 列（docs/17 §三）：{ON}；限制：…；写入前限制：…；预处理：贴码；
     主表链预处理：分组/保留。段按需出现，"；" 分隔。
     E1：无任何关联行时，每物理源表一行（右表=—（无关联）），行级限制落首行。
     """
     sq_sqls = sq_sqls or {}
+    # 多来源上下文（统一装配管线，2026-11-16 架构收敛：分组=标签不是路径）
+    usi = ctx.union_source_info()
+    union_sid = usi["step_id"] if usi else ""
     base = ctx.logic_join_rows()
     sq_index = _subquery_index(ctx)
-    tmp_chains = _tmp_chain_index(ctx)
+    # 链豁免 union 步：其输出是合并结果（来源组段承载），不作链头挂载
+    tmp_chains = _tmp_chain_index(
+        ctx, exclude_steps=(union_sid,) if union_sid else ())
     # 链成员步骤（终端 + 各生产步）：其 base 行由链模型接管（物化无关）
     chain_step_ids = set(tmp_chains)
     for _info in tmp_chains.values():
         chain_step_ids.update(_info["producer_ids"])
+    # 合并结果承载：{step_id: (FROM tmp 全名, 别名)}——该 tmp 链可达 union 步
+    # → 该步骤行的左表语境 = 合并集（物化无关，统一左表解析）
+    merge_carrier: dict = {}
+    if usi:
+        for s in ctx.steps_list:
+            _pid = s.get("step_id", "")
+            for j in (ctx.df_step(_pid).get("joins") or [])[:1]:
+                _jst = j.get("source_table", "")
+                if _jst and _is_intermediate_table(_jst) and \
+                        _reaches_union(ctx, _jst, union_sid):
+                    merge_carrier[_pid] = (_jst, j.get("alias", ""))
+                    break
     raw_sqls = [s.get("raw_sql", "") for s in ctx.data_flow_steps]
 
     def _expanded_subquery_alias(row):
@@ -825,15 +716,87 @@ def _build_sheet3_rows_std(ctx, sq_sqls: dict = None) -> list:
                  and not (r.origin == "main"
                           and "SUBQUERY" in (r.join_type or "")
                           and not _cond_core_raw(r.on_condition or ""))
-                 and r.step_id not in chain_step_ids]
+                 and r.step_id not in chain_step_ids
+                 and r.step_id != union_sid]   # union 步由来源组段+外层段承载
 
     rows = []
     attached_wheres = []
     last_pos_by_step: dict = {}
+    # 来源组段（多来源）：行自带 8 列分组，尾部拼接（组行连续在最前）
+    group_rows = _union_group_rows(usi) if usi else []
+
+    # ── union 外层段（多来源）：合并步骤的外层关联——tmp 链穿透（节点树）/
+    #    JOIN 子查询（块装配复用）/ 物理直连（合并集左表 + 键异名展开）。
+    #    分支镜像与引擎展开条目由组段/过滤承载；外层 WHERE 记入未附着通道 ──
+    if usi:
+        anchor = usi["anchor_alias"]
+        ujoins = ctx.df_step(union_sid).get("joins") or []
+        _bp = {(g_["driving"][0].lower(), (g_["driving"][1] or "").lower())
+               for g_ in usi["groups"] if g_["driving"][0]}
+        for g_ in usi["groups"]:
+            for j_ in g_["joins"]:
+                _bp.add((j_["table"].lower(), (j_["alias"] or "").lower()))
+        for j in ujoins:
+            jst = j.get("source_table", "") or ""
+            jt = j.get("join_type", "") or ""
+            if "SUBQUERY" in jt.upper():
+                continue    # 引擎展开条目（分支镜像/JOIN_SUBQUERY_INNER）
+            if jst.startswith("(subquery:") and jt.strip().upper() in ("FROM", ""):
+                continue    # 合并 wrap（承载锚 u，内容=分支由组段承载）
+            if jst.startswith("(subquery:"):
+                # JOIN 子查询（块装配复用，谓词归位见 _slave_rows）
+                sub_al = j.get("alias", "")
+                sb = next((b for b in _iter_blocks(
+                    ctx.df_step(union_sid).get("data_blocks") or [])
+                    if b.get("alias") == sub_al and b.get("type") == "subquery"), None)
+                if sb is not None:
+                    rows.extend(_slave_rows(
+                        sb, _MERGED_SET, anchor, "", sub_al,
+                        real_jt=j.get("real_join_type", ""),
+                        attached=attached_wheres))
+                else:
+                    sqi = sq_index.get(union_sid, {}).get(sub_al)
+                    if sqi and sqi.get("main_table"):
+                        rows.append([None, _MERGED_SET, anchor,
+                                     split_schema_table(sqi["main_table"])[1],
+                                     sub_al,
+                                     _join_kind(j.get("real_join_type", "")),
+                                     sqi.get("on", "")])
+                continue
+            if (jst.lower(), (j.get("alias", "") or "").lower()) in _bp:
+                continue    # 分支镜像（顶层 UNION 形态）
+            on = j.get("join_condition", "") or ""
+            if _is_intermediate_table(jst):
+                node = _chain_material(ctx, jst, None, j.get("alias", ""),
+                                       exclude_steps=(union_sid,))
+                if node is not None:
+                    rows.extend(_chain_node_rows(
+                        node, _carrier_left(on, ujoins, anchor), on, jt,
+                        j.get("alias", ""), attached=attached_wheres))
+                continue
+            _exp = _expand_merged_on(on, anchor, usi)
+            if _exp:
+                for _lbl, _dt, _da, _rw in _exp:
+                    rows.append([None, split_schema_table(_dt)[1], _da,
+                                 split_schema_table(jst)[1], j.get("alias", ""),
+                                 _join_kind(jt), _rw])
+                continue
+            _lt, _la = _carrier_left(on, ujoins, anchor)
+            rows.append([None, _lt or _MERGED_SET, _la or anchor,
+                         split_schema_table(jst)[1], j.get("alias", ""),
+                         _join_kind(jt), on])
+        ow = ctx.step_where(union_sid)
+        if ow and not _looks_union_merged_where(ow) and ow not in attached_wheres:
+            attached_wheres.append(ow)   # 合并层外层 WHERE → 未附着通道
 
     for row in survivors:
         cond = row.on_condition or ""
-        if row.origin == "main":
+        # 合并承载语境（FROM tmp 可达 union）不做 tmp 穿透改写：承载别名是
+        # 合并结果的引用名，穿透到某分支=union 供数坍缩（保留 t.xxx 原样）
+        _merge_ctx = (usi and row.step_id in merge_carrier and
+                      norm_name(row.left_table) ==
+                      norm_name(merge_carrier[row.step_id][0]))
+        if row.origin == "main" and not _merge_ctx:
             rewritten, note = resolve_on_condition_aliases(
                 cond, ctx.step_alias_map(row.step_id),
                 ctx.df_step(row.step_id).get("join_key_lineage", {}))
@@ -855,10 +818,32 @@ def _build_sheet3_rows_std(ctx, sq_sqls: dict = None) -> list:
             parts.append(_fmt_preprocess(row.preprocess))
         _, l_tbl = split_schema_table(row.left_table)
         _, r_tbl = split_schema_table(row.right_table)
+        left_alias = row.left_alias
         right_alias = row.right_alias
         if row.origin.startswith("main-cte:"):
             right_alias = _inner_alias(ctx, row.origin.split(":", 1)[1], row.right_table)
-        rows.append([None, l_tbl, row.left_alias, r_tbl, right_alias,
+        # 统一左表解析（docs/17 §十四）：合并承载步骤内的关联行——左表由
+        # ON 首别名决定（承载别名 → 合并集；其他物理别名 → 该表，如链式
+        # 维表行 c.area_id=ar.area_id 左表=dim_cust，物化无关）
+        if _merge_ctx:
+            _ct2, _ca2 = merge_carrier[row.step_id]
+            if norm_name(row.left_table) == norm_name(_ct2):
+                _lt2, _la2 = _carrier_left(
+                    cond, ctx.df_step(row.step_id).get("joins") or [], _ca2)
+                l_tbl, left_alias = (_lt2 or _MERGED_SET, _la2 or _ca2)
+                # 键异名展开（docs/17 §十四）：合并集左键逐组解析回本地字段，
+                # 有差异 → 关系按组展开（行分组=来源N，尾部补列）
+                _exp = _expand_merged_on(cond, _ca2, usi)
+                if _exp:
+                    _extra = "；".join(parts[1:]) if len(parts) > 1 else ""
+                    for _lbl, _dt, _da, _rw in _exp:
+                        rows.append([None, split_schema_table(_dt)[1], _da,
+                                     r_tbl, right_alias, _join_kind(row.join_type),
+                                     _rw + (f"；{_extra}" if _extra else ""),
+                                     _lbl])
+                        last_pos_by_step[row.step_id] = len(rows) - 1
+                    continue
+        rows.append([None, l_tbl, left_alias, r_tbl, right_alias,
                      _join_kind(row.join_type), "；".join(parts)])
         last_pos_by_step[row.step_id] = len(rows) - 1
 
@@ -913,8 +898,11 @@ def _build_sheet3_rows_std(ctx, sq_sqls: dict = None) -> list:
 
 
     # ── 子查询关联行（嵌套子查询，docs/17 §三，波2b 块装配零文本解析）──
+    # union 步的子查询由外层段承载（不重复渲染）
     _attached_pre = set(attached_wheres)
     for sid, by_alias in sq_index.items():
+        if sid == union_sid:
+            continue
         blocks = ctx.df_step(sid).get("data_blocks") or []
         sqls = sq_sqls.get(sid, {})
         for alias, info in by_alias.items():
@@ -982,6 +970,11 @@ def _build_sheet3_rows_std(ctx, sq_sqls: dict = None) -> list:
                 if wrap_info and wrap_info.get("main_table"):
                     main_blk = {"table": wrap_info["main_table"],
                                 "alias": wrap_info.get("main_alias", "")}
+            # 统一左表解析：步骤 FROM 承载 tmp 可达 union → 左表=合并集
+            if usi and sid in merge_carrier and main_blk is not None:
+                _ct, _ca = merge_carrier[sid]
+                if norm_name(main_blk["table"]) == norm_name(_ct):
+                    main_blk = {"table": _MERGED_SET, "alias": _ca}
             if sb is None:
                 if main_blk is None:
                     continue
@@ -1038,14 +1031,17 @@ def _build_sheet3_rows_std(ctx, sq_sqls: dict = None) -> list:
     for s in ctx.steps_list:
         if _incr_codes and s.get("rule_code") in _incr_codes:
             continue
+        if s.get("step_id", "") == union_sid:
+            continue    # union 步：分支 WHERE 在组段限制段、外层 WHERE 在外层段
         w = ctx.step_where(s.get("step_id", ""))
         if w and w not in attached_wheres:
             unattached.append(w)
 
     chain_group = _chain_group_segments(ctx, exclude=chain_step_ids)
 
-    if rows:
-        # 有关联行：未附着 WHERE 全部按「写入前限制」挂主表行（首行左表=驱动表）
+    if rows or group_rows:
+        # 有关联行：未附着 WHERE 全部按「写入前限制」挂首行（多来源语境首行
+        # = 外层段/公共行，与组段行无关）
         tail = []
         if unattached:
             tail.append("写入前限制：" + "；".join(unattached))
@@ -1053,7 +1049,10 @@ def _build_sheet3_rows_std(ctx, sq_sqls: dict = None) -> list:
             tail.append("主表链预处理：" + "；".join(chain_group))
         if tail:
             rows[0][6] = "；".join(x for x in [rows[0][6]] + tail if x)
-        return rows
+        # 分组列（docs/17 §十四）：组段行自带 8 列；其余统一补（公共/默认）
+        grp_other = "公共" if usi else "默认"
+        return (group_rows
+                + [r if len(r) > 7 else r + [grp_other] for r in rows])
 
     # ── E1 单表行：无关联（含全表无 JOIN）→ 每物理源表一行，行级限制落首行 ──
     sources = ctx.entity_source_tables()
@@ -1075,8 +1074,9 @@ def _build_sheet3_rows_std(ctx, sq_sqls: dict = None) -> list:
     out = []
     for i, es in enumerate(sources):
         out.append([None, es.table, es.alias, _NO_JOIN_PLACEHOLDER, None,
-                    "", "；".join(first_parts) if i == 0 else ""])
-    return out
+                    "", "；".join(first_parts) if i == 0 else "",
+                    "公共" if usi else "默认"])
+    return (group_rows + out) if usi else out
 
 
 # ════════════════════════════════════════════════════════════

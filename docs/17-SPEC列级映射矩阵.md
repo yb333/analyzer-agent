@@ -577,3 +577,32 @@ JOIN_SUBQUERY_INNER 空壳行照漏、`(subquery:x)` 被当 FROM 跳过（关系
 
 回归：TestMultiSourceWithSubquery 3 断言（用户真实形态）+
 case_40_multi_source_subquery 入 golden；917 全绿，其余快照零 diff。
+
+### 统一装配管线（2026-11-16 架构收敛，用户拍板"不留技术债"）
+
+v1.24 并行双路径（标准/多来源）三天内双路径双修两次（v1.27/v1.28）——违反
+架构原则（多来源是消费场景不是另一套产出逻辑）。收敛为**单管线**：
+
+```
+build_sheet3_rows（唯一入口，8 列）
+  ├─ 来源组段（多来源）：union 分支 → 组行（分组=来源N，自带 8 列）
+  ├─ union 外层段（多来源）：合并步骤外层关联——tmp 链穿透（节点树）/
+  │   JOIN 子查询（块装配复用）/ 物理直连（合并集左表 + 键异名展开）
+  ├─ 主循环：关联行（survivors：链成员/子查询展开/union 步跳过；合并承载
+  │   语境左表 = _carrier_left 统一解析——承载别名→合并集、其他物理别名
+  │   →该表、不做 tmp 穿透改写[防 union 供数坍缩]；键异名在此展开）
+  ├─ tmp 链段：_chain_material 唯一收集器（节点树：driving/inner/wheres/
+  │   deeper/mount；聚合中间层无驱动由深层继承[旧 visit 跨层语义]）+
+  │   两渲染形态（标准链主表行模型 / 合并语境 _material_rows）；
+  │   union 步豁免（其输出=合并结果，不作链头）
+  ├─ 子查询段：sq_index + _slave_rows 块装配（全部步骤；union 步由外层段
+  │   承载不重复；合并承载语境左表=合并集）
+  └─ 未附着 WHERE / E1 段：union 步 WHERE 由组段/外层段承载跳过；
+      E1 触发含组行（rows or group_rows）
+分组列 = 标签不是路径：组段行自带来源N；其余统一补 公共/默认（spec_export
+不再补列；chain_by_step 同步 union 豁免）。
+```
+
+删除：`_multi_source_rows` 全家（闭包版链素材/左表/键异名）、`_downstream_left`
+（并入 `_carrier_left` 统一左表解析器）、双路径入口分叉。case_40 行序统一为
+管线段序（子查询段行序在主循环后，语义等价）；39 case 其余零 diff、917 全绿。

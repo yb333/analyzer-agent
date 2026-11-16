@@ -252,9 +252,6 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
     # ── Sheet3 表关联：行集语义段式重组 + E1 单表行（§三，口径在 spec_extract）──
     sheet3 = build_sheet3_rows(
         ctx, sq_sqls=(engine_ctx or {}).get("subquery_sqls") or {})
-    if not ctx.union_source_info():
-        # 标准资产补分组列（多来源路径自带 8 列；分组维度见 docs/17 §十四）
-        sheet3 = [r + ["默认"] for r in sheet3]
     # 同语义关联去重（2026-11-10 拍板：一行——行身份 = 左表×右表×类型×
     # 归一化条件；2026-11-11 修订：别名解析到表（雪花模型 a/c/d 各关联 b
     # 三个关系不误合，跨步同语义经 tmp 链驱动解析仍合并）
@@ -346,7 +343,9 @@ def build_spec_model(knowledge: dict, engine_ctx: dict,
 
     # tmp 链物化无关上下文（展开态说明段素材：外层锚 + 分组/保留口径）
     chain_by_step: dict = {}
-    for _sid, _ch in _tmp_chain_index(ctx).items():
+    _usi = ctx.union_source_info()
+    for _sid, _ch in _tmp_chain_index(
+            ctx, exclude_steps=(_usi["step_id"],) if _usi else ()).items():
         outer_anchor = _ch["mounts"][-1]["anchor"] if _ch["mounts"] else ""
         notes = []
         for _pid in _ch["producer_ids"]:

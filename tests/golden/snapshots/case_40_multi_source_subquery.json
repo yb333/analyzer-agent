@@ -1215,18 +1215,33 @@
     "公共",
     "dim",
     "",
+    "dim_cust",
+    "c",
+    "dwb",
+    "",
+    "ms_subq_f",
+    "",
+    "LEFT JOIN: t.bill_id = c.bill_id",
+    "",
+    "DWS"
+   ],
+   [
+    "4",
+    "公共",
+    "dim",
+    "",
     "t_dim_a",
     "sub1",
     "dwb",
     "",
     "ms_subq_f",
     "",
-    "LEFT JOIN: UPPER(t.col1) = sub1.k2；限定：rn = 1（开窗收敛，窗口定义见定义原文）；a2.type = 'x'",
+    "LEFT JOIN: UPPER(t.col1) = sub1.k2；【逻辑从表 sub1 · 定义】(SELECT tk.k1, tk.k2 FROM (SELECT b2.k1, b2.k2, ROW_NUMBER() OVER (PARTITION BY b2.k2 ORDER BY b2.dt) AS rn FROM dim.t_dim_a a2, dim.t_dim_b b2 WHERE a2.type = 'x' AND a2.id = b2.id) tk WHERE rn = 1) sub1；限定：rn = 1（开窗收敛，窗口定义见定义原文）；a2.type = 'x'",
     "",
     "DWS"
    ],
    [
-    "4",
+    "5",
     "公共",
     "dim",
     "",
@@ -1241,7 +1256,7 @@
     "DWS"
    ],
    [
-    "5",
+    "6",
     "公共",
     "dim",
     "",
@@ -1252,21 +1267,6 @@
     "ms_subq_f",
     "",
     "INNER JOIN: 【sub1 内】a2.id = b2.id；参与逻辑从表 sub1，定义见 t_dim_a 行",
-    "",
-    "DWS"
-   ],
-   [
-    "6",
-    "公共",
-    "dim",
-    "",
-    "dim_cust",
-    "c",
-    "dwb",
-    "",
-    "ms_subq_f",
-    "",
-    "LEFT JOIN: t.bill_id = c.bill_id",
     "",
     "DWS"
    ]
