@@ -6075,20 +6075,54 @@ def _extract_table_props(content: str) -> dict:
 _DDL_CONSUMED_FILES: dict[str, set] = {}
 
 
-def ddl_consumed_files(ddl_dir: str) -> list:
-    """返回某 DDL 目录下实际参与解析（表名命中且提取到表定义体）的文件清单。"""
-    return sorted(_DDL_CONSUMED_FILES.get(str(Path(ddl_dir).resolve()), ()))
+def _ddl_dirs(ddl_dir) -> list:
+    """ddl_dir 归一化：str/Path → [str]；list/tuple → [str]；空 → []。
+
+    多资产链路（analyze-chain collection）每组自带 DDL，调用方传目录列表。
+    """
+    if not ddl_dir:
+        return []
+    if isinstance(ddl_dir, (list, tuple)):
+        return [str(d) for d in ddl_dir if d]
+    return [str(ddl_dir)]
 
 
-def parse_ddl_for_metadata(ddl_dir: str, target_table: str) -> dict[str, dict]:
+def ddl_consumed_files(ddl_dir) -> list:
+    """返回 DDL 目录下实际参与解析（表名命中且提取到表定义体）的文件清单。
+
+    ddl_dir 支持 str|list[str]（list 时合并去重）。
+    """
+    files: set = set()
+    for d in _ddl_dirs(ddl_dir):
+        files.update(_DDL_CONSUMED_FILES.get(str(Path(d).resolve()), ()))
+    return sorted(files)
+
+
+def parse_ddl_for_metadata(ddl_dir, target_table: str) -> dict[str, dict]:
     """从 DDL 文件读取目标表字段类型和中文名。
 
-    支持两种注释格式：
+    ddl_dir 支持 str|list[str]（多资产链路各带 DDL 时逐目录解析合并，字段先到先得）。
+
+    支持两种注释格式:
     1. 行内注释: field_name TYPE /* 中文名 */
     2. COMMENT ON COLUMN table.field IS '中文名'
 
     Returns: {field_name(LOWER): {"type": str, "comment": str}}
     """
+    dirs = _ddl_dirs(ddl_dir)
+    if not dirs:
+        return {}
+    if len(dirs) == 1:
+        return _parse_ddl_for_metadata_one(dirs[0], target_table)
+    merged: dict[str, dict] = {}
+    for d in dirs:
+        for k, v in _parse_ddl_for_metadata_one(d, target_table).items():
+            merged.setdefault(k, v)
+    return merged
+
+
+def _parse_ddl_for_metadata_one(ddl_dir: str, target_table: str) -> dict[str, dict]:
+    """单 DDL 目录实现（parse_ddl_for_metadata 的核，见其 docstring）。"""
     if not ddl_dir:
         return {}
 
@@ -7064,7 +7098,7 @@ def analyze_pipeline(
     group_variables: dict,
     dialect: str,
     *,
-    ddl_dir: str = "",
+    ddl_dir="",  # str | list[str]（多资产链路各带 DDL 时传列表，逐目录解析合并）
     source_file: str = "",
     rule_group_code: str = "",
     context_out: dict = None,

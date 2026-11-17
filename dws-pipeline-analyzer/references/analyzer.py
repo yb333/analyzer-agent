@@ -1548,59 +1548,70 @@ def trace_upstream_rule_groups(
 
 
 def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
-    """合并多个规则组的 rules，重新编号 exec_sequence，返回合并后的 rules 列表。
+    """合并多个规则组的 rules，重新编号 exec_sequence（legacy yml 入口的包装）。
 
-    拓扑排序：被依赖的（depth 大的，上游的）排前面，依赖别人的（depth 小的，下游的）排后面。
-
-    Args:
-        groups_info: trace_upstream_rule_groups 的返回值
-
-    Returns:
-        merged_rules: 合并后的 RawRule 列表（exec_sequence 已按依赖拓扑排序重编号）
+    读取侧 read_yml 逐组读；核心逻辑在 _merge_group_data（collection 入口
+    直取 bundle，不重复读盘）。
     """
-    from engine import RawRule, _norm_table
+    groups = groups_info["groups"]
+    group_data = {}
+    for g in groups:
+        raw = read_yml(g["dir"])
+        group_data[g["dir"]] = {
+            "rules": raw.get("rules", []),
+            "target_fields": raw.get("target_fields", {}),
+            "group_variables": raw.get("group_variables", {}),
+            "label": g.get("rule_group_en") or Path(g["dir"]).name,
+        }
+    return _merge_group_data(groups_info, group_data)
+
+
+def _merge_group_data(groups_info: dict, group_data: dict):
+    """合并核（collection / legacy 两条 chain 入口共用）。
+
+    - 组间依赖：A 写的表被 B 的源表引用 → B 依赖 A（groups_info.groups[].source_tables）
+    - exec_sequence 拓扑重编号：被依赖的（上游）排前面；互相不依赖的组 seq 可重叠
+    - rule_code 跨组冲突 → 按组前缀重键 `{组}::{码}`（制品 xlsx 每组常从 R0001
+      起编，不重键会串组）；target_fields/group_variables 跟随重键
+    - rules 用 dataclasses.replace 整拷（修存量缺陷：旧手工逐字段构造丢
+      delete_condition/project_code/data_source/business_owner）
+
+    Returns: (merged_rules, merged_target_fields, merged_group_variables)
+    """
+    import dataclasses as _dc
+    from engine import _norm_table
 
     groups = groups_info["groups"]
     if not groups:
-        return []
+        return [], {}, {}
 
-    # 读所有规则组的 rules + target_fields + group_variables（缓存，避免重复 read_yml）
-    group_rules_cache = {}
-    group_tf_cache = {}
-    group_gv_cache = {}
-    for g in groups:
-        raw = read_yml(g["dir"])
-        group_rules_cache[g["dir"]] = raw.get("rules", [])
-        group_tf_cache[g["dir"]] = raw.get("target_fields", {})
-        group_gv_cache[g["dir"]] = raw.get("group_variables", {})
+    # 组标签（重键前缀用）：rule_group_en 优先，回退目录名
+    label_of = {g["dir"]: (g.get("rule_group_en")
+                           or group_data.get(g["dir"], {}).get("label")
+                           or Path(g["dir"]).name)
+                for g in groups}
 
-    # 算每个规则组写过的所有 target_table（归一化）
-    # 用 set 收集：一个规则组可能多步写多张表（step1 写 mid、step2 写 final），
-    # 下游若读早期步骤写的 mid 表，依赖也必须建立（不能只看 max_seq 的那张表）
-    group_targets = {}  # {group_dir: set(norm_target_table)}
+    # 每组写过的全部 target_table（归一化；一组可多步写多表，早期 mid 表也算）
+    group_targets = {}
     for g in groups:
-        rules = group_rules_cache.get(g["dir"], [])
         targets = set()
-        for r in rules:
+        for r in group_data.get(g["dir"], {}).get("rules", []):
             if r.target_table:
                 targets.add(_norm_table(r.target_table))
         if targets:
             group_targets[g["dir"]] = targets
 
-    # 算组间依赖关系：A 写的表被 B 的源表引用 → B 依赖 A
-    # group_deps[dir] = set(被依赖的 dir)
+    # 组间依赖：B 的源表命中 A 写的表 → B 依赖 A
     group_deps = {g["dir"]: set() for g in groups}
     for g in groups:
         for src_table in g.get("source_tables", []):
             table_part = src_table.split(".")[-1] if "." in src_table else src_table
             src_key = _norm_table(table_part)
-            # 找哪个规则组写过这张表（任意一步写过即算）
             for other_dir, other_targets in group_targets.items():
                 if src_key in other_targets and other_dir != g["dir"]:
                     group_deps[g["dir"]].add(other_dir)
 
-    # 按依赖拓扑排序（被依赖的先处理）
-    # 用深度优先拓扑排序
+    # 按依赖拓扑排序（被依赖的先处理；环容忍——temp_mark 直接跳过）
     sorted_dirs = []
     visited = set()
     temp_mark = set()
@@ -1609,7 +1620,7 @@ def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
         if dir_path in visited:
             return
         if dir_path in temp_mark:
-            return  # 环检测
+            return  # 环检测：容忍不中断
         temp_mark.add(dir_path)
         for dep_dir in group_deps.get(dir_path, set()):
             _topo_sort(dep_dir)
@@ -1620,75 +1631,464 @@ def merge_rule_groups(groups_info, repo_root, ddl_dir=""):
     for g in groups:
         _topo_sort(g["dir"])
 
-    # 计算每个组的偏移量：= max(依赖组的全局最大seq) + 1
-    # 互相不依赖的组 seq 重叠（都从能开始的最早seq开始）
-    group_offset = {}  # {dir: offset}
-    group_global_max = {}  # {dir: 该组加偏移后的全局最大seq}
-
+    # 每组偏移量 = max(依赖组的全局最大 seq) + 1（无依赖从 0 起，组间可重叠）
+    group_offset = {}
+    group_global_max = {}
     for dir_path in sorted_dirs:
-        rules = group_rules_cache.get(dir_path, [])
+        rules = group_data.get(dir_path, {}).get("rules", [])
         if not rules:
             group_offset[dir_path] = 0
             group_global_max[dir_path] = 0
             continue
         max_seq_in_group = max(r.exec_sequence for r in rules)
-
-        # 偏移 = 依赖的所有组中最大的全局seq + 1
         deps = group_deps.get(dir_path, set())
-        if deps:
-            offset = max(group_global_max.get(d, 0) for d in deps) + 1
-        else:
-            offset = 0  # 没有依赖，从0开始（可能跟其他无依赖组重叠）
-
+        offset = max((group_global_max.get(d, 0) for d in deps), default=-1) + 1
         group_offset[dir_path] = offset
         group_global_max[dir_path] = offset + max_seq_in_group
 
-    # 合并 rules，应用偏移量
+    # rule_code 跨组冲突检测 → 重键表 {dir: {old_code: new_code}}
+    code_owner = {}
+    collided = set()
+    for g in groups:
+        for r in group_data.get(g["dir"], {}).get("rules", []):
+            if r.rule_code in code_owner and code_owner[r.rule_code] != g["dir"]:
+                collided.add(r.rule_code)
+            code_owner[r.rule_code] = g["dir"]
+    rekey = {}
+    for g in groups:
+        d = g["dir"]
+        for r in group_data.get(d, {}).get("rules", []):
+            if r.rule_code in collided:
+                rekey.setdefault(d, {})[r.rule_code] = f"{label_of[d]}::{r.rule_code}"
+
+    # 合并 rules（replace 整拷 + 偏移 + 重键）
     merged_rules = []
     for g in groups:
-        dir_path = g["dir"]
-        offset = group_offset.get(dir_path, 0)
-        for rule in group_rules_cache.get(dir_path, []):
-            merged_rules.append(RawRule(
-                rule_code=rule.rule_code,
-                rule_name=rule.rule_name,
-                rule_type=rule.rule_type,
-                exec_sequence=rule.exec_sequence + offset,
-                target_schema=rule.target_schema,
-                target_table=rule.target_table,
-                delete_mode=rule.delete_mode,
-                query_sql=rule.query_sql,
-                exchange_source_table=getattr(rule, "exchange_source_table", ""),
-                rule_group_code=rule.rule_group_code,
-                rule_group_en=rule.rule_group_en,
-            ))
+        d = g["dir"]
+        offset = group_offset.get(d, 0)
+        rk = rekey.get(d, {})
+        for rule in group_data.get(d, {}).get("rules", []):
+            merged_rules.append(_dc.replace(
+                rule, exec_sequence=rule.exec_sequence + offset,
+                rule_code=rk.get(rule.rule_code, rule.rule_code)))
 
-    # 合并 target_fields 和 group_variables（按 rule_code 分组，合并所有规则组的）
+    # 合并 target_fields / group_variables（{rule_code: list}；重键跟随）
     merged_target_fields = {}
     merged_group_variables = {}
     for g in groups:
-        dir_path = g["dir"]
-        for rc, tfs in group_tf_cache.get(dir_path, {}).items():
-            merged_target_fields.setdefault(rc, []).extend(tfs)
-        for rc, gvs in group_gv_cache.get(dir_path, {}).items():
-            merged_group_variables.setdefault(rc, []).extend(gvs)
+        d = g["dir"]
+        rk = rekey.get(d, {})
+        for rc, tfs in (group_data.get(d, {}).get("target_fields") or {}).items():
+            merged_target_fields.setdefault(rk.get(rc, rc), []).extend(tfs)
+        for rc, gvs in (group_data.get(d, {}).get("group_variables") or {}).items():
+            merged_group_variables.setdefault(rk.get(rc, rc), []).extend(gvs)
 
     return merged_rules, merged_target_fields, merged_group_variables
 
 
+# ═══════════════════════════════════════════════════════════════
+# collection 形态（资产集合目录）：逐子目录装配 → 闭环建图 → 合并
+# 输入契约（v1.30）：父目录下每个子目录 = 一个资产的制品目录（推荐，与
+# /analyze 形态 1 同款）；yml 子目录顺带兼容（legacy 日落中，不投入）。
+# 依赖只在集合内连边（闭环），找不到写入者的源表 = 外部源表（不外追）。
+# ═══════════════════════════════════════════════════════════════
+
+def _chain_collect_sources(rules, parsed_map) -> set:
+    """收集一组规则穿透后的全部源表（含 CTE 内部表；trace/collection 共用口径）。"""
+    sources = set()
+    for rule in rules:
+        parsed = parsed_map.get(rule.rule_code)
+        if not parsed:
+            continue
+        for j in parsed.source_tables:
+            if not j.source_table or j.source_table.startswith("(subquery:"):
+                continue
+            sources.add(j.source_table)
+        for cte in parsed.ctes:
+            for t in cte.source_tables:
+                tname = t.get("name", "") if isinstance(t, dict) else ""
+                if tname:
+                    sources.add(tname)
+    return sources
+
+
+def _chain_load_child(child_dir: Path):
+    """collection 单个子目录 → bundle；无制品无 yml 的子目录返回 None（调用方披露）。"""
+    mode = _detect_input_mode(child_dir)
+    if mode == "xlsx":
+        return None
+    if mode == "artifact_dir":
+        # 预闸：目录里连 xlsx 都没有 → 不是资产目录（不触发装配异常，交调用方披露）
+        if not any(child_dir.glob("*.xlsx")):
+            return None
+        from pipeline_core import run_from_dir
+        core = run_from_dir(str(child_dir), include_dq=True, channel="analyze-chain")
+        raw = core["raw"]
+        return {
+            "dir": str(child_dir),
+            "label": raw.get("rule_group_en") or child_dir.name,
+            "mode": "artifact_dir",
+            "rules": core["rules"],
+            "target_fields": raw.get("target_fields", {}),
+            "group_variables": raw.get("group_variables", {}),
+            "rule_group_code": raw.get("rule_group_code", ""),
+            "source_tables": _chain_collect_sources(core["rules"], core["parsed_map"]),
+            "target_tables": {r.target_table.lower() for r in core["rules"] if r.target_table},
+            "ddl_stage_dir": core.get("ddl_stage_dir", ""),
+            "schedule_info": core["schedule_info"],
+            "dq_rules": core["dq_rules"],
+            "asset_info": (core["knowledge"].get("meta", {}) or {}).get("asset_info"),
+        }
+    # yml_dir（legacy 顺带兼容）
+    raw = read_yml(child_dir)
+    if not raw.get("rules"):
+        return None
+    dialect = detect_dialect(raw["rules"])
+    _, parsed_map = analyze_pipeline(
+        raw["rules"], raw.get("target_fields", {}),
+        raw.get("group_variables", {}), dialect)
+    return {
+        "dir": str(child_dir),
+        "label": raw.get("rule_group_en") or child_dir.name,
+        "mode": "yml_dir",
+        "rules": raw["rules"],
+        "target_fields": raw.get("target_fields", {}),
+        "group_variables": raw.get("group_variables", {}),
+        "rule_group_code": raw.get("rule_group_code", ""),
+        "source_tables": _chain_collect_sources(raw["rules"], parsed_map),
+        "target_tables": {r.target_table.lower() for r in raw["rules"] if r.target_table},
+        "ddl_stage_dir": "", "schedule_info": None, "dq_rules": None, "asset_info": None,
+    }
+
+
+def build_collection_graph(bundles: list) -> dict:
+    """闭环建组间依赖图（写入者索引只来自给定组集合，不外追代码仓）。
+
+    Returns（与 trace_upstream_rule_groups 同构，后续流程共用）:
+        groups: [{dir, rule_group_en, rule_group_code, target_table,
+                  all_target_tables, source_tables, depth, is_endpoint}]
+        not_found: 集合内无写入者的源表（外部源表，不追溯）
+        cycle_detected / truncated（恒 False，闭环无深度截断）
+    depth 语义与 trace 一致：终点=0，上游=距最近终点的跳数。
+    """
+    from engine import _norm_table
+
+    def _bare_key(table: str) -> str:
+        part = table.split(".")[-1] if "." in table else table
+        return _norm_table(part)
+
+    # 写入者索引 {key: [bundle]}
+    index: dict = {}
+    for b in bundles:
+        for t in b["target_tables"]:
+            index.setdefault(_bare_key(t), []).append(b)
+
+    # 组间依赖（B 源表命中 A 写的表）+ 外部源表
+    deps = {}        # {dir: set(上游 dir)}
+    consumers = {}   # {dir: set(下游 dir)}
+    not_found = set()
+    for b in bundles:
+        dset = set()
+        for src in b["source_tables"]:
+            writers = [w for w in index.get(_bare_key(src), []) if w["dir"] != b["dir"]]
+            if not writers:
+                not_found.add(src)
+                continue
+            for w in writers:
+                dset.add(w["dir"])
+                consumers.setdefault(w["dir"], set()).add(b["dir"])
+        deps[b["dir"]] = dset
+
+    # 终点：写的表没被集合内其他组读（多终点=森林，一张全图报告）
+    endpoint_dirs = {b["dir"] for b in bundles if not consumers.get(b["dir"])}
+
+    # 环检测（DFS temp-mark）
+    cycle = [False]
+    state = {}  # dir -> 1(在栈) / 2(完成)
+
+    def _dfs(d):
+        if state.get(d) == 1:
+            cycle[0] = True
+            return
+        if state.get(d) == 2:
+            return
+        state[d] = 1
+        for up in deps.get(d, ()):
+            _dfs(up)
+        state[d] = 2
+
+    for b in bundles:
+        _dfs(b["dir"])
+
+    # depth：从终点沿依赖边反向 BFS（距最近终点的跳数，终点 0）
+    from collections import deque
+    depth = {}
+    q = deque(endpoint_dirs)
+    for d in endpoint_dirs:
+        depth[d] = 0
+    while q:
+        cur = q.popleft()
+        for up in deps.get(cur, ()):
+            if up not in depth or depth[cur] + 1 < depth[up]:
+                depth[up] = depth[cur] + 1
+                q.append(up)
+
+    groups = []
+    for b in bundles:
+        tgt = ""
+        if b["rules"]:
+            tgt = max(b["rules"], key=lambda r: r.exec_sequence).target_table
+        groups.append({
+            "dir": b["dir"], "rule_group_en": b["label"],
+            "rule_group_code": b.get("rule_group_code", ""),
+            "target_table": tgt,
+            "all_target_tables": sorted(b["target_tables"]),
+            "source_tables": sorted(b["source_tables"]),
+            "depth": depth.get(b["dir"], 0),
+            "is_endpoint": b["dir"] in endpoint_dirs,
+        })
+    groups.sort(key=lambda g: (-g["depth"], g["rule_group_en"]))
+    return {"groups": groups, "not_found": sorted(not_found),
+            "cycle_detected": cycle[0], "truncated": False}
+
+
+def _chain_finish(*, merged_rules, merged_target_fields, merged_group_variables,
+                  ddl_dir, schedule_info, dq_rules, dq_declared_absent, asset_info,
+                  chain_groups, output_base: Path, safe_name: str,
+                  t0, trace_id, input_type, asset_label, group_count,
+                  timings, dq_discover=None):
+    """chain 共尾：合并分析 → meta 注入 → 过程件 + 三件套 → 埋点（两入口共用）。"""
+    import time as _t_usage
+    from inputs import apply_meta_enrichments
+
+    # ── 分析（合并后整体作为一个 pipeline；rule_group_code=CHAIN）──
+    print(f"\n[Step 3] 分析完整链路...")
+    dialect = detect_dialect(merged_rules)
+    knowledge, parsed_map = analyze_pipeline(
+        merged_rules, merged_target_fields, merged_group_variables, dialect,
+        ddl_dir=ddl_dir, source_file="", rule_group_code="CHAIN",
+    )
+
+    # 多规则组链路标记（报告区分用）
+    knowledge["meta"]["is_multi_group"] = True
+    knowledge["meta"]["chain_groups"] = chain_groups
+
+    # legacy 入口的 DQ 仓内发现（依赖 target_table，须在 analyze 之后）
+    if dq_rules is None and dq_discover:
+        try:
+            dq_rules = dq_discover(knowledge.get("meta", {}).get("target_table", "")) or None
+            if dq_rules:
+                print(f"  [DQ] 发现 {len(dq_rules)} 条质量检查规则")
+        except Exception:
+            dq_rules = None
+
+    # 调度 / DQ / I 视图注入（终点组语义；唯此一处写这些 key）
+    apply_meta_enrichments(knowledge, dict(asset_info) if asset_info else None,
+                           schedule_info, dq_rules,
+                           dq_declared_absent=dq_declared_absent)
+
+    # ── 输出 ──
+    output_dir = Path(output_base) / safe_name
+    internal_dir = output_dir / "_internal"
+    internal_dir.mkdir(parents=True, exist_ok=True)
+
+    # 在 pop 前读 _timings（运营埋点用）
+    _chain_timings = knowledge.get("meta", {}).get("_timings", {})
+    _t_parse = round(sum(_chain_timings.values()), 2) if _chain_timings else 0
+    knowledge["meta"].pop("_timings", None)
+
+    _t_json0 = _t_usage.time()
+    (internal_dir / "knowledge_draft.json").write_text(
+        json.dumps(knowledge, ensure_ascii=False, indent=2),
+        encoding="utf-8", newline="\n",
+    )
+
+    # AI 摘要（v1.22 渐进式披露契约：自足摘要，细节走 run.py inspect）
+    summary_text = _generate_ai_summary(
+        knowledge, merged_rules, parsed_map,
+        knowledge["topology"], knowledge["field_mappings"],
+        knowledge["quality"], knowledge["data_flow"],
+    )
+    (internal_dir / "knowledge_summary.md").write_text(summary_text, encoding="utf-8", newline="\n")
+    _t_json_summary = round(_t_usage.time() - _t_json0, 2)
+
+    # ── 三件套 ──
+    print(f"\n[Step 4] 生成视图...")
+    _t_view0 = _t_usage.time()
+    _view_exc = None
+    try:
+        from view_generator import (generate_mapping, generate_asset_report,
+                                    generate_tech_design)
+        generate_mapping(knowledge, output_dir)
+        generate_asset_report(knowledge, output_dir)
+        generate_tech_design(knowledge, output_dir)
+    except Exception as e:
+        _view_exc = e
+        print(f"  [WARN] 视图生成失败: {e}", file=sys.stderr)
+    _t_view = round(_t_usage.time() - _t_view0, 2)
+
+    stats = knowledge["field_mappings"]["statistics"]
+    target_table = knowledge["meta"]["target_table"]
+    print(f"\n=== 完成 ===")
+    print(f"输出目录: {output_dir}")
+    print(f"规则组数: {group_count}")
+    print(f"步骤数: {len(merged_rules)}")
+    print(f"字段数: {stats['total_in_sql']}")
+    print(f"目标表: {target_table}")
+    print(f"\n已生成:")
+    print(f"  - mapping.xlsx / asset_report.html / tech_design.md")
+    print(f"  - _internal/knowledge_draft.json, _internal/knowledge_summary.md")
+
+    # ── 运营埋点：记录本次链路分析 ──
+    try:
+        from usage import (record as _record_usage,
+                           _error_message as _msg_err)
+        _record_usage({
+            "command": "analyze-chain",
+            "input_type": input_type,
+            "asset": asset_label,
+            "trace_id": trace_id,
+            "target_table": target_table,
+            "rule_count": group_count,
+            "field_count": stats.get("total_in_sql", 0) if isinstance(stats, dict) else 0,
+            "elapsed_sec": round(_t_usage.time() - t0, 2),
+            "elapsed_detail": {
+                "parse": _t_parse,
+                "ddl_discovery": timings.get("ddl_discovery", 0),
+                "lts_discovery": timings.get("lts_discovery", 0),
+                "write_json_and_summary": _t_json_summary,
+                "view_generation": _t_view,
+            },
+            "status": "partial" if _view_exc else "ok",
+            "error_type": "view_generation_error" if _view_exc else "",
+            "error_message": _msg_err(_view_exc),
+            "quality_issues": len(knowledge.get("quality", {}).get("issues", [])),
+        })
+    except Exception:
+        pass
+
+
+def _run_chain_collection(args, input_path: Path, t0, trace_id):
+    """collection 形态：逐子目录装配 → 闭环建图 → 合并 → 共尾。"""
+    import time as _t_usage
+
+    print(f"=== 多规则组链路分析（资产集合目录，闭环建图） ===")
+    print(f"输入: {input_path}")
+
+    # 子目录集合：父目录直接含 xlsx = 单资产（1 组链）；否则逐子目录入集
+    if any(input_path.glob("*.xlsx")):
+        child_dirs = [input_path]
+        print("  单资产制品目录（1 组链；只需单资产三件套时用 /analyze 即可）")
+    else:
+        child_dirs = [c for c in sorted(input_path.iterdir())
+                      if c.is_dir() and _detect_input_mode(c) in ("artifact_dir", "yml_dir")]
+
+    bundles = []
+    skipped = []
+    for c in child_dirs:
+        print(f"\n── 装配子目录: {c.name} ──")
+        try:
+            b = _chain_load_child(c)
+        except Exception as e:
+            # 单组装配失败（缺术加等）不中断其他组：披露后继续（闭环语义=用户给什么算什么）
+            print(f"  [WARN] 装配失败，跳过: {e}", file=sys.stderr)
+            skipped.append(c.name)
+            continue
+        if b is None:
+            skipped.append(c.name)
+            continue
+        bundles.append(b)
+    if skipped:
+        print(f"\n[分拣] 未入图子目录: {', '.join(skipped)}")
+    if not bundles:
+        print("[ERROR] 集合内无有效资产（每个子目录需含 execution_tasks.xlsx 制品目录或 *.yml）",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # 闭环建图
+    print(f"\n[Step 1] 闭环依赖建图（{len(bundles)} 组）...")
+    result = build_collection_graph(bundles)
+    endpoints = [g for g in result["groups"] if g.get("is_endpoint")]
+    print(f"  终点(写的表无人消费): {'、'.join(g['rule_group_en'] for g in endpoints) or '(无——疑似环)'}")
+    for g in result["groups"]:
+        indent = "    " * g["depth"]
+        tag = " [终点]" if g.get("is_endpoint") else ""
+        tables = ', '.join(g["all_target_tables"]) or g["target_table"]
+        print(f"  {indent}{g['rule_group_en']} → 写 {tables}{tag}")
+    if result["cycle_detected"]:
+        print("  [WARN] 检测到组间循环依赖（A读B、B读A）——拓扑容忍处理，结果供人工核对")
+    if result["not_found"]:
+        print(f"  外部源表(集合内无写入者，不追溯): {', '.join(result['not_found'])}")
+
+    # 合并
+    print(f"\n[Step 2] 合并规则组...")
+    group_data = {b["dir"]: {"rules": b["rules"],
+                             "target_fields": b["target_fields"],
+                             "group_variables": b["group_variables"],
+                             "label": b["label"]}
+                  for b in bundles}
+    merged_rules, merged_tf, merged_gv = _merge_group_data(result, group_data)
+    print(f"  合并后 {len(merged_rules)} 条规则（exec_sequence 已按拓扑重编号）")
+
+    # DDL：各组制品自带 stage 目录 + 显式 --ddl-dir，全并（engine 支持 str|list）
+    ddl_dirs = [b["ddl_stage_dir"] for b in bundles if b.get("ddl_stage_dir")]
+    if args.ddl_dir:
+        ddl_dirs.append(args.ddl_dir)
+    ddl_dir = ddl_dirs or ""
+
+    # LTS/DQ/I 视图：终点组语义——单终点挂载；多终点不挂（披露，按单资产 /analyze 看）
+    endpoint_bundles = [b for b in bundles
+                        if b["dir"] in {g["dir"] for g in endpoints}]
+    schedule_info = dq_rules = asset_info = None
+    dq_declared_absent = False
+    if len(endpoint_bundles) == 1:
+        ep = endpoint_bundles[0]
+        schedule_info = ep.get("schedule_info")
+        dq_rules = ep.get("dq_rules")
+        dq_declared_absent = dq_rules is None
+        asset_info = ep.get("asset_info")
+    elif endpoint_bundles:
+        print("  [LTS/DQ] 多终点：调度/DQ/I 视图不挂载（各组按单资产 /analyze 查看）")
+
+    chain_groups = [{"name": g["rule_group_en"], "target_table": g["target_table"],
+                     "all_target_tables": g.get("all_target_tables", []),
+                     "depth": g["depth"],
+                     "is_endpoint": bool(g.get("is_endpoint"))}
+                    for g in result["groups"]]
+
+    _chain_finish(
+        merged_rules=merged_rules, merged_target_fields=merged_tf,
+        merged_group_variables=merged_gv, ddl_dir=ddl_dir,
+        schedule_info=schedule_info, dq_rules=dq_rules,
+        dq_declared_absent=dq_declared_absent, asset_info=asset_info,
+        chain_groups=chain_groups, output_base=Path(args.output),
+        safe_name="chain_" + input_path.name,
+        t0=t0, trace_id=trace_id, input_type="artifact_collection",
+        asset_label=input_path.name, group_count=len(result["groups"]),
+        timings={"ddl_discovery": 0, "lts_discovery": 0},
+    )
+
+
 def main_chain():
-    """多规则组链路分析 CLI 入口。"""
+    """多规则组链路分析 CLI 入口（/analyze-chain）。
+
+    输入路由（命令区分：本入口拿到目录即按链路语义处理）：
+    - 制品形态（推荐）：资产集合目录（子目录=各资产制品目录，闭环建图）或
+      单资产制品目录（1 组链）
+    - legacy：最终 F 表 yml 规则组目录 / 表名 + --repo-root 代码仓追溯
+    """
     parser = argparse.ArgumentParser(
         description="多规则组链路分析（/analyze-chain）",
     )
     parser.add_argument("--input", required=True,
-                        help="最终 F 表规则组目录或表名")
+                        help="资产集合目录（推荐，子目录=各资产制品目录，自动识别依赖建全图）"
+                             "｜单资产制品目录｜最终F表yml规则组目录/表名（legacy）")
     parser.add_argument("--output", required=True,
                         help="输出基础目录")
     parser.add_argument("--repo-root", default="",
-                        help="代码仓根目录（含 BFT/），不指定则自动从 input 向上找")
+                        help="代码仓根目录（legacy yml 输入用，含 BFT/；不指定则自动从 input 向上找）")
     parser.add_argument("--ddl-dir", default="",
-                        help="DDL 文件目录（可选）")
+                        help="DDL 文件目录（可选；制品形态叠加在各组自带 DDL 之上）")
     args = parser.parse_args()
 
     # ── 运营埋点：记录开始时刻 ──
@@ -1699,6 +2099,19 @@ def main_chain():
 
     input_path = Path(args.input)
 
+    # 单 xlsx 文件不是本命令的输入形态（/analyze 的形态 2）
+    if input_path.is_file():
+        print("[ERROR] analyze-chain 的输入是目录（资产集合/单资产目录）或表名；"
+              "单个术加制品包请用 /analyze", file=sys.stderr)
+        sys.exit(2)
+
+    # ── 制品形态：目录且非 yml 规则组目录 → collection（含单资产目录）──
+    if input_path.is_dir() and not (any(input_path.glob("*.yml"))
+                                    or any(input_path.glob("*.yaml"))):
+        _run_chain_collection(args, input_path, _t0_usage, _trace_id)
+        return
+
+    # ╀─ legacy：yml 规则组目录 / 表名 + 代码仓追溯 ──
     # 定位代码仓根
     if args.repo_root:
         repo_root = Path(args.repo_root)
@@ -1721,7 +2134,7 @@ def main_chain():
             sys.exit(1)
         final_group_dir = Path(info["dir"])
 
-    print(f"=== 多规则组链路分析 ===")
+    print(f"=== 多规则组链路分析（legacy 代码仓追溯） ===")
     print(f"最终规则组: {final_group_dir.name}")
     print(f"代码仓根: {repo_root}")
 
@@ -1773,118 +2186,26 @@ def main_chain():
             except Exception:
                 pass
 
-    # 分析
-    print(f"\n[Step 3] 分析完整链路...")
-    dialect = detect_dialect(merged_rules)
-    knowledge, parsed_map = analyze_pipeline(
-        merged_rules, merged_target_fields, merged_group_variables, dialect,
-        ddl_dir=ddl_dir, source_file="",
-        rule_group_code="CHAIN",
-    )
-
-    # 标记这是多规则组链路分析（供报告区分）
-    knowledge["meta"]["is_multi_group"] = True
-    knowledge["meta"]["chain_groups"] = [
+    chain_groups = [
         {"name": g["rule_group_en"], "target_table": g["target_table"],
          "all_target_tables": g.get("all_target_tables", [g["target_table"].lower()] if g["target_table"] else []),
          "depth": g["depth"]}
         for g in sorted(result["groups"], key=lambda x: x["depth"])
     ]
-    # 注入 LTS 调度信息
-    if schedule_info:
-        knowledge["meta"]["schedule"] = schedule_info
-    # 发现并注入 DQ 质量检查规则
-    _chain_target = knowledge.get("meta", {}).get("target_table", "")
-    if _chain_target:
-        try:
-            _t_dq0 = _t_usage.time()
-            dq_rules = _discover_dq_from_repo(final_group_dir, _chain_target)
-            if dq_rules:
-                knowledge["meta"]["dq_rules"] = dq_rules
-                print(f"  [DQ] 发现 {len(dq_rules)} 条质量检查规则")
-        except Exception:
-            pass
 
-    # 输出
-    safe_name = "chain_" + final_group_dir.name
-    output_dir = Path(args.output) / safe_name
-    internal_dir = output_dir / "_internal"
-    internal_dir.mkdir(parents=True, exist_ok=True)
-
-    # 在 pop 前读 _timings（运营埋点用）
-    _chain_timings = knowledge.get("meta", {}).get("_timings", {})
-    _t_parse = round(sum(_chain_timings.values()), 2) if _chain_timings else 0
-    knowledge["meta"].pop("_timings", None)
-
-    _t_json0 = _t_usage.time()
-    output_file = internal_dir / "knowledge_draft.json"
-    output_file.write_text(
-        json.dumps(knowledge, ensure_ascii=False, indent=2),
-        encoding="utf-8", newline="\n",
+    _chain_finish(
+        merged_rules=merged_rules, merged_target_fields=merged_target_fields,
+        merged_group_variables=merged_group_variables, ddl_dir=ddl_dir,
+        schedule_info=schedule_info, dq_rules=None,
+        dq_declared_absent=False, asset_info=None,
+        chain_groups=chain_groups, output_base=Path(args.output),
+        safe_name="chain_" + final_group_dir.name,
+        t0=_t0_usage, trace_id=_trace_id,
+        input_type="yml_dir" if input_path.is_dir() else "table_name",
+        asset_label=final_group_dir.name, group_count=len(result["groups"]),
+        timings={"ddl_discovery": _t_ddl, "lts_discovery": _t_lts},
+        dq_discover=lambda tgt: _discover_dq_from_repo(final_group_dir, tgt),
     )
-
-    # 生成 AI 摘要
-    summary_text = _generate_ai_summary(
-        knowledge, merged_rules, parsed_map,
-        knowledge["topology"], knowledge["field_mappings"],
-        knowledge["quality"], knowledge["data_flow"],
-    )
-    (internal_dir / "knowledge_summary.md").write_text(summary_text, encoding="utf-8", newline="\n")
-    _t_json_summary = round(_t_usage.time() - _t_json0, 2)
-
-    # 生成三件套（mapping + asset_report + tech_design）
-    print(f"\n[Step 4] 生成视图...")
-    _t_view0 = _t_usage.time()
-    _view_exc = None
-    try:
-        from view_generator import (generate_mapping, generate_asset_report,
-                                    generate_tech_design)
-        generate_mapping(knowledge, output_dir)
-        generate_asset_report(knowledge, output_dir)
-        generate_tech_design(knowledge, output_dir)
-    except Exception as e:
-        _view_exc = e
-        print(f"  [WARN] 视图生成失败: {e}", file=sys.stderr)
-    _t_view = round(_t_usage.time() - _t_view0, 2)
-
-    stats = knowledge["field_mappings"]["statistics"]
-    target_table = knowledge["meta"]["target_table"]
-    print(f"\n=== 完成 ===")
-    print(f"输出目录: {output_dir}")
-    print(f"规则组数: {len(result['groups'])}")
-    print(f"步骤数: {len(merged_rules)}")
-    print(f"字段数: {stats['total_in_sql']}")
-    print(f"目标表: {target_table}")
-    print(f"\n已生成:")
-    print(f"  - mapping.xlsx / asset_report.html / tech_design.md")
-    print(f"  - _internal/knowledge_draft.json, _internal/knowledge_summary.md")
-
-    # ── 运营埋点：记录本次链路分析 ──
-    try:
-        from usage import record as _record_usage
-        _record_usage({
-            "command": "analyze-chain",
-            "input_type": "yml_dir" if input_path.is_dir() else "table_name",
-            "asset": final_group_dir.name,
-            "trace_id": _trace_id,
-            "target_table": target_table,
-            "rule_count": len(result["groups"]),
-            "field_count": stats.get("total_in_sql", 0) if isinstance(stats, dict) else 0,
-            "elapsed_sec": round(_t_usage.time() - _t0_usage, 2),
-            "elapsed_detail": {
-                "parse": _t_parse,
-                "ddl_discovery": _t_ddl,
-                "lts_discovery": _t_lts,
-                "write_json_and_summary": _t_json_summary,
-                "view_generation": _t_view,
-            },
-            "status": "partial" if _view_exc else "ok",
-            "error_type": "view_generation_error" if _view_exc else "",
-            "error_message": _msg_err(_view_exc),
-            "quality_issues": len(knowledge.get("quality", {}).get("issues", [])),
-        })
-    except Exception:
-        pass
 
 
 # ═══════════════════════════════════════════════════════════════

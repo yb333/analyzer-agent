@@ -110,6 +110,8 @@ def run_from_dir(dir_path, *, include_dq: bool = True, channel: str = "facts",
         except ManifestError as e:
             raise AssemblyError(f"[{channel}] DDL 装配失败:\n{e}") from None
         ddl_dir = str(_stage_root)
+        # chain collection 场景：各组 DDL stage 目录要传给合并分析（engine 多目录）
+        print(f"  [DDL] stage 目录: {ddl_dir}")
 
     # ── 引擎 ──
     sql_texts = [r.query_sql for r in rules if r.query_sql]
@@ -150,4 +152,7 @@ def run_from_dir(dir_path, *, include_dq: bool = True, channel: str = "facts",
         "raw": raw, "rules": rules, "schedule_info": schedule_info,
         "dq_rules": dq_rules, "knowledge": knowledge, "engine_ctx": engine_ctx,
         "parsed_map": parsed_map,
+        # DDL stage 目录（无 DDL 时 ""）——analyze-chain collection 收集各组
+        # stage 目录列表传给合并分析（engine 的 ddl_dir 支持 str|list）
+        "ddl_stage_dir": ddl_dir,
     }

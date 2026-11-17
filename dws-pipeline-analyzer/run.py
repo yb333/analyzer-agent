@@ -65,6 +65,9 @@ def check_dependencies():
 
 
 def main():
+    # analyze-chain → analyzer --chain（命令面统一：/analyze-chain 的脚本入口直接可跑）
+    if len(sys.argv) > 1 and sys.argv[1] == "analyze-chain":
+        sys.argv = [sys.argv[0], "analyzer", "--chain"] + sys.argv[2:]
     # 纯 stdlib 子命令跳过依赖自检（inspect 只读 JSON，不需要 openpyxl/sqlglot）
     if len(sys.argv) < 2 or sys.argv[1] not in NO_DEP_SCRIPTS:
         check_dependencies()
